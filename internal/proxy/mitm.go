@@ -335,11 +335,10 @@ func upstreamHost(target string) (name, hostHeader string) {
 }
 
 // sameHost reports whether a request's Host header names the CONNECT
-// target: the same name, case and a trailing dot aside, and the same
-// port, 443 when the header gives none.
+// target: the same host and port in any spelling (creds.CanonHost and
+// CanonPort), 443 when the header gives none.
 func sameHost(header, target string) bool {
 	hh, hp := creds.SplitHost(header)
 	th, tp := creds.SplitHost(target)
-	norm := func(h string) string { return strings.ToLower(strings.TrimSuffix(h, ".")) }
-	return hh != "" && norm(hh) == norm(th) && hp == tp
+	return hh != "" && creds.CanonHost(hh) == creds.CanonHost(th) && creds.CanonPort(hp) == creds.CanonPort(tp)
 }

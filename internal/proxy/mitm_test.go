@@ -216,6 +216,9 @@ func TestSameHost(t *testing.T) {
 		{"evil.example", "api.github.com:443", false},
 		{"", "api.github.com:443", false},
 		{"127.0.0.1:9443", "127.0.0.1:9443", true},
+		{"api.example:0443", "api.example:443", true},
+		{"[0:0::1]:443", "[::1]:443", true},
+		{"[0:0::1]:8443", "[::1]:443", false},
 	} {
 		if got := sameHost(c.header, c.target); got != c.want {
 			t.Errorf("sameHost(%q, %q) = %v, want %v", c.header, c.target, got, c.want)
