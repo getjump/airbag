@@ -42,10 +42,24 @@ $ airbag diff
 
 - [ ] Steps list the agent's tool calls with the files each one changed;
 - [ ] Network shows `api.anthropic.com` and any denied hosts;
-- [ ] the real files are unchanged (`git status` is clean).
+- [ ] the real files are unchanged (`git status` is clean);
+- [ ] `airbag review --attention` lists the waiting push and any flagged change;
+- [ ] `airbag review --json | jq -r .schema` prints `airbag.review/v1`.
 
-Then either `airbag apply` (the files land, the push runs after confirmation)
-or `airbag discard`.
+## Iterate, then take the result
+
+- [ ] `airbag run --session last -- claude --continue` continues on the same
+  branch: the agent sees its earlier edits, and review numbers the steps on.
+
+Then one of:
+
+- [ ] `airbag apply`: the files land, the push runs after confirmation; then
+  `airbag rollback` puts the files back as they were and the changes back into
+  the session (`airbag review` shows them again);
+- [ ] `airbag apply --branch try-1`: `git log try-1` has the agent's commits and
+  one commit with what it left uncommitted; `git status` and the current branch
+  are unchanged, and the queued push is reported for you to run yourself;
+- [ ] `airbag discard`: the session's branch is gone, the real files untouched.
 
 ## Resume
 

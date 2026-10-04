@@ -1,8 +1,10 @@
 # airbag
 
-**Approve outcomes, not commands.** Run your coding agent without permission
-prompts inside a copy-on-write branch of your machine. Review one diff at the end,
-then apply it or throw it away.
+**Approve outcomes, not commands.** Start a long agent task without permission
+prompts and do something else. The agent works in a copy-on-write branch of your
+workspace and `$HOME`, `git push` waits in an outbox, and every host it reaches is
+logged. When you come back, one review shows what changed and what is waiting:
+apply it, take it onto a git branch, or throw it away.
 
 ```console
 $ airbag run -- claude --dangerously-skip-permissions
@@ -19,22 +21,19 @@ script, so it is repeatable without an account (`demo/demo.sh`). `agent ▶` lin
 the calls the model makes, `agent ◀` what the agent sends back. More scenes, one GIF
 each, in `demo/`: `sandbox`, `codex`, `ask`, `apply`, `mirror` (`demo/scenes.sh NAME`).
 
-## How it compares: bubblewrap, built-in sandboxes, branch tools
+## How it compares
 
-Isolation is not the difference. On Linux, Claude Code's and Codex's built-in
-sandboxes run on bubblewrap, and airbag uses the same kernel namespaces. What
-differs is when you decide, and what you get to see.
+Isolation is not the difference. Claude Code's and Codex's built-in sandboxes run
+on bubblewrap on Linux and Seatbelt on macOS, and airbag uses the same kernel
+features. What differs is when you decide, and what you get to see.
 
 Say you ask an agent to clean up a repository, and it deletes `src`, reads
 `.env`, tries to post it to a paste site, appends a line to `~/.bashrc` and
 pushes.
 
-- **bubblewrap:** you decide up front. Mount the workspace read-write, and the
-  files are gone with no record of what happened; read-only, and the agent's
-  work is lost when it exits. The network is on or off.
 - **Built-in sandbox:** the agent stops for approval as it goes: a write
   outside the workspace, a new domain. You answer prompts mid-run and never see
-  the whole result at once.
+  the whole result at once, and writes inside the workspace land in place.
 - **airbag:** the agent runs without stopping in a branch of your machine.
   Afterwards one review shows all of it: `src` deleted, `.env` read, the upload
   blocked, the `~/.bashrc` line flagged as persistence, the push waiting in the
@@ -42,18 +41,7 @@ pushes.
   left. (A request to an allowed host would have happened when it was made; see
   below.)
 
-| | bubblewrap | built-in sandbox | airbag |
-|---|---|---|---|
-| Isolation | namespaces | bubblewrap (Codex adds Landlock, seccomp) | namespaces |
-| Files | read-write in place, or thrown away | workspace in place, asks outside it | copy-on-write branch of workspace and `$HOME`; apply all, part or none |
-| Network | on or off | domain allowlist through a proxy | allowlist, every host logged, package mirror, cut on a secret read |
-| Irreversible actions | not handled | blocked or asked | queued in the outbox, run after review |
-| Policies | mounts | tools, commands, domains | CEL rules over effects; `ask` with `airbag approve` |
-| Secrets | hide paths | hide paths | a read labels the session and narrows egress; values masked in shell output |
-| One view of what changed | no | no | effect log, steps per tool call, hosts, packages |
-| You decide | before the run | during the run | after the run, once |
-
-Other tools also let you decide after the run, for files at least:
+Tools that also let you decide after the run, at least for files:
 
 | | Files | Network | Pushes, publishes, API calls | Secrets |
 |---|---|---|---|---|
@@ -62,14 +50,15 @@ Other tools also let you decide after the run, for files at least:
 | [AgentFS](https://github.com/tursodatabase/agentfs) | copy-on-write branch of the working directory (SQLite delta), `agentfs diff`; no apply command | not controlled | run as they happen | not handled |
 | [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) in clone mode, or [Code Airlock](https://github.com/Trivo25/code-airlock) on top of it | microVM with a private clone, host repo read-only; review and merge with `git fetch`, `git diff` | allowlist through a proxy | not held | proxy injects credentials, values stay outside the VM |
 | Claude Code sandbox and checkpoints | writes in the workspace, `/rewind` restores the agent's own file edits, not Bash's | allowlist through a proxy, asks for new domains | auto mode's classifier blocks some | denied or masked behind a proxy |
-| airbag | copy-on-write branch of the workspace and `$HOME`; persistence flagged; apply all, part or none | allowlist, every host logged, mirror, cut on a secret read | queued in the outbox, run after review | hidden; a read labels the session and narrows egress |
+| airbag | copy-on-write branch of the workspace and `$HOME`; persistence flagged; apply all, part or none, or onto a git branch; `rollback` | allowlist, every host logged, mirror, cut on a secret read | queued in the outbox, run after review | hidden; a read labels the session and narrows egress |
 
 What airbag adds is around the branch rather than the branch itself: the outbox
 for actions that leave the machine, the `$HOME` branch with persistence called out,
 a label that follows a secret read through the rest of the session, and one review
-that works the same for any agent, on your own toolchain without a VM. Whether that
-beats a VM clone or nono for a given team is a matter of measuring, not of this
-table. Tools that govern effects at runtime in depth, such as
+that works the same for any agent, on your own toolchain without a VM. The result
+goes onto your files or onto a git branch, and an apply can be rolled back.
+Whether that beats a VM clone or nono for a given team is a matter of measuring,
+not of this table. Tools that govern effects at runtime in depth, such as
 [agentsh](https://github.com/canyonroad/agentsh) (file, process and network policy
 with approvals, an LLM proxy with DLP), go further than airbag's policies do. (As of
 October 2026, from each project's documentation.)
@@ -199,7 +188,8 @@ branch of the repository instead: the agent's commits, fetched with their histor
 then one commit with whatever it left uncommitted (files your `.gitignore` excludes
 stay out). Your index, uncommitted edits, `.git/config` and hooks are not touched,
 and the agent's git config and hooks are never carried over. Review and merge it
-with git as you would a colleague's branch. Changes in `~` stay in the session.
+with git as you would a colleague's branch. Changes in `~` stay in the session, and
+a queued push is left to you: the work is on the new branch now.
 
 ## Policies
 
@@ -297,16 +287,17 @@ Each session keeps one SQLite database, `effects.db`: the effect log and the
 outbox, with the history of every intent's status. Triggers make all of it
 append-only, so `sqlite3` answers questions the review does not.
 
-Not yet: secret handles (the agent sees a placeholder, airbag substitutes the
-value at an allowed boundary), passing Codex's SQLite state through (transcripts
-in `~/.codex/sessions` survive a discard, its thread index and memories do not). Tools that ignore the mirror settings cannot reach registries; `--allow HOST`
-opens one directly. After a secret read the mirror serves its cache and what the
-lock files pin; pnpm-lock.yaml, poetry.lock and hashed requirements files are not
-read yet.
+Not yet: passing Codex's SQLite state through (transcripts in `~/.codex/sessions`
+survive a discard, its thread index and memories do not), and pins from
+`pnpm-lock.yaml`, `poetry.lock` and hashed requirements files for the mirror after a
+secret read. Tools that ignore the mirror settings cannot reach registries;
+`--allow HOST` opens one directly.
 
-What is next and what is deliberately left for later, with reasons:
-[docs/roadmap.md](docs/roadmap.md). How to tell whether airbag is worth using,
-against the alternatives: [docs/evaluation.md](docs/evaluation.md).
+Deliberately left for later, each with the reason and what would bring it back
+([docs/roadmap.md](docs/roadmap.md)): secret handles and TLS termination for model
+APIs, data flow labels per value, syscall-level control, savepoints per tool call.
+Before more features comes a measurement on real work against the alternatives:
+[docs/evaluation.md](docs/evaluation.md).
 
 ## Threat model
 

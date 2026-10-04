@@ -3,7 +3,8 @@
 airbag is built on Linux namespaces, overlayfs and FUSE; macOS has none of
 them. This page records how the agents and agent sandboxes that run natively
 on macOS do it (as of October 2026), the native design that follows for
-airbag, and the Linux VM setup that works until then.
+airbag, the prototype of it, and the Linux VM setup, which stays the tested way
+until the prototype has run on a real Mac.
 
 ## How others sandbox agents on macOS
 
@@ -105,9 +106,10 @@ task, which Seatbelt denials they hit (`log stream --predicate 'eventMessage
 CONTAINS "airbag-s-"'` shows them with the session's tag), and how long the clone
 takes on a large repository.
 
-## Until then: a Linux VM
+## The tested way: a Linux VM
 
-If you need airbag on a Mac before the native port, run it in a Linux VM.
+Until the prototype has run on a real Mac, the way to use airbag there that the
+tests cover is a Linux VM.
 
 **OrbStack.** Create an Ubuntu machine and install airbag inside it. Mac files
 are under `/mnt/mac`; a server on the Mac is reachable as `host.orb.internal`.
