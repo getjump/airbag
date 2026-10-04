@@ -61,7 +61,11 @@ type File struct {
 	// rule would not take them (internal/secrets). Only the user's own
 	// file may name them: a source can run a command on the host.
 	Secrets []Secret `yaml:"secrets"`
-	Rules   []Rule   `yaml:"rules"`
+	// MaskModelRequests: the proxy masks the registered secret values
+	// in the bodies of requests to model APIs. Only the user's own
+	// file may set it, either way.
+	MaskModelRequests *bool  `yaml:"mask_model_requests"`
+	Rules             []Rule `yaml:"rules"`
 }
 
 // Secret is one entry of `secrets:`: a name and where its value is
@@ -77,8 +81,10 @@ type Policy struct {
 	Defer       []Pattern
 	Credentials []creds.Binding
 	Secrets     []Secret
-	Rules       []Rule
-	Sources     []string
+	// MaskModelRequests is on when the user's file turns it on.
+	MaskModelRequests bool
+	Rules             []Rule
+	Sources           []string
 }
 
 // Builtin: effects that cannot be undone and cannot wait in the outbox.
@@ -160,6 +166,12 @@ func Load(workspace, home string) (*Policy, error) {
 		}
 		if len(f.Secrets) > 0 && path != userFile {
 			return nil, fmt.Errorf("%s: secrets can only be set in %s: their sources run on your machine", path, userFile)
+		}
+		if f.MaskModelRequests != nil {
+			if path != userFile {
+				return nil, fmt.Errorf("%s: mask_model_requests can only be set in %s: a repository must not decide what reaches your model API", path, userFile)
+			}
+			p.MaskModelRequests = *f.MaskModelRequests
 		}
 		for _, e := range f.Secrets {
 			if !creds.ValidName(e.Name) {

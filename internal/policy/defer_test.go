@@ -80,3 +80,24 @@ func TestCredentialsUserOnly(t *testing.T) {
 		t.Fatalf("a repository's credentials were accepted: %v", err)
 	}
 }
+
+// Masking model requests is the user's choice: their own file turns it
+// on; a repository's file can neither turn it on nor off.
+func TestMaskModelRequestsUserOnly(t *testing.T) {
+	ws, home := t.TempDir(), t.TempDir()
+	user := filepath.Join(home, ".config", "airbag", "airbag.yaml")
+	_ = os.MkdirAll(filepath.Dir(user), 0o755)
+	if p, err := Load(ws, home); err != nil || p.MaskModelRequests {
+		t.Fatalf("on without being asked: %+v %v", p, err)
+	}
+	_ = os.WriteFile(user, []byte("mask_model_requests: true\n"), 0o644)
+	if p, err := Load(ws, home); err != nil || !p.MaskModelRequests {
+		t.Fatalf("the user's file did not turn it on: %+v %v", p, err)
+	}
+	for _, v := range []string{"true", "false"} {
+		_ = os.WriteFile(filepath.Join(ws, "airbag.yaml"), []byte("mask_model_requests: "+v+"\n"), 0o644)
+		if _, err := Load(ws, home); err == nil || !strings.Contains(err.Error(), "mask_model_requests can only be set in "+user) {
+			t.Fatalf("a repository's mask_model_requests: %s was accepted: %v", v, err)
+		}
+	}
+}
