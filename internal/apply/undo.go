@@ -30,7 +30,9 @@ import (
 //     applies everything it picked or nothing;
 //   - `airbag rollback` undoes the last generation: the user's versions
 //     come back and the agent's go back into the session, to apply again
-//     or discard. A file changed after the apply is left as it is.
+//     or discard. A file changed after the apply is left as it is, and
+//     so is a replaced directory that holds anything the rollback did
+//     not take out; their previous versions stay in the generation.
 
 type genEntry struct {
 	Layer string      `json:"layer"`
@@ -47,11 +49,14 @@ type genEntry struct {
 
 type generation struct {
 	dir      string
-	Clone    bool       `json:"clone,omitempty"` // the branch is a full copy, not an upper layer
-	Session  string     `json:"session"`
-	Started  time.Time  `json:"started"`
-	Complete bool       `json:"complete"`
-	Entries  []genEntry `json:"entries"`
+	Clone    bool      `json:"clone,omitempty"` // the branch is a full copy, not an upper layer
+	Session  string    `json:"session"`
+	Started  time.Time `json:"started"`
+	Complete bool      `json:"complete"`
+	// Partial: rolled back except Entries, which were left as they were;
+	// their previous versions are kept under saved/.
+	Partial bool       `json:"partial,omitempty"`
+	Entries []genEntry `json:"entries"`
 }
 
 func generationsDir(s *session.Session) string { return filepath.Join(s.Dir, "undo") }
@@ -180,6 +185,15 @@ func (g *generation) finish() error {
 // it had to leave.
 func (g *generation) rollback(out io.Writer) (left int, err error) {
 	var dirs []string // directories the apply created, removed last, deepest first
+	var kept []genEntry
+	keep := func(e genEntry, why string) {
+		fmt.Fprintf(out, "  left as is (%s): %s\n", why, e.Path)
+		if _, err := os.Lstat(e.Saved); e.Saved != "" && err == nil {
+			fmt.Fprintf(out, "    its version from before the apply is kept at %s\n", e.Saved)
+		}
+		kept = append(kept, e)
+		left++
+	}
 	for i := len(g.Entries) - 1; i >= 0; i-- {
 		e := g.Entries[i]
 		dirs = append(dirs, e.Made...)
@@ -191,12 +205,19 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			if e.Saved != "" && !moved {
 				continue
 			}
-		} else {
-			if fingerprint(e.Path) != e.After {
-				fmt.Fprintf(out, "  left as is (changed after the apply): %s\n", e.Path)
-				left++
-				continue
-			}
+		} else if fingerprint(e.Path) != e.After {
+			keep(e, "changed after the apply")
+			continue
+		}
+		// A replaced directory goes only once it is empty: by now the
+		// entries inside it that the apply made are gone, so whatever
+		// is left was added or kept after the apply, and is not ours to
+		// remove.
+		if e.Type == fs.ModeDir && e.Saved != "" && !emptyOrAbsent(e.Path) {
+			keep(e, "holds files added or changed after the apply")
+			continue
+		}
+		if e.After != "" {
 			if err := giveBack(e, g.Clone); err != nil {
 				return left, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err)
 			}
@@ -220,7 +241,29 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	for _, d := range dirs {
 		_ = os.Remove(d) // only if empty: a file the user added keeps it
 	}
-	return left, os.RemoveAll(g.dir)
+	if len(kept) == 0 {
+		return left, os.RemoveAll(g.dir)
+	}
+	// Keep what was left, with its previous versions, so nothing from
+	// before the apply is lost and a later rollback can try again.
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+	g.Entries, g.Complete, g.Partial = kept, true, true
+	return left, g.save()
+}
+
+// emptyOrAbsent: nothing at p, or an empty directory.
+func emptyOrAbsent(p string) bool {
+	st, err := os.Lstat(p)
+	if err != nil {
+		return true
+	}
+	if !st.IsDir() {
+		return false
+	}
+	es, err := os.ReadDir(p)
+	return err == nil && len(es) == 0
 }
 
 // gone: the path is not there, or a parent is not a directory.
@@ -343,9 +386,14 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	n, partial := len(g.Entries), g.Partial
 	left, err := g.rollback(out)
 	if err != nil {
 		return err
+	}
+	if partial {
+		fmt.Fprintf(out, "Session %s: %d of the paths left by the last rollback are rolled back now; %d stay as they are.\n", s.ID, n-left, left)
+		return nil
 	}
 	if s.Status == session.StatusApplied {
 		s.Status = session.StatusStopped
@@ -354,7 +402,10 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	if err := s.Save(); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Rolled back %d changes of session %s; they are back in the session (airbag review).\n", len(g.Entries)-left, s.ID)
+	fmt.Fprintf(out, "Rolled back %d changes of session %s; they are back in the session (airbag review).\n", n-left, s.ID)
+	if left > 0 {
+		fmt.Fprintf(out, "%d left as they are; their versions from before the apply stay in the session until it is discarded.\n", left)
+	}
 	for _, d := range done {
 		fmt.Fprintf(out, "  not undone: %s\n", d)
 	}
