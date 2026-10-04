@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 
@@ -68,8 +71,6 @@ var jsonConfigs = []jsonConfig{
 			"numStartups", "hasCompletedOnboarding", "lastOnboardingVersion",
 			"tipsHistory", "tipLifetimeShownCounts", "tipsHistoryByCommand",
 			"lastReleaseNotesSeen", "lastClawdEntranceVersion",
-			// Account metadata recorded by a login inside the session.
-			"oauthAccount",
 			// Per-project counters an interactive session rewrites on exit.
 			"projects.*.lastSessionId", "projects.*.lastStartTime", "projects.*.lastVersionBase",
 			"projects.*.lastGracefulShutdown", "projects.*.lastCost", "projects.*.lastDuration",
@@ -84,8 +85,11 @@ var jsonConfigs = []jsonConfig{
 		persist: []string{
 			"mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "mcpContextUris",
 			"permissions", "allowedTools", "hooks", "env", "apiKeyHelper",
-			// Answers to "use this API key from the environment?".
-			"customApiKeyResponses",
+			// Answers to "use this API key from the environment?", and the
+			// account a login inside the session recorded: which account
+			// (and organization, whose managed settings later sessions
+			// fetch) the host's next session uses.
+			"customApiKeyResponses", "oauthAccount",
 			// Per project: tool permissions, MCP servers, folder trust, and
 			// approval of CLAUDE.md imports from outside the project.
 			"projects.*.allowedTools", "projects.*.mcpServers", "projects.*.mcpContextUris",
@@ -233,38 +237,60 @@ func WriteBackConfigs(s *session.Session) []string {
 	var msgs []string
 	saved := false
 	for i := range jsonConfigs {
-		cf := &jsonConfigs[i]
-		branchPath := filepath.Join(s.HomeUpper(), cf.path)
-		branchRaw, err := readRegular(branchPath)
-		if err != nil {
-			continue // not changed, or not a regular file the agent could point elsewhere
+		msg, changed := writeBack(s, &jsonConfigs[i], since)
+		if msg != "" {
+			msgs = append(msgs, msg)
 		}
-		branch, err := topLevel(branchRaw)
-		if err != nil {
-			continue // malformed in the branch: leave it there for review
+		saved = saved || changed
+	}
+	if saved {
+		if err := s.Save(); err != nil {
+			msgs = append(msgs, fmt.Sprintf("could not record the write-back: %v", err))
 		}
-		realPath := filepath.Join(s.Home, cf.path)
-		realRaw, rerr := readRegular(realPath)
+	}
+	return msgs
+}
+
+// errChanged: the real file changed between reading it and replacing it.
+var errChanged = errors.New("changed while being written back")
+
+// writeBack does WriteBackConfigs for one file. It reads the real file,
+// merges the benign keys in, and replaces it only if the file is still
+// as read (inode, size, change time); otherwise it starts over, a few
+// times, so a concurrent host write is never lost. changed reports that
+// s.WroteBack changed.
+func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string, changed bool) {
+	branchPath := filepath.Join(s.HomeUpper(), cf.path)
+	branchRaw, err := readRegular(branchPath)
+	if err != nil {
+		return "", false // not changed, or not a regular file the agent could point elsewhere
+	}
+	branch, err := topLevel(branchRaw)
+	if err != nil {
+		return "", false // malformed in the branch: leave it there for review
+	}
+	realPath := filepath.Join(s.Home, cf.path)
+	for range 3 {
+		before, exists, err := fileState(realPath)
+		if err != nil {
+			return "", false // a symlink or other non-regular file: leave it alone
+		}
+		realRaw := []byte("{}")
 		real := map[string]json.RawMessage{}
-		switch {
-		case rerr == nil:
+		if exists {
+			if realRaw, err = readRegular(realPath); err != nil {
+				return "", false
+			}
 			if real, err = topLevel(realRaw); err != nil {
-				continue // malformed real file: never corrupt it
-			}
-		case !errors.Is(rerr, fs.ErrNotExist):
-			continue // a symlink or other non-regular file: leave it alone
-		default:
-			realRaw = []byte("{}")
-		}
-		// The host edited the real file during the session unless its
-		// change time is older, or it is exactly what airbag wrote back
-		// in an earlier run of this session.
-		hostEdited := false
-		if rerr == nil {
-			if fi, err := os.Lstat(realPath); err == nil && fi.ModTime().After(since) && s.WroteBack[realPath].SHA256 != digest(realRaw) {
-				hostEdited = true
+				return "", false // malformed real file: never corrupt it
 			}
 		}
+		// The host edited the real file during the session if it changed
+		// after the session began and is not exactly what airbag wrote
+		// back in an earlier run of this session.
+		prev, had := s.WroteBack[realPath]
+		hostEdited := exists && before.ctime > since.UnixNano() &&
+			!(had && prev.SHA256 == digest(realRaw) && prev.Ctime == before.ctime)
 		var wrote []string
 		for _, ch := range cf.diff(nil, realRaw, branchRaw) {
 			if ch.class != classWriteBack {
@@ -278,34 +304,73 @@ func WriteBackConfigs(s *session.Session) []string {
 				wrote = append(wrote, ch.String())
 			}
 		}
-		if len(wrote) > 0 {
-			if err := writeJSONAtomic(realPath, real); err != nil {
-				msgs = append(msgs, fmt.Sprintf("could not write %s back: %v", cf.path, err))
-				continue
-			}
-			msgs = append(msgs, fmt.Sprintf("~/%s: wrote back %d benign key(s): %s", cf.path, len(wrote), strings.Join(wrote, ", ")))
-			if s.WroteBack == nil {
-				s.WroteBack = map[string]session.WriteStamp{}
-			}
-			if st, ok := stamp(realPath); ok && !hostEdited {
-				s.WroteBack[realPath] = st
-			} else {
-				delete(s.WroteBack, realPath)
-			}
-			saved = true
+		if len(wrote) == 0 {
+			dropIfSame(cf, realPath, branchPath, branchRaw)
+			return "", false
 		}
-		// If the branch copy now matches the real file, only benign keys
-		// differed, so drop it: review shows nothing for this file.
-		if after, err := readRegular(realPath); err == nil && len(cf.diff(nil, after, branchRaw)) == 0 {
-			_ = os.Remove(branchPath)
+		out, err := marshalJSON(real, "  ")
+		if err != nil {
+			return fmt.Sprintf("could not write ~/%s back: %v", cf.path, err), false
 		}
+		out = append(out, '\n')
+		err = writeAtomic(realPath, out, func() bool {
+			now, nowExists, err := fileState(realPath)
+			return err == nil && nowExists == exists && now == before
+		})
+		if errors.Is(err, errChanged) {
+			continue
+		}
+		if err != nil {
+			return fmt.Sprintf("could not write ~/%s back: %v", cf.path, err), false
+		}
+		// Record the write: the bytes airbag wrote and the change time
+		// right after, unless the host had edited the file too, or wrote
+		// it again just now.
+		if s.WroteBack == nil {
+			s.WroteBack = map[string]session.WriteStamp{}
+		}
+		after, ok := stamp(realPath)
+		if ok && !hostEdited && after.SHA256 == digest(out) {
+			s.WroteBack[realPath] = after
+		} else {
+			delete(s.WroteBack, realPath)
+		}
+		dropIfSame(cf, realPath, branchPath, branchRaw)
+		sort.Strings(wrote)
+		return fmt.Sprintf("~/%s: wrote back %d benign key(s): %s", cf.path, len(wrote), strings.Join(wrote, ", ")), true
 	}
-	if saved {
-		if err := s.Save(); err != nil {
-			msgs = append(msgs, fmt.Sprintf("could not record the write-back: %v", err))
-		}
+	return fmt.Sprintf("~/%s kept changing on the host; its changes stay in the branch", cf.path), false
+}
+
+// dropIfSame removes the branch copy when it now matches the real file:
+// only benign keys differed, so review shows nothing for this file.
+func dropIfSame(cf *jsonConfig, realPath, branchPath string, branchRaw []byte) {
+	if after, err := readRegular(realPath); err == nil && len(cf.diff(nil, after, branchRaw)) == 0 {
+		_ = os.Remove(branchPath)
 	}
-	return msgs
+}
+
+// state identifies a version of a file for a compare-and-replace.
+type state struct {
+	ino   uint64
+	size  int64
+	ctime int64
+}
+
+// fileState returns the state of a regular file; exists is false when
+// there is none. Anything else (a symlink, a directory) is an error.
+func fileState(path string) (st state, exists bool, err error) {
+	var s unix.Stat_t
+	if err := unix.Lstat(path, &s); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return state{}, false, nil
+		}
+		return state{}, false, err
+	}
+	if s.Mode&unix.S_IFMT != unix.S_IFREG {
+		return state{}, false, errNotRegular
+	}
+	return state{ino: uint64(s.Ino), size: s.Size, ctime: s.Ctim.Nano()}, true, nil //nolint:unconvert // Ino is uint32 on some platforms
 }
 
 // digest is the hex SHA-256 of b, as recorded in session.WroteBack.
@@ -393,7 +458,8 @@ func configFlags(c Change) []string {
 		return nil
 	}
 	if !readable {
-		return []string{"not a readable regular JSON file"}
+		// Nothing can be told about its keys, so it counts as the worst.
+		return []string{"persist", "not a readable regular JSON file"}
 	}
 	byClass := map[keyClass][]string{}
 	for _, ch := range changes {
@@ -413,8 +479,14 @@ func configFlags(c Change) []string {
 }
 
 // topLevel parses a config file, which must be a JSON object: null or
-// any other value is malformed, so it stays in the branch for review.
+// any other value is malformed, so it stays in the branch for review. So
+// is text Go's decoder would change while reading: invalid UTF-8, and
+// escaped UTF-16 surrogates, which it turns into U+FFFD, so two keys the
+// agent's CLI tells apart could compare equal here.
 func topLevel(b []byte) (map[string]json.RawMessage, error) {
+	if !utf8.Valid(b) || surrogateEscape(b) {
+		return nil, errNotText
+	}
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
@@ -428,6 +500,31 @@ func topLevel(b []byte) (map[string]json.RawMessage, error) {
 // errNotRegular: the path is a symlink, a whiteout or another
 // non-regular file.
 var errNotRegular = errors.New("not a regular file")
+
+// errNotText: a config file holds bytes or escapes that would not
+// survive decoding unchanged.
+var errNotText = errors.New("not plain UTF-8 JSON text")
+
+// errTooLarge: a config file larger than maxConfig is not read at all,
+// rather than cut off where a prefix might still parse.
+var errTooLarge = errors.New("larger than airbag reads")
+
+const maxConfig = 16 << 20
+
+// surrogateEscape reports a \uD800-\uDFFF escape anywhere in b.
+func surrogateEscape(b []byte) bool {
+	for i := bytes.Index(b, []byte(`\u`)); i >= 0; {
+		if r := b[i+2:]; len(r) >= 2 && (r[0] == 'd' || r[0] == 'D') && strings.IndexByte("89abcdefABCDEF", r[1]) >= 0 {
+			return true
+		}
+		j := bytes.Index(b[i+2:], []byte(`\u`))
+		if j < 0 {
+			break
+		}
+		i += 2 + j
+	}
+	return false
+}
 
 // readRegular reads a file only if it is a regular file, without
 // following a symlink. The branch is written by the agent, so a symlink
@@ -450,7 +547,11 @@ func readRegular(path string) ([]byte, error) {
 	if !st.Mode().IsRegular() {
 		return nil, errNotRegular
 	}
-	return io.ReadAll(io.LimitReader(f, 16<<20))
+	b, err := io.ReadAll(io.LimitReader(f, maxConfig+1))
+	if err == nil && len(b) > maxConfig {
+		return nil, errTooLarge
+	}
+	return b, err
 }
 
 // object parses an object value; an absent value counts as an empty
@@ -553,36 +654,37 @@ func canon(b []byte) string {
 	return string(out)
 }
 
-// writeJSONAtomic writes obj to path through a temp file in the same
-// directory and a rename, keeping the file's mode. Unchanged keys keep
-// their exact values (they ride along as json.RawMessage); only the key
-// order is normalized.
-func writeJSONAtomic(path string, obj map[string]json.RawMessage) error {
-	out, err := marshalJSON(obj, "  ")
-	if err != nil {
-		return err
-	}
-	out = append(out, '\n')
+// writeAtomic writes data to path through a temp file in the same
+// directory, synced, and a rename, keeping the file's mode. unchanged is
+// checked right before the rename; when it reports false, nothing is
+// replaced and the error is errChanged.
+func writeAtomic(path string, data []byte, unchanged func() bool) error {
 	mode := os.FileMode(0o600)
-	if fi, err := os.Stat(path); err == nil {
+	if fi, err := os.Lstat(path); err == nil {
 		mode = fi.Mode().Perm()
 	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".airbag-cfg-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".airbag-cfg-*")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(tmp.Name()) }() // gone after the rename; on error, a scratch file
-	if _, err := tmp.Write(out); err != nil {
+	defer func() { _ = os.Remove(tmp.Name()) }() // gone after the rename; otherwise a scratch file
+	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close() // the write already failed
 		return err
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close() // the write already failed
+		_ = tmp.Close() // the chmod already failed
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close() // the sync already failed
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
+	}
+	if !unchanged() {
+		return errChanged
 	}
 	return os.Rename(tmp.Name(), path)
 }

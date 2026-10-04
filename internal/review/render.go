@@ -40,7 +40,8 @@ var homeNoise = []struct{ match, group, kind string }{
 	// they are not folded here; everything below is caches and logs.
 	{".claude/projects/", ".claude/", "agent state"}, {".claude/sessions/", ".claude/", "agent state"},
 	{".claude/session-env/", ".claude/", "agent state"}, {".claude/shell-snapshots/", ".claude/", "agent state"},
-	{".claude/file-history/", ".claude/", "agent state"}, {".claude/todos/", ".claude/", "agent state"},
+	// Not file-history/: a host /rewind writes it back into files.
+	{".claude/todos/", ".claude/", "agent state"},
 	{".claude/statsig/", ".claude/", "agent state"}, {".claude/backups/", ".claude/", "agent state"},
 	{".claude/debug/", ".claude/", "agent state"}, {".claude/ide/", ".claude/", "agent state"},
 	{".claude/plans/", ".claude/", "agent state"},
@@ -87,7 +88,9 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		folded := map[string]int{}
 		var shown []Change
 		for _, c := range home {
-			if group, kind := Noise(c.Rel); group != "" && !flagged(c) {
+			// A symlink is never folded: applied, it would lead a later
+			// session's path somewhere else.
+			if group, kind := Noise(c.Rel); group != "" && !flagged(c) && c.Type != fs.ModeSymlink {
 				folded[group+"… ("+kind+")"]++
 				continue
 			}
@@ -468,6 +471,13 @@ func Diff(w io.Writer, c Change) {
 		if cur != "" {
 			fmt.Fprintf(w, "+symlink -> %s\n", cur)
 		}
+		return
+	}
+	// Agent state and copies of an agent config (Claude Code keeps
+	// backups of ~/.claude.json) may hold tokens: no contents.
+	if c.Layer == "home" && (strings.HasPrefix(path.Base(c.Rel), ".claude.json") && configFor(filepath.ToSlash(c.Rel)) == nil ||
+		func() bool { _, kind := Noise(c.Rel); return kind == "agent state" && !agentMemory(c.Rel) }()) {
+		fmt.Fprintf(w, "%s %s (agent state; contents not shown)\n", map[string]string{Added: "+", Deleted: "-", Modified: "~", Replaced: "!"}[c.Kind], display(c))
 		return
 	}
 	// A config file is shown by the names of the keys that changed, by

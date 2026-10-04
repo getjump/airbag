@@ -2,6 +2,7 @@ package review
 
 import (
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -390,19 +391,88 @@ func TestWriteBackNullStaysInBranch(t *testing.T) {
 // stays a change for review.
 func TestWriteBackNeverWritesDeletion(t *testing.T) {
 	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":1,"oauthAccount":{"emailAddress":"me@example.com"}}`)
+	writeCfg(t, realPath, `{"numStartups":1,"tipsHistory":{"x":1}}`)
 	writeCfg(t, branchPath, `{"numStartups":2}`)
 	WriteBackConfigs(s)
 	got := readCfg(t, realPath)
-	if got["numStartups"] != float64(2) || got["oauthAccount"] == nil {
-		t.Fatalf("real file = %v, want the counter written and the account kept", got)
+	if got["numStartups"] != float64(2) || got["tipsHistory"] == nil {
+		t.Fatalf("real file = %v, want the counter written and the removed key kept", got)
 	}
 	if _, err := os.Stat(branchPath); err != nil {
 		t.Fatalf("branch copy dropped: %v", err)
 	}
 	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-	if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "benign key(s): oauthAccount") {
+	if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "benign key(s): tipsHistory") {
 		t.Fatalf("flags = %q, want the removed key listed", flags)
+	}
+}
+
+// The account a login recorded decides which account and organization
+// the host's next session uses, so a change to it is reviewed.
+func TestAccountChangeIsReviewed(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"oauthAccount":{"emailAddress":"me@example.com"}}`)
+	writeCfg(t, branchPath, `{"oauthAccount":{"emailAddress":"other@example.com"}}`)
+	WriteBackConfigs(s)
+	if got := readCfg(t, realPath); got["oauthAccount"].(map[string]any)["emailAddress"] != "me@example.com" {
+		t.Fatalf("the account change was written back: %v", got)
+	}
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+	if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "persist key(s): oauthAccount") {
+		t.Fatalf("flags = %q, want the account flagged", flags)
+	}
+}
+
+// A host edit during the session counts as one even when the editor kept
+// an old modification time (cp -p, sync tools): it is the change time
+// that tells, so the write-back is not recorded as airbag's own.
+func TestHostEditWithOldMtimeIsNotOwnWrite(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1,"theme":"dark"}`)
+	old := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(realPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	writeCfg(t, branchPath, `{"numStartups":2,"theme":"dark","mcpServers":{}}`)
+	WriteBackConfigs(s)
+	if OwnWrite(s, realPath) {
+		t.Fatal("a host edit with an old mtime was recorded as airbag's write")
+	}
+}
+
+// writeAtomic replaces nothing when the file changed since it was read.
+func TestWriteAtomicRefusesChangedFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.json")
+	writeCfg(t, p, `{"a":1}`)
+	if err := writeAtomic(p, []byte(`{"a":2}`), func() bool { return false }); !errors.Is(err, errChanged) {
+		t.Fatalf("err = %v, want errChanged", err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != `{"a":1}` {
+		t.Fatalf("file = %s, want it untouched", b)
+	}
+	if ents, _ := os.ReadDir(filepath.Dir(p)); len(ents) != 1 {
+		t.Fatalf("left %v behind", ents)
+	}
+}
+
+// Text Go's decoder would alter, and files over the limit, are not read
+// as configs: they stay in the branch, flagged as unreadable.
+func TestConfigTextIsRead(t *testing.T) {
+	for name, body := range map[string]string{
+		"surrogate escape": `{"numStartups":2,"k\ud800":1}`,
+		"invalid utf-8":    "{\"numStartups\":2,\"k\xff\":1}",
+		"oversize":         `{"numStartups":2,"pad":"` + strings.Repeat("x", maxConfig) + `"}`,
+	} {
+		s, realPath, branchPath := cfgSession(t)
+		writeCfg(t, realPath, `{"numStartups":1}`)
+		writeCfg(t, branchPath, body)
+		if msgs := WriteBackConfigs(s); len(msgs) != 0 {
+			t.Errorf("%s: wrote back %v", name, msgs)
+		}
+		c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+		if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "persist") {
+			t.Errorf("%s: flags = %q, want persist", name, flags)
+		}
 	}
 }
 
@@ -412,10 +482,7 @@ func TestWriteBackNeverWritesDeletion(t *testing.T) {
 func TestOwnWriteRecordsOnlyAirbagsWrite(t *testing.T) {
 	s, realPath, branchPath := cfgSession(t)
 	writeCfg(t, realPath, `{"numStartups":1}`)
-	old := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(realPath, old, old); err != nil {
-		t.Fatal(err)
-	}
+	s.Created = time.Now() // the real file predates the session
 	writeCfg(t, branchPath, `{"numStartups":2,"mcpServers":{"x":{"command":"/bin/true"}}}`)
 	WriteBackConfigs(s)
 	if !OwnWrite(s, realPath) {
