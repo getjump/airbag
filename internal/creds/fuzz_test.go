@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A placeholder stands in for a token: never equal to it, the same
@@ -43,21 +44,33 @@ func FuzzPlaceholder(f *testing.F) {
 // single replace of the value by the placeholder: the agent never sees
 // the real value, and nothing else is altered.
 func FuzzMaskBody(f *testing.F) {
-	f.Add("tok_secret", "tok_FAKE00", "head tok_secret tail", 3)
-	f.Add("aa", "PP", "aaaa", 1)
-	f.Fuzz(func(t *testing.T, value, placeholder, body string, chunk int) {
-		if value == "" || chunk <= 0 || chunk > 4096 {
-			return
-		}
-		// Only assert where the reference is unambiguous.
-		if bytes.Contains([]byte(placeholder), []byte(value)) {
+	f.Add("tok_secret", "tok_FAKE00", "head tok_secret tail", 3, 1)
+	f.Add("aa", "PP", "aaaa", 1, 3)
+	f.Add("ab", "xaby", "abab", 2, 1) // the placeholder holds the value
+	f.Fuzz(func(t *testing.T, value, placeholder, body string, chunk, buf int) {
+		if value == "" || chunk <= 0 || chunk > 4096 || buf <= 0 || buf > 4096 {
 			return
 		}
 		l := &Live{Value: value, Placeholder: placeholder}
-		r := l.MaskBody(io.NopCloser(&chunked{data: []byte(body), n: chunk}))
-		out, err := io.ReadAll(r)
-		if err != nil {
-			t.Fatalf("read: %v", err)
+		r := l.MaskBody(io.NopCloser(&slow{data: []byte(body), n: chunk}))
+		// Read with the agent's buffer size, and make sure every read
+		// that is not the end gives something: the stream must flow.
+		var out []byte
+		p := make([]byte, buf)
+		for empty := 0; ; {
+			n, err := r.Read(p)
+			out = append(out, p[:n]...)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if n == 0 {
+				if empty++; empty > len(body)+2 {
+					t.Fatalf("value=%q body=%q chunk=%d buf=%d: the stream stalled", value, body, chunk, buf)
+				}
+			}
 		}
 		// The sound invariant: the stream, read at any boundaries,
 		// equals one left-to-right replace of the value. (A value can
@@ -66,27 +79,33 @@ func FuzzMaskBody(f *testing.F) {
 		// equality to ReplaceAll is the right property, not absence.)
 		want := bytes.ReplaceAll([]byte(body), []byte(value), []byte(placeholder))
 		if !bytes.Equal(out, want) {
-			t.Fatalf("value=%q ph=%q body=%q chunk=%d\n got %q\nwant %q", value, placeholder, body, chunk, out, want)
+			t.Fatalf("value=%q ph=%q body=%q chunk=%d buf=%d\n got %q\nwant %q", value, placeholder, body, chunk, buf, out, want)
+		}
+		// With a placeholder of the value's length (as in production)
+		// each byte out stands for one byte in, so what is held back
+		// after a read is known: it must be the start of a match, no
+		// more. Holding more would stall a client that waits for the
+		// rest of a response before it sends more.
+		if len(placeholder) != len(value) {
+			return
+		}
+		src := &slow{data: []byte(body), n: chunk}
+		r = l.MaskBody(io.NopCloser(src))
+		big := make([]byte, len(body)+1)
+		emitted := 0
+		for {
+			n, err := r.Read(big)
+			emitted += n
+			if err != nil {
+				break
+			}
+			in := len(body) - len(src.data)
+			held := body[emitted:in]
+			if len(held) >= len(value) || !strings.HasPrefix(value, held) {
+				t.Fatalf("value=%q body=%q chunk=%d: after %d bytes in, held back %q", value, body, chunk, in, held)
+			}
 		}
 	})
-}
-
-type chunked struct {
-	data []byte
-	n    int
-}
-
-func (c *chunked) Read(p []byte) (int, error) {
-	if len(c.data) == 0 {
-		return 0, io.EOF
-	}
-	k := c.n
-	if k > len(c.data) {
-		k = len(c.data)
-	}
-	n := copy(p, c.data[:k])
-	c.data = c.data[n:]
-	return n, nil
 }
 
 // The prefix rule at its edges: a separator at index 1..4 of a value of
@@ -108,8 +127,28 @@ func TestPlaceholderPrefixEdges(t *testing.T) {
 		if c.keep != "" && !strings.HasPrefix(p, c.keep) {
 			t.Errorf("Placeholder(%q) = %q, want prefix %q", c.v, p, c.keep)
 		}
-		if c.keep == "" && len(c.v) > 0 && p[0] == c.v[0] && strings.HasPrefix(p, c.v[:min(len(c.v), 5)]) {
+		// The random part is alphanumeric: a separator means a prefix
+		// was kept.
+		if c.keep == "" && strings.ContainsAny(p, "_-") {
 			t.Errorf("Placeholder(%q) = %q kept a prefix it should not", c.v, p)
 		}
+	}
+}
+
+// An empty value cannot be in a body; masking passes it through.
+func TestMaskBodyEmptyValue(t *testing.T) {
+	l := &Live{Value: "", Placeholder: "x"}
+	done := make(chan []byte)
+	go func() {
+		b, _ := io.ReadAll(l.MaskBody(io.NopCloser(strings.NewReader("body"))))
+		done <- b
+	}()
+	select {
+	case b := <-done:
+		if string(b) != "body" {
+			t.Fatalf("got %q", b)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a body masked for an empty value never returned")
 	}
 }

@@ -253,6 +253,9 @@ func (l *Live) MaskHeader(h http.Header) {
 // value, so a host that echoes the request cannot hand it to the agent.
 // The body must not be compressed.
 func (l *Live) MaskBody(r io.ReadCloser) io.ReadCloser {
+	if l.Value == "" {
+		return r // nothing to find, and an empty match would never advance
+	}
 	return &masked{r: r, from: []byte(l.Value), to: []byte(l.Placeholder)}
 }
 

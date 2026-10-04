@@ -12,6 +12,8 @@ func TestGitPush(t *testing.T) {
 		{"git", "push", "-u", "origin", "feature/retry"},
 		{"git", "push", "--force-with-lease", "origin", "HEAD:refs/heads/x"},
 		{"git", "push", "https://github.com/acme/api.git", "main"},
+		{"git", "push", "ssh://git@github.com/acme/api.git", "main"},
+		{"git", "push", "git@github.com:acme/api.git", "main"},
 	}
 	for _, argv := range ok {
 		if _, err := GitPush(argv); err != nil {
@@ -27,6 +29,10 @@ func TestGitPush(t *testing.T) {
 		{"git", "push", "ext::sh -c evil", "main"},
 		{"git", "push", "origin", "main;rm -rf ~"},
 		{"git", "push", "origin", "$(evil)"},
+		{"git", "push", "ssh://-oProxyCommand=evil/r", "main"},
+		{"git", "push", "ssh://git@-oProxyCommand=evil/r", "main"},
+		{"git", "push", "https://-x/r", "main"},
+		{"git", "push", "git@-oProxyCommand=evil:r", "main"},
 	}
 	for _, argv := range bad {
 		if _, err := GitPush(argv); err == nil {

@@ -12,7 +12,7 @@ import (
 
 var (
 	remoteName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-	remoteURL  = regexp.MustCompile(`^(https://|ssh://|git@[A-Za-z0-9.-]+:)[^\s]+$`)
+	remoteURL  = regexp.MustCompile(`^(https://|ssh://|git@[A-Za-z0-9][A-Za-z0-9.-]*:)[^\s]+$`)
 	refspec    = regexp.MustCompile(`^\+?[A-Za-z0-9._/@{}^~:-]+$`)
 )
 
@@ -54,6 +54,9 @@ func GitPush(argv []string) ([]string, error) {
 		if r := pos[0]; !remoteName.MatchString(r) && !remoteURL.MatchString(r) {
 			return nil, fmt.Errorf("remote %q is not a remote name or an https/ssh URL", r)
 		}
+		if r := pos[0]; dashHost(r) {
+			return nil, fmt.Errorf("remote %q: a host starting with - would be an option to ssh", r)
+		}
 		for _, r := range pos[1:] {
 			if !refspec.MatchString(r) {
 				return nil, fmt.Errorf("refspec %q is not allowed", r)
@@ -61,4 +64,21 @@ func GitPush(argv []string) ([]string, error) {
 		}
 	}
 	return append(append([]string{"push"}, flags...), pos...), nil
+}
+
+// dashHost reports whether an ssh:// or https:// remote names a host
+// starting with "-" (ssh://-oProxyCommand=...). git refuses those too,
+// since 2.14.1; the intent runs on the host, so airbag does not rely on it.
+func dashHost(r string) bool {
+	rest, ok := strings.CutPrefix(r, "ssh://")
+	if !ok {
+		if rest, ok = strings.CutPrefix(r, "https://"); !ok {
+			return false
+		}
+	}
+	auth, _, _ := strings.Cut(rest, "/")
+	if i := strings.LastIndex(auth, "@"); i >= 0 {
+		auth = auth[i+1:]
+	}
+	return strings.HasPrefix(auth, "-")
 }

@@ -30,7 +30,9 @@ func TestNoRawBidiInSource(t *testing.T) {
 			}
 			return nil
 		}
-		if !text[filepath.Ext(p)] {
+		// A symlink is not this module's source, and a dangling one (an
+		// editor's lock file) cannot be read.
+		if !text[filepath.Ext(p)] || d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 		b, err := os.ReadFile(p)
