@@ -80,8 +80,20 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 		p.NoWrite = append(p.NoWrite, filepath.Join(home, h))
 	}
 	// Every project's memory/, not only this workspace's: they are all
-	// loaded into later sessions of their project.
-	p.NoWriteRegex = append(p.NoWriteRegex, "^"+regexp.QuoteMeta(home)+`/\.claude/projects/[^/]+/memory(/|$)`)
+	// loaded into later sessions of their project. A deny on a path does
+	// not cover renaming one of its ancestors, so the directories above
+	// the denied ones cannot be created, removed or renamed either: the
+	// state roots, projects/ and each project directory. This workspace's
+	// project directory and its memory/ are made before the run, since
+	// the agent cannot create them.
+	q := regexp.QuoteMeta(home)
+	p.NoWriteRegex = append(p.NoWriteRegex,
+		"^"+q+`/\.claude/projects/[^/]+/memory(/|$)`,
+		"^"+q+`/\.(claude|codex)$`,
+		"^"+q+`/\.claude/projects(/[^/]+)?$`)
+	for _, h := range s.BranchHoles {
+		_ = os.MkdirAll(filepath.Join(s.Home, h), 0o700)
+	}
 	for _, h := range s.Hidden {
 		p.NoRead = append(p.NoRead, filepath.Join(home, h))
 	}

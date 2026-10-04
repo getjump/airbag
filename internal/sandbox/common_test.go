@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -21,6 +23,25 @@ func TestClaudeProjectSlug(t *testing.T) {
 	}
 	if pass, holes := ClaudeProjectState("/"+strings.Repeat("a", 250), ""); len(pass)+len(holes) != 0 {
 		t.Errorf("a slug Claude Code hashes passes through: %v %v", pass, holes)
+	}
+}
+
+// Claude Code names a project by the physical path; started from a path
+// through a symlink, airbag covers that spelling too.
+func TestClaudeProjectStateResolvesSymlinks(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	physical, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pass, _ := ClaudeProjectState(link, "")
+	if !slices.Contains(pass, ".claude/projects/"+ClaudeProjectSlug(physical)+"/") ||
+		!slices.Contains(pass, ".claude/projects/"+ClaudeProjectSlug(link)+"/") {
+		t.Fatalf("pass = %v, want both spellings", pass)
 	}
 }
 

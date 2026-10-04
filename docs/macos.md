@@ -138,7 +138,10 @@ state out of the real files on Linux cannot be expressed in full by the Seatbelt
 profile. What it does express: writing any project's `memory/` is denied, as are
 the instruction and settings files listed above, so Claude Code's auto-memory
 cannot persist unreviewed (the cost is that a memory edit fails instead of being
-dropped on discard). What it cannot:
+dropped on discard). Because a deny on a path does not cover renaming one of its
+ancestors, `~/.claude`, `~/.codex`, `~/.claude/projects` and each project
+directory cannot be created, removed or renamed either; airbag makes this
+workspace's project directory before the run. What it cannot:
 `~/.claude.json` stays writable, so a change to it — including MCP servers,
 permissions and per-project trust — persists in full with no key-level write-back
 or review, and the rest of `~/.claude` and `~/.codex` persists as before. The

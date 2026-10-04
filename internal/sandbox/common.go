@@ -127,7 +127,19 @@ func appendNew(list []string, add ...string) []string {
 // cwd and root are absolute paths; root is the git top-level (or "").
 func ClaudeProjectState(cwd, root string) (pass, holes []string) {
 	seen := map[string]bool{}
+	// Claude Code names a directory by the physical path (its cwd is
+	// resolved), while airbag may have been started from a path through a
+	// symlink: both spellings are covered.
+	dirs := []string{cwd, root}
 	for _, d := range []string{cwd, root} {
+		if d == "" {
+			continue
+		}
+		if r, err := filepath.EvalSymlinks(d); err == nil && r != d {
+			dirs = append(dirs, r)
+		}
+	}
+	for _, d := range dirs {
 		if d == "" {
 			continue
 		}

@@ -35,8 +35,10 @@ func TestMacProfile(t *testing.T) {
 	has := func(rule, path string) bool {
 		return strings.Contains(text, "("+rule+" (subpath \""+path+"\"))") || strings.Contains(text, "("+rule+" (literal \""+path+"\"))")
 	}
-	if !strings.Contains(text, `/\.claude/projects/[^/]+/memory(/|$)"))`) {
-		t.Error("profile does not deny every project's memory/")
+	for _, re := range []string{`/\.claude/projects/[^/]+/memory(/|$)"))`, `/\.(claude|codex)$"))`, `/\.claude/projects(/[^/]+)?$"))`} {
+		if !strings.Contains(text, re) {
+			t.Errorf("profile lacks the write deny %s", re)
+		}
 	}
 	clone, _ := filepath.EvalSymlinks(s.CloneDir())
 	if clone == "" {
