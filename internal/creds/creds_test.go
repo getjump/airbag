@@ -125,3 +125,20 @@ func TestMaskBodyStreams(t *testing.T) {
 	}
 	pw.Close()
 }
+
+// A binding and a request match when they name the same host and port
+// in any spelling.
+func TestForCanonical(t *testing.T) {
+	s := Set{{Name: "v6", Hosts: []string{"[0:0::1]:0443"}}, {Name: "name", Hosts: []string{"API.Example."}}}
+	for in, want := range map[string]string{
+		"[::1]:443": "v6", "[0:0:0::1]:443": "v6", "api.example:443": "name", "API.EXAMPLE.:0443": "name", "api.example:8443": "",
+	} {
+		got := ""
+		if l := s.For(in); l != nil {
+			got = l.Name
+		}
+		if got != want {
+			t.Errorf("For(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

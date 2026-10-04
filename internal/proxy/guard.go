@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"strings"
 	"syscall"
 	"time"
+
+	"github.com/getjump/airbag/internal/creds"
 )
 
 // The proxy runs in the host's network namespace, so an allowed name
@@ -103,7 +104,7 @@ func (a Allowlist) AllowsPort(host, port string) bool {
 	}
 	for _, e := range a {
 		h, ep, err := net.SplitHostPort(e)
-		if err == nil && (ep == port || ep == "*") && (Allowlist{h}).Allows(host) {
+		if err == nil && (creds.CanonPort(ep) == creds.CanonPort(port) || ep == "*") && (Allowlist{h}).Allows(host) {
 			return true
 		}
 	}
@@ -120,7 +121,7 @@ func (a Allowlist) explicitIP(host string) bool {
 		if h, _, err := net.SplitHostPort(e); err == nil {
 			e = h
 		}
-		if strings.EqualFold(strings.Trim(e, "[]"), host) {
+		if creds.CanonHost(e) == creds.CanonHost(host) {
 			return true
 		}
 	}

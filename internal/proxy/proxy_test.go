@@ -8,11 +8,13 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/policy"
 )
 
 func TestAllowlist(t *testing.T) {
@@ -262,5 +264,147 @@ func TestGuard(t *testing.T) {
 	}
 	if strings.Join(reasons, ",") != "address: loopback,port not allowed" {
 		t.Errorf("deny reasons = %v", reasons)
+	}
+}
+
+// Rules, the allowlist and the log see one spelling of the host: a rule
+// on api.example also stops "API.EXAMPLE.", and a name that is not
+// ASCII is refused before any check.
+func TestHostSpelledOneWay(t *testing.T) {
+	ws, dir := t.TempDir(), t.TempDir()
+	_ = os.WriteFile(filepath.Join(ws, "airbag.yaml"), []byte(`
+rules:
+  - name: no-api
+    when: effect.kind == "net.connect" && effect.target == "api.example"
+    verdict: deny
+    message: not this host
+`), 0o644)
+	pol, err := policy.Load(ws, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, path := newLog(t)
+	p := New(Allowlist{"api.example"}, log)
+	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	p.Gate = policy.NewGate(pol, dir)
+	for _, c := range []struct {
+		hostport string
+		code     int
+		body     string
+	}{
+		{"API.EXAMPLE.:443", http.StatusForbidden, "not this host"},
+		{"Api.Example:443", http.StatusForbidden, "not this host"},
+		{"api.example..:443", http.StatusBadRequest, "empty label"},
+		{".api.example:443", http.StatusBadRequest, "empty label"},
+		{"api..example:443", http.StatusBadRequest, "empty label"},
+		{"API.EXAMPLE:0443", http.StatusForbidden, "not this host"},
+		{"api.example:99999", http.StatusBadRequest, "not a port number"},
+		{"api.example:", http.StatusBadRequest, "no port"},
+		{"api.example", http.StatusBadRequest, "no port"},
+		{":443", http.StatusBadRequest, "no host"},
+		{"[::1..]:443", http.StatusBadRequest, "not an IP address"},
+		{"ap\u0130.example:443", http.StatusBadRequest, "ASCII"},
+		{"\u212Aite.example:443", http.StatusBadRequest, "ASCII"},
+	} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, &http.Request{Method: http.MethodConnect, Host: c.hostport, URL: &url.URL{Host: c.hostport}})
+		if rec.Code != c.code || !strings.Contains(rec.Body.String(), c.body) {
+			t.Errorf("CONNECT %q: %d %q, want %d %q", c.hostport, rec.Code, rec.Body.String(), c.code, c.body)
+		}
+	}
+	effs, _ := effects.Read(path)
+	if len(effs) == 0 || effs[0].Target != "api.example:443" {
+		t.Fatalf("effects = %+v, want the first logged as api.example:443", effs)
+	}
+}
+
+// A plain HTTP request is logged, checked and sent with the same
+// spelling; a CONNECT without a port keeps what it named.
+func TestPlainHTTPHostSpelledOneWay(t *testing.T) {
+	var seen string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = r.Host }))
+	t.Cleanup(up.Close)
+	_, port, _ := net.SplitHostPort(up.Listener.Addr().String())
+	log, path := newLog(t)
+	p := New(Allowlist{"127.0.0.1:*"}, log)
+	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	u, _ := url.Parse("http://127.0.0.1.:" + port + "/x")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, &http.Request{Method: "GET", Host: u.Host, URL: u, Header: http.Header{}})
+	if rec.Code != http.StatusOK || seen != "127.0.0.1:"+port {
+		t.Fatalf("%d %q, upstream saw Host %q", rec.Code, rec.Body.String(), seen)
+	}
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, &http.Request{Method: http.MethodConnect, Host: "api.example", URL: &url.URL{Host: "api.example"}})
+	effs, _ := effects.Read(path)
+	if len(effs) < 2 || effs[0].Target != "127.0.0.1:"+port || effs[len(effs)-1].Target != "api.example" {
+		t.Fatalf("effects = %+v", effs)
+	}
+}
+
+func TestCanonHost(t *testing.T) {
+	for _, c := range []struct{ in, out string }{
+		{"API.Example.", "api.example"},
+		{"FE80::1%ETH0", "fe80::1%ETH0"}, // the zone is an interface name: its case stays
+		{"0:0::1", "::1"},
+		{"127.0.0.1.", "127.0.0.1"},
+		{"", ""},
+	} {
+		if got, why := canonHost(c.in); got != c.out || why != "" {
+			t.Errorf("canonHost(%q) = %q, %q; want %q", c.in, got, why, c.out)
+		}
+	}
+	for _, bad := range []string{"a..b", ".a", "a..", "::1.", "[::1]", "ap\u0130.example"} {
+		if _, why := canonHost(bad); why == "" {
+			t.Errorf("canonHost(%q) accepted", bad)
+		}
+	}
+}
+
+// A rule on the port sees a plain HTTP request's port as 80 whether the
+// URL names it or not.
+func TestPlainHTTPPortForRules(t *testing.T) {
+	ws := t.TempDir()
+	_ = os.WriteFile(filepath.Join(ws, "airbag.yaml"), []byte(`
+rules:
+  - name: no-plain-http
+    when: effect.kind == "net.connect" && effect.detail == "80"
+    verdict: deny
+    message: no plain http
+`), 0o644)
+	pol, err := policy.Load(ws, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, _ := newLog(t)
+	p := New(Allowlist{"api.example"}, log)
+	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	p.Gate = policy.NewGate(pol, t.TempDir())
+	for _, raw := range []string{"http://api.example/x", "http://api.example:/x", "http://api.example:080/x"} {
+		u, _ := url.Parse(raw)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, &http.Request{Method: "GET", Host: u.Host, URL: u, Header: http.Header{}})
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "no plain http") {
+			t.Errorf("GET %s: %d %q", raw, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// An allowlist entry matches a request in any spelling of the same host
+// and port, so a canonical request still finds the entry it was given.
+func TestAllowlistCanonical(t *testing.T) {
+	a := Allowlist{"[0:0::1]:443", "Svc.Example.:08443"}
+	if !a.Allows("::1") || !a.explicitIP("::1") || !a.AllowsPort("svc.example", "8443") || a.AllowsPort("svc.example", "9443") {
+		t.Fatalf("Allows(::1)=%v explicitIP(::1)=%v AllowsPort(svc.example, 8443)=%v (9443)=%v",
+			a.Allows("::1"), a.explicitIP("::1"), a.AllowsPort("svc.example", "8443"), a.AllowsPort("svc.example", "9443"))
+	}
+}
+
+// An entry that names no host allows none.
+func TestAllowlistEmptyEntry(t *testing.T) {
+	for _, e := range []string{":*", ".:*", "[]:*", "", "."} {
+		if a := (Allowlist{e}); a.Allows("") || a.AllowsPort("", "443") {
+			t.Errorf("Allowlist{%q} allows the empty host", e)
+		}
 	}
 }

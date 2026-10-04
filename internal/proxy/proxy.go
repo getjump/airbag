@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,12 +46,15 @@ type Allowlist []string
 // Allows reports whether host is allowed; an entry's port, if any, is
 // checked by AllowsPort.
 func (a Allowlist) Allows(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	host = creds.CanonHost(host)
 	for _, p := range a {
 		if h, _, err := net.SplitHostPort(p); err == nil {
 			p = h
 		}
-		p = strings.ToLower(strings.Trim(p, "[]"))
+		p = creds.CanonHost(p)
+		if p == "" {
+			continue // ":*", "." or "[]" names no host
+		}
 		if p == host || (strings.HasPrefix(p, "*.") && strings.HasSuffix(host, p[1:])) {
 			return true
 		}
@@ -128,6 +132,42 @@ func New(allow Allowlist, log *effects.Log) *Proxy {
 	}}
 }
 
+// canonHost spells a host one way, or says why it cannot be used. A
+// name is lower case without its trailing dot; it must be ASCII (an IDN
+// in its xn-- form: Go would turn a Unicode name into an xn-- host of
+// its own after checks that lower-cased it to an allowed one) and have
+// no empty label ("api.example.." would lose a dot in each later
+// check). An IPv6 literal is written as netip writes it, its zone kept
+// as given: interface names are case-sensitive.
+func canonHost(h string) (string, string) {
+	switch {
+	case h == "":
+		return "", ""
+	case !isASCII(h):
+		return "", "host names must be ASCII; write an international name in its xn-- form"
+	case strings.Contains(h, ":"):
+		a, err := netip.ParseAddr(h)
+		if err != nil {
+			return "", "not an IP address"
+		}
+		return a.String(), ""
+	}
+	h = strings.ToLower(strings.TrimSuffix(h, "."))
+	if h == "" || strings.HasPrefix(h, ".") || strings.HasSuffix(h, ".") || strings.Contains(h, "..") {
+		return "", "host name has an empty label"
+	}
+	return h, ""
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *Proxy) Serve(l net.Listener) error {
 	srv := &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second}
 	return srv.Serve(l)
@@ -137,6 +177,46 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Hostname()
 	if r.Method == http.MethodConnect {
 		host, _, _ = net.SplitHostPort(r.Host)
+	}
+	// From here on the host and port have one spelling, for the
+	// allowlist, the rules, the log and the dial: a rule on
+	// api.github.com:443 must see "API.GITHUB.COM.:0443" as that.
+	canon, why := canonHost(host)
+	port := r.URL.Port()
+	if r.Method == http.MethodConnect {
+		var err error
+		// "api.example:" would read as 443 to the credential lookup
+		// and as no port to the rules.
+		if _, port, err = net.SplitHostPort(r.Host); (err != nil || port == "") && why == "" {
+			why = "CONNECT names no port"
+		}
+	}
+	if why == "" && canon == "" {
+		why = "no host named" // the checks below would see "" and the dial something else
+	}
+	if why == "" && port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			why = "port " + clipTarget(port) + " is not a port number"
+		} else {
+			port = strconv.Itoa(n)
+		}
+	}
+	if why != "" {
+		p.Log.Add(effects.Effect{Kind: "net.egress", Target: clipTarget(r.Host), Verdict: "deny", Reason: why})
+		http.Error(w, "airbag: "+clipTarget(r.Host)+": "+why, http.StatusBadRequest)
+		return
+	}
+	host = canon
+	switch {
+	case port != "":
+		r.Host = net.JoinHostPort(host, port)
+	case strings.Contains(host, ":"):
+		r.Host = "[" + host + "]"
+	case host != "":
+		r.Host = host
+	}
+	if r.Method != http.MethodConnect && r.URL.Host != "" {
+		r.URL.Host = r.Host // a proxy request's Host is its URL's
 	}
 	target := r.Host
 	if p.Mirror != nil && host == "airbag.mirror" && r.Method != http.MethodConnect {
@@ -153,10 +233,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "airbag: egress to "+host+" denied by policy (host not in allowlist)", http.StatusForbidden)
 		return
 	}
-	port := r.URL.Port()
-	if r.Method == http.MethodConnect {
-		_, port, _ = net.SplitHostPort(r.Host)
-	} else if port == "" {
+	if port == "" && r.Method != http.MethodConnect {
 		port = "80"
 	}
 	if !slices.Contains(webPorts, port) && !p.Allow.AllowsPort(host, port) {
@@ -171,7 +248,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Gate != nil {
-		_, port, _ := net.SplitHostPort(target)
 		if d, id := p.Gate.Check(policy.Input{Effect: models.Effect{Kind: "net.connect", Target: host, Detail: port}}); d.Verdict != policy.Allow {
 			p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: d.Verdict, Reason: d.Rule})
 			http.Error(w, policy.Explain(d, id), http.StatusForbidden)

@@ -151,13 +151,18 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 	_ = tconn.SetDeadline(time.Time{})
 
 	check := !p.Allow.explicitIP(host)
+	// The upstream sees the bound host spelled one way, in SNI and Host,
+	// whatever spelling the agent used in CONNECT or Host: a router that
+	// tells "API.github.com." from "api.github.com" must not be handed the
+	// agent's spelling along with the real value.
+	name, canonical := upstreamHost(target)
 	tr := &http.Transport{
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			c, err := p.dial(target, check)
 			if err != nil {
 				return nil, err
 			}
-			tc := tls.Client(c, &tls.Config{ServerName: host, RootCAs: p.UpstreamRoots, NextProtos: []string{"http/1.1"}, MinVersion: tls.VersionTLS12})
+			tc := tls.Client(c, &tls.Config{ServerName: name, RootCAs: p.UpstreamRoots, NextProtos: []string{"http/1.1"}, MinVersion: tls.VersionTLS12})
 			if err := tc.HandshakeContext(ctx); err != nil {
 				c.Close()
 				return nil, err
@@ -173,7 +178,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme, pr.Out.URL.Host = "https", target
-			pr.Out.Host = pr.In.Host
+			pr.Out.Host = canonical
 			// Without the client's Accept-Encoding the transport asks for
 			// gzip itself and unpacks it, so the body can be masked.
 			pr.Out.Header.Del("Accept-Encoding")
@@ -210,6 +215,16 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 		what := host + req.URL.Path
 		if _, port, _ := net.SplitHostPort(target); port != "443" {
 			what = target + req.URL.Path
+		}
+		// The connection goes to the bound host, but a server that hosts
+		// several sites (a CDN) routes by the Host header: a request
+		// naming another site there would carry the real value to it
+		// (domain fronting). The value goes only to the host it is bound to.
+		// An HTTP/1.0 request may name no host; it goes to the bound one.
+		if req.Host != "" && !sameHost(req.Host, target) {
+			p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "Host " + clipTarget(req.Host) + " is not the bound host"})
+			http.Error(w, "airbag: Host "+req.Host+" is not "+host+", the host this credential is bound to; the credential goes only to that host", http.StatusForbidden)
+			return
 		}
 		if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
 			p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "secret-taint"})
@@ -303,3 +318,27 @@ func (l *oneConn) Close() error {
 }
 
 func (l *oneConn) Addr() net.Addr { return l.c.LocalAddr() }
+
+// upstreamHost spells the CONNECT target one way: the name in lower
+// case without a trailing dot, and the Host header, which adds brackets
+// for IPv6 and the port when it is not 443.
+func upstreamHost(target string) (name, hostHeader string) {
+	h, port := creds.SplitHost(target)
+	name = strings.ToLower(strings.TrimSuffix(h, "."))
+	if port == "443" {
+		if strings.Contains(name, ":") {
+			return name, "[" + name + "]"
+		}
+		return name, name
+	}
+	return name, net.JoinHostPort(name, port)
+}
+
+// sameHost reports whether a request's Host header names the CONNECT
+// target: the same host and port in any spelling (creds.CanonHost and
+// CanonPort), 443 when the header gives none.
+func sameHost(header, target string) bool {
+	hh, hp := creds.SplitHost(header)
+	th, tp := creds.SplitHost(target)
+	return hh != "" && creds.CanonHost(hh) == creds.CanonHost(th) && creds.CanonPort(hp) == creds.CanonPort(tp)
+}

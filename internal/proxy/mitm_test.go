@@ -185,3 +185,87 @@ func TestCANameConstraints(t *testing.T) {
 		}
 	}
 }
+
+// Inside a tunnel to the bound host, a request whose Host names another
+// site is refused: a CDN would route it there, with the real value.
+func TestInterceptRefusesOtherHost(t *testing.T) {
+	up, got := echo(t)
+	c, live, _ := mitmProxy(t, up, "")
+	req, _ := http.NewRequest("GET", up.URL+"/repos/x", nil)
+	req.Host = "attacker.example"
+	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "bound to") || got() != "" {
+		t.Fatalf("a request for another Host got through: %d %q, upstream saw %q", resp.StatusCode, body, got())
+	}
+}
+
+func TestSameHost(t *testing.T) {
+	for _, c := range []struct {
+		header, target string
+		want           bool
+	}{
+		{"api.github.com", "api.github.com:443", true},
+		{"API.GitHub.com.", "api.github.com:443", true},
+		{"api.github.com:443", "api.github.com:443", true},
+		{"api.github.com:8443", "api.github.com:443", false},
+		{"evil.example", "api.github.com:443", false},
+		{"", "api.github.com:443", false},
+		{"127.0.0.1:9443", "127.0.0.1:9443", true},
+		{"api.example:0443", "api.example:443", true},
+		{"[0:0::1]:443", "[::1]:443", true},
+		{"[0:0::1]:8443", "[::1]:443", false},
+	} {
+		if got := sameHost(c.header, c.target); got != c.want {
+			t.Errorf("sameHost(%q, %q) = %v, want %v", c.header, c.target, got, c.want)
+		}
+	}
+}
+
+// A Host the check accepts in another spelling (here a trailing dot)
+// reaches the upstream as the bound host, spelled one way.
+func TestInterceptSendsCanonicalHost(t *testing.T) {
+	var mu sync.Mutex
+	var seen string
+	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = r.Host
+		mu.Unlock()
+	}))
+	t.Cleanup(up.Close)
+	c, live, _ := mitmProxy(t, up, "")
+	target := up.Listener.Addr().String()
+	h, port, _ := net.SplitHostPort(target)
+	req, _ := http.NewRequest("GET", up.URL+"/", nil)
+	req.Host = strings.ToUpper(h) + ".:" + port
+	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if resp.StatusCode != http.StatusOK || seen != target {
+		t.Fatalf("status %d, upstream saw Host %q, want %q", resp.StatusCode, seen, target)
+	}
+}
+
+func TestUpstreamHost(t *testing.T) {
+	for _, c := range []struct{ target, name, host string }{
+		{"API.GitHub.com.:443", "api.github.com", "api.github.com"},
+		{"api.github.com:443", "api.github.com", "api.github.com"},
+		{"Example.COM:8443", "example.com", "example.com:8443"},
+		{"[::1]:443", "::1", "[::1]"},
+		{"[::1]:8443", "::1", "[::1]:8443"},
+	} {
+		if name, host := upstreamHost(c.target); name != c.name || host != c.host {
+			t.Errorf("upstreamHost(%q) = %q, %q; want %q, %q", c.target, name, host, c.name, c.host)
+		}
+	}
+}
