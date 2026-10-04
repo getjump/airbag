@@ -21,10 +21,12 @@ import (
 )
 
 type Options struct {
-	Yes   bool // do not ask
-	Force bool // apply over files changed on the host during the session
-	In    io.Reader
-	Out   io.Writer
+	Yes         bool     // do not ask
+	Force       bool     // apply over files changed on the host during the session
+	Interactive bool     // ask about each unit
+	Only        []string // apply only units touching these paths
+	In          io.Reader
+	Out         io.Writer
 }
 
 type Conflict struct {
@@ -93,37 +95,115 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if s.Status == session.StatusRunning {
 		return fmt.Errorf("session %s is still running", s.ID)
 	}
-	if cf := Conflicts(s, cs); len(cf) > 0 && !o.Force {
+	in := bufio.NewReader(o.In)
+	chosen, err := choose(Units(cs), in, o)
+	if err != nil {
+		return err
+	}
+	var picked []review.Change
+	for _, u := range chosen {
+		picked = append(picked, u.Changes...)
+	}
+	if cf := Conflicts(s, picked); len(cf) > 0 && !o.Force {
 		fmt.Fprintf(o.Out, "Conflicts: %d files changed on the host while the agent worked:\n", len(cf))
 		for _, c := range cf {
 			fmt.Fprintf(o.Out, "  %s: %s\n", c.Path, c.Reason)
 		}
 		return fmt.Errorf("nothing applied; rerun with --force to overwrite, or discard the session")
 	}
-	in := bufio.NewReader(o.In)
-	if len(cs) > 0 {
-		if att := review.Attention(cs); len(att) > 0 {
-			fmt.Fprintln(o.Out, "Attention:")
-			for _, c := range att {
-				fmt.Fprintf(o.Out, "  ! %s  %s\n", c.Path, strings.Join(c.Flags, ", "))
-			}
+	for _, c := range picked {
+		if err := applyOne(c); err != nil {
+			return fmt.Errorf("%s: %w (earlier changes are already applied)", c.Path, err)
 		}
-		if !confirm(in, o, fmt.Sprintf("Apply %d changes to the real files?", len(cs))) {
-			return fmt.Errorf("aborted, nothing applied")
-		}
-		for _, c := range cs {
-			if err := applyOne(c); err != nil {
-				return fmt.Errorf("%s: %w (earlier changes are already applied)", c.Path, err)
-			}
-		}
-		fmt.Fprintf(o.Out, "Applied %d changes.\n", len(cs))
+	}
+	forget(picked)
+	if len(picked) > 0 {
+		fmt.Fprintf(o.Out, "Applied %d changes.\n", len(picked))
 	}
 
-	s.Status = session.StatusApplied
+	rest, err := review.Scan(s)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 {
+		s.Status = session.StatusApplied
+	} else {
+		fmt.Fprintf(o.Out, "%d changes stay in session %s: airbag apply -i, or airbag discard.\n", len(rest), s.ID)
+	}
 	if err := s.Save(); err != nil {
 		return err
 	}
-	return runIntents(s, box, gitTouched(cs), in, o)
+	for _, c := range rest {
+		if c.Layer == "ws" && strings.HasPrefix(c.Rel, ".git/") {
+			fmt.Fprintln(o.Out, "Intents wait: the session's git changes are not applied yet.")
+			return nil
+		}
+	}
+	return runIntents(s, box, gitTouched(picked), in, o)
+}
+
+// choose picks the units to apply: all of them, the ones matching
+// --only, or one by one.
+func choose(units []Unit, in *bufio.Reader, o Options) ([]Unit, error) {
+	if len(units) == 0 {
+		return nil, nil
+	}
+	if len(o.Only) > 0 {
+		var out []Unit
+		for _, u := range units {
+			if u.matches(o.Only) {
+				out = append(out, u)
+			}
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("no changes match %s", strings.Join(o.Only, " "))
+		}
+		return out, nil
+	}
+	if !o.Interactive {
+		n := 0
+		for _, u := range units {
+			n += len(u.Changes)
+			if len(u.Flags) > 0 && !o.Yes {
+				fmt.Fprintf(o.Out, "  ! %-40s %s\n", u.Title, strings.Join(u.Flags, ", "))
+			}
+		}
+		if !confirm(in, o, fmt.Sprintf("Apply %d changes to the real files?", n)) {
+			return nil, fmt.Errorf("aborted, nothing applied")
+		}
+		return units, nil
+	}
+	var out []Unit
+	for i := 0; i < len(units); i++ {
+		u := units[i]
+		flags := ""
+		if len(u.Flags) > 0 {
+			flags = "   ! " + strings.Join(u.Flags, ", ")
+		}
+		fmt.Fprintf(o.Out, "[%d/%d] %s%s\n", i+1, len(units), u.Title, flags)
+		fmt.Fprint(o.Out, "  apply? [y]es [n]o [d]iff [a]ll remaining [q]uit: ")
+		line, err := in.ReadString('\n')
+		if err != nil && line == "" {
+			return out, nil
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "y", "yes":
+			out = append(out, u)
+		case "n", "no", "":
+		case "d", "diff":
+			for _, c := range u.Changes {
+				review.Diff(o.Out, c)
+			}
+			i--
+		case "a", "all":
+			return append(out, units[i:]...), nil
+		case "q", "quit":
+			return out, nil
+		default:
+			i--
+		}
+	}
+	return out, nil
 }
 
 // gitTouched reports whether the branch changed git config or hooks:

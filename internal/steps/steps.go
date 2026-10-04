@@ -37,6 +37,7 @@ type Tracker struct {
 	s    *session.Session
 	last map[string]entry
 	n    int
+	seen map[string]bool // tool_use_ids already recorded
 }
 
 func NewTracker(s *session.Session) *Tracker {
@@ -76,6 +77,14 @@ func (t *Tracker) snapshot() map[string]entry {
 func (t *Tracker) Record(tool, summary, id string) Step {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if id != "" && t.seen[id] {
+		// The same call reported again (failure, then result).
+		return t.record(tool, summary, id, true)
+	}
+	if t.seen == nil {
+		t.seen = map[string]bool{}
+	}
+	t.seen[id] = true
 	return t.record(tool, summary, id, false)
 }
 

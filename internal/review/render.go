@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -59,11 +60,11 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		folded := map[string]int{}
 		var shown []Change
 		for _, c := range home {
-			if dir := noiseDir(c.Rel); dir != "" && !flagged(c) {
+			if dir := NoiseDir(c.Rel); dir != "" && !flagged(c) {
 				folded[dir+"… (cache)"]++
 				continue
 			}
-			if repo := gitDir(c.Rel); repo != "" && !flagged(c) {
+			if repo := GitDir(c.Rel); repo != "" && !flagged(c) {
 				folded[repo+"… (git internals)"]++
 				continue
 			}
@@ -126,13 +127,13 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	if d > 50 {
 		fmt.Fprintf(w, "  ! %d files deleted in the workspace\n", d)
 	}
-	fmt.Fprintf(w, "\nNext: airbag diff [path] · airbag apply · airbag discard\n")
+	fmt.Fprintf(w, "\nNext: airbag diff [path] · airbag apply [-i] · airbag discard\n")
 }
 
 func counts(cs []Change) (a, m, d int) {
 	for _, c := range cs {
-		if c.IsDir() && c.Kind != Replaced {
-			continue
+		if c.IsDir() && c.Kind == Added {
+			continue // counted through its files
 		}
 		switch c.Kind {
 		case Added:
@@ -191,8 +192,8 @@ func withoutOutside(fl []string) []string {
 	return out
 }
 
-// gitDir returns the repository dir for paths inside .git or *.git.
-func gitDir(rel string) string {
+// GitDir returns the repository dir for paths inside .git or *.git.
+func GitDir(rel string) string {
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 	for i, p := range parts[:len(parts)-1] {
 		if p == ".git" || strings.HasSuffix(p, ".git") {
@@ -202,7 +203,7 @@ func gitDir(rel string) string {
 	return ""
 }
 
-func noiseDir(rel string) string {
+func NoiseDir(rel string) string {
 	for _, p := range homeNoise {
 		if strings.HasPrefix(rel+"/", p) {
 			return p
@@ -249,15 +250,23 @@ func renderSteps(w io.Writer, sts []steps.Step) {
 			changed = append(changed, st)
 		}
 	}
-	calls, changing := 0, 0
+	// A failed call can report twice (PostToolUseFailure and PostToolUse).
+	ids := map[string]bool{}
+	changingIDs := map[string]bool{}
 	for _, st := range sts {
-		if st.Tool != "-" {
-			calls++
-			if len(st.Changes) > 0 {
-				changing++
-			}
+		if st.Tool == "-" {
+			continue
+		}
+		id := st.ID
+		if id == "" {
+			id = fmt.Sprint(st.N)
+		}
+		ids[id] = true
+		if len(st.Changes) > 0 {
+			changingIDs[id] = true
 		}
 	}
+	calls, changing := len(ids), len(changingIDs)
 	fmt.Fprintf(w, "\nSteps      %d tool calls, %d of them changed files\n", calls, changing)
 	for i, st := range changed {
 		if i == maxListed {
@@ -269,7 +278,7 @@ func renderSteps(w io.Writer, sts []steps.Step) {
 		for _, c := range st.Changes {
 			mark, rest := c[:1], c[1:]
 			layer, path, _ := strings.Cut(rest, ":")
-			if gitDir(path) != "" {
+			if GitDir(path) != "" {
 				git++
 				continue
 			}
@@ -304,7 +313,7 @@ var notable = []string{"fs.delete", "net.egress", "intent.", "persist", "fs.exec
 
 // renderShell lists shell commands whose models predict risky effects.
 func renderShell(w io.Writer, effs []effects.Effect) {
-	total, opaque := 0, 0
+	total := 0
 	type row struct{ cmd, pred string }
 	var rows []row
 	for _, e := range effs {
@@ -314,9 +323,6 @@ func renderShell(w io.Writer, effs []effects.Effect) {
 		total++
 		var hits []string
 		for _, p := range e.Predict {
-			if strings.HasPrefix(p, "opaque") {
-				opaque++
-			}
 			for _, n := range notable {
 				if strings.HasPrefix(p, n) {
 					hits = append(hits, p)
@@ -331,7 +337,7 @@ func renderShell(w io.Writer, effs []effects.Effect) {
 	if total == 0 {
 		return
 	}
-	fmt.Fprintf(w, "\nShell      %d commands, %d without a model\n", total, opaque)
+	fmt.Fprintf(w, "\nShell      %d commands, %d worth a look\n", total, len(rows))
 	for i, r := range rows {
 		if i == maxListed {
 			fmt.Fprintf(w, "  … and %d more\n", len(rows)-maxListed)
@@ -339,4 +345,22 @@ func renderShell(w io.Writer, effs []effects.Effect) {
 		}
 		fmt.Fprintf(w, "  $ %-40s → %s\n", clip(r.cmd, 40), r.pred)
 	}
+}
+
+// Diff writes a unified diff of one change.
+func Diff(w io.Writer, c Change) {
+	if c.IsDir() {
+		fmt.Fprintf(w, "%s %s/ (directory %s)\n", map[string]string{Added: "+", Deleted: "-", Replaced: "!"}[c.Kind], display(c), c.Kind)
+		return
+	}
+	a, b := c.Path, c.Upper
+	switch c.Kind {
+	case Added:
+		a = "/dev/null"
+	case Deleted:
+		b = "/dev/null"
+	}
+	cmd := exec.Command("diff", "-u", "--label", "a/"+display(c), "--label", "b/"+display(c), a, b)
+	cmd.Stdout, cmd.Stderr = w, w
+	_ = cmd.Run() // diff exits 1 when files differ
 }

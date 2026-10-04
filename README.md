@@ -7,8 +7,13 @@ then apply it or throw it away.
 ```console
 $ airbag run -- claude --dangerously-skip-permissions
 $ airbag review
-$ airbag apply        # or: airbag discard
+$ airbag apply        # or: airbag apply -i, or: airbag discard
 ```
+
+![demo: the agent deletes src, reads .env, tries to send it out, plants a line in ~/.bashrc and pushes; airbag review shows all of it; discard, and nothing happened](demo/demo.gif)
+
+The demo runs the real Claude Code; the "model" is `test/mockapi` playing a fixed
+script, so it is repeatable without an account (`demo/demo.sh`).
 
 ## What the agent gets
 
@@ -44,7 +49,9 @@ Outbox     1
 It flags persistence (git hooks, shell rc files, CI config, agent settings), new
 executables, changes outside the workspace and values from your `.env` files that
 ended up in the diff. `apply` refuses to overwrite files you changed on the host
-while the agent worked.
+while the agent worked. `apply -i` goes through the changes one by one (git
+internals and caches come as one piece each) and keeps the rejected ones in the
+session; `apply --only PATH` takes just part of the branch.
 
 ## Policies
 
@@ -93,11 +100,10 @@ config core.hooksPath` persists), and known secret values (from `.env` and
 credential-like variables) are masked in output that goes back to the agent.
 
 Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `test/policy-e2e.sh`,
-`python3 test/ctrlc.py` and `test/claude-e2e.sh` (the real Claude Code binary against a scripted mock of the
+`test/partial-e2e.sh`, `python3 test/ctrlc.py` and `test/claude-e2e.sh` (the real Claude Code binary against a scripted mock of the
 Messages API). With a real login, follow [docs/manual-test.md](docs/manual-test.md).
 
-Not yet: a local registry mirror, secret handles in files, an interactive review
-with partial apply, Codex hooks.
+Not yet: a local registry mirror, secret handles in files, Codex hooks.
 
 ## Threat model
 

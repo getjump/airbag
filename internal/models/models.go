@@ -181,6 +181,9 @@ var readOnly = map[string]bool{
 	"sed": true, "xxd": true, "od": true, "md5sum": true, "sha256sum": true, "local": true,
 	"return": true, "shift": true, "trap": true, "wait": true, "kill": true, "shopt": true,
 	"getent": true, "hostname": true, "tput": true, "stty": true, "clear": true,
+	"alias": true, "unalias": true, "builtin": true, "exit": true, "declare": true,
+	"typeset": true, "complete": true, "compgen": true, "hash": true, "let": true,
+	"getopts": true, "pushd": true, "popd": true, "dirs": true, "umask": true, "ulimit": true,
 }
 
 var codeRunners = map[string]bool{
@@ -200,7 +203,7 @@ func Predict(argv []string) []Effect {
 	if len(argv) == 0 {
 		return nil
 	}
-	name, args := base(argv[0]), argv[1:]
+	name, args := strings.TrimPrefix(base(argv[0]), "\\"), argv[1:] // \cmd skips aliases
 	files := nonFlags(args)
 	switch {
 	case readOnly[name]:

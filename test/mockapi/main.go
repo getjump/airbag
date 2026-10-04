@@ -39,6 +39,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8099", "listen address")
 	script := flag.String("script", "", "JSON file with tool calls")
 	logPath := flag.String("log", "", "append every request body here (what the model would see)")
+	verbose := flag.Bool("v", false, "print each tool call to stderr")
 	flag.Parse()
 	var calls []call
 	if b, err := os.ReadFile(*script); err == nil {
@@ -59,6 +60,15 @@ func main() {
 		done := strings.Count(string(body), `"type":"tool_result"`)
 		if len(req.Tools) > 0 && done < len(calls) {
 			c := calls[done]
+			if *verbose {
+				var in map[string]any
+				_ = json.Unmarshal(c.Input, &in)
+				what, _ := in["command"].(string)
+				if what == "" {
+					what, _ = in["file_path"].(string)
+				}
+				fmt.Fprintf(os.Stderr, "  \033[2magent ▶ %s: %s\033[0m\n", c.Name, what)
+			}
 			respond(w, req.Stream, map[string]any{"type": "tool_use", "id": fmt.Sprintf("toolu_mock_%02d", done+1), "name": c.Name, "input": json.RawMessage(c.Input)}, "tool_use")
 			return
 		}

@@ -31,8 +31,9 @@ const usage = `airbag — approve outcomes, not commands
       run the agent in a branch of the workspace and $HOME
   airbag review [ID]          what the agent changed, sent and queued
   airbag diff [ID] [PATH...]  unified diff of changed files
-  airbag apply [ID] [--yes] [--force]
-                              write the branch to the real files, then run the outbox
+  airbag apply [ID] [-i] [--only PATH]... [--yes] [--force]
+                              write the branch (or part of it) to the real files,
+                              then run the outbox
   airbag discard [ID] [--yes] throw the branch away
   airbag ls                   list sessions
   airbag log [ID]             raw effect log
@@ -243,20 +244,7 @@ func cmdDiff(args []string) error {
 		if c.IsDir() || !matches(c, args) || (strings.HasPrefix(c.Rel, ".git/") && len(args) == 0) {
 			continue
 		}
-		name := c.Rel
-		if c.Layer == "home" {
-			name = "~/" + c.Rel
-		}
-		a, b := c.Path, c.Upper
-		switch c.Kind {
-		case review.Added:
-			a = "/dev/null"
-		case review.Deleted:
-			b = "/dev/null"
-		}
-		cmd := exec.Command("diff", "-u", "--label", "a/"+name, "--label", "b/"+name, a, b)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		_ = cmd.Run() // diff exits 1 when files differ
+		review.Diff(os.Stdout, c)
 	}
 	return nil
 }
@@ -281,6 +269,9 @@ func cmdApply(args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	yes := fs.Bool("yes", false, "do not ask for confirmation")
 	force := fs.Bool("force", false, "overwrite files changed on the host during the session")
+	inter := fs.Bool("i", false, "go through the changes one by one")
+	var only stringList
+	fs.Var(&only, "only", "apply only changes under this path (repeatable)")
 	_ = fs.Parse(reorder(args))
 	s, err := findSession(fs.Arg(0))
 	if err != nil && fs.Arg(0) == "" {
@@ -293,7 +284,8 @@ func cmdApply(args []string) error {
 	if err != nil {
 		return err
 	}
-	return apply.Apply(s, cs, outbox.Open(s.OutboxPath()), apply.Options{Yes: *yes, Force: *force, In: os.Stdin, Out: os.Stdout})
+	return apply.Apply(s, cs, outbox.Open(s.OutboxPath()), apply.Options{
+		Yes: *yes, Force: *force, Interactive: *inter, Only: only, In: os.Stdin, Out: os.Stdout})
 }
 
 func cmdDiscard(args []string) error {
@@ -385,10 +377,15 @@ func withPendingIntents() (*session.Session, error) {
 // reorder lets flags follow the positional ID: `airbag apply s-1 --yes`.
 func reorder(args []string) []string {
 	var flags, pos []string
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case (a == "--only" || a == "-only") && i+1 < len(args):
+			flags = append(flags, a, args[i+1])
+			i++
+		case strings.HasPrefix(a, "-"):
 			flags = append(flags, a)
-		} else {
+		default:
 			pos = append(pos, a)
 		}
 	}
