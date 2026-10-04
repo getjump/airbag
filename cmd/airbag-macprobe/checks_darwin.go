@@ -375,7 +375,7 @@ func checkTLS(p *probe) Result {
 	attempt := func(trustd bool) (bool, string) {
 		prof := Profile{Write: []string{p.dir}, Ports: []int{px.Port()}, Trustd: trustd}
 		cmd := exec.Command("/usr/bin/sandbox-exec", "-p", prof.String(), exe, tlsClientArg, "https://proxy.golang.org/")
-		cmd.Env = append(os.Environ(), fmt.Sprintf("HTTPS_PROXY=http://127.0.0.1:%d", px.Port()), "TMPDIR="+p.dir)
+		cmd.Env = append(viaProxy(os.Environ(), px.Port()), "TMPDIR="+p.dir)
 		out, _ := cmd.CombinedOutput()
 		return strings.Contains(string(out), "tls=ok"), strings.TrimSpace(string(out))
 	}

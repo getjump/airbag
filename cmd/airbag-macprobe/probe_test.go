@@ -176,3 +176,11 @@ func TestNFSServer(t *testing.T) {
 		t.Fatal("remove did not reach the export")
 	}
 }
+
+func TestViaProxy(t *testing.T) {
+	env := viaProxy([]string{"HOME=/h", "NO_PROXY=*", "no_proxy=proxy.golang.org", "https_proxy=http://other:1", "HTTP_PROXY=http://other:2", "PATH=/bin"}, 3128)
+	want := []string{"HOME=/h", "PATH=/bin", "HTTPS_PROXY=http://127.0.0.1:3128"}
+	if strings.Join(env, " ") != strings.Join(want, " ") {
+		t.Fatalf("got %q, want %q", env, want)
+	}
+}

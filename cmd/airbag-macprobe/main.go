@@ -109,7 +109,11 @@ func main() {
 	} else {
 		fmt.Println(rep.SummaryLine())
 	}
-	if rep.Summary.Fail > 0 {
+	// An interrupted run is incomplete even when every check it ran passed.
+	switch {
+	case rep.Interrupted:
+		os.Exit(130)
+	case rep.Summary.Fail > 0:
 		os.Exit(1)
 	}
 }

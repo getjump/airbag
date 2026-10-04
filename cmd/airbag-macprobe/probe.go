@@ -97,6 +97,21 @@ func tlsClient(url string) int {
 	return 0
 }
 
+// viaProxy is env with every proxy setting Go reads replaced by one
+// HTTPS proxy: an inherited NO_PROXY would send the request around it.
+func viaProxy(env []string, port int) []string {
+	var out []string
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		switch strings.ToUpper(k) {
+		case "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY":
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, fmt.Sprintf("HTTPS_PROXY=http://127.0.0.1:%d", port))
+}
+
 func seconds(d time.Duration) float64 { return d.Seconds() }
 
 func timed(f func() error) (time.Duration, error) {
