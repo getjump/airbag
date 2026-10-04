@@ -45,6 +45,10 @@ type Meta struct {
 	// branch anyway (so they are reviewed and dropped on discard), e.g.
 	// the memory/ sub-directory of a passed-through transcript directory.
 	BranchHoles []string `json:"branch_holes,omitempty"`
+	// WroteBack: config files airbag itself rewrote at session end (the
+	// benign keys copied back), by real path, with the SHA-256 of what it
+	// wrote, so apply does not take airbag's own write for a host edit.
+	WroteBack map[string]string `json:"wrote_back,omitempty"`
 	// Paths under $HOME hidden from the agent (credentials).
 	Hidden []string `json:"hidden"`
 	// Host paths hidden from the agent (daemon sockets outside /run).

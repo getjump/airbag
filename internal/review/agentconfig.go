@@ -1,6 +1,8 @@
 package review
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -212,13 +214,22 @@ func (cf *jsonConfig) diff(prefix []string, a, b json.RawMessage) []keyChange {
 // in the branch for review; a malformed or non-regular file on either
 // side is left untouched. It returns one human-readable line per file it
 // wrote, for the caller to print. It never changes a key the agent did
-// not, and re-reads the real file so a concurrent host edit to a
-// different key is kept.
+// not, never writes a deletion back (a removed key stays in the branch
+// for review), and re-reads the real file so a concurrent host edit to a
+// different key is kept. What it wrote is recorded in s.WroteBack, so
+// apply's conflict check knows the write was airbag's; when the host had
+// also edited the file during the session, nothing is recorded and apply
+// reports the conflict as before.
 func WriteBackConfigs(s *session.Session) []string {
 	if !s.OverHome {
 		return nil // no branch of $HOME: the real file was never shadowed
 	}
+	since := s.Created
+	if !s.Baseline.IsZero() {
+		since = s.Baseline
+	}
 	var msgs []string
+	saved := false
 	for i := range jsonConfigs {
 		cf := &jsonConfigs[i]
 		branchPath := filepath.Join(s.HomeUpper(), cf.path)
@@ -243,18 +254,25 @@ func WriteBackConfigs(s *session.Session) []string {
 		default:
 			realRaw = []byte("{}")
 		}
+		// The host edited the real file during the session unless its
+		// change time is older, or it is exactly what airbag wrote back
+		// in an earlier run of this session.
+		hostEdited := false
+		if rerr == nil {
+			if fi, err := os.Lstat(realPath); err == nil && fi.ModTime().After(since) && s.WroteBack[realPath] != digest(realRaw) {
+				hostEdited = true
+			}
+		}
 		var wrote []string
 		for _, ch := range cf.diff(nil, realRaw, branchRaw) {
 			if ch.class != classWriteBack {
 				continue
 			}
-			var err error
-			if v, ok := getPath(branch, ch.path); ok {
-				err = setPath(real, ch.path, v)
-			} else {
-				err = deletePath(real, ch.path)
+			v, ok := getPath(branch, ch.path)
+			if !ok {
+				continue // a removed key is a change for review, not a write
 			}
-			if err == nil {
+			if err := setPath(real, ch.path, v); err == nil {
 				wrote = append(wrote, ch.String())
 			}
 		}
@@ -264,6 +282,16 @@ func WriteBackConfigs(s *session.Session) []string {
 				continue
 			}
 			msgs = append(msgs, fmt.Sprintf("~/%s: wrote back %d benign key(s): %s", cf.path, len(wrote), strings.Join(wrote, ", ")))
+			if s.WroteBack == nil {
+				s.WroteBack = map[string]string{}
+			}
+			after, err := readRegular(realPath)
+			if hostEdited || err != nil {
+				delete(s.WroteBack, realPath)
+			} else {
+				s.WroteBack[realPath] = digest(after)
+			}
+			saved = true
 		}
 		// If the branch copy now matches the real file, only benign keys
 		// differed, so drop it: review shows nothing for this file.
@@ -271,7 +299,30 @@ func WriteBackConfigs(s *session.Session) []string {
 			_ = os.Remove(branchPath)
 		}
 	}
+	if saved {
+		if err := s.Save(); err != nil {
+			msgs = append(msgs, fmt.Sprintf("could not record the write-back: %v", err))
+		}
+	}
 	return msgs
+}
+
+// digest is the hex SHA-256 of b, as recorded in session.WroteBack.
+func digest(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+// OwnWrite reports whether the file at path holds exactly what
+// WriteBackConfigs wrote there in this session, so its change time is
+// airbag's and not a host edit.
+func OwnWrite(s *session.Session, path string) bool {
+	want, ok := s.WroteBack[path]
+	if !ok {
+		return false
+	}
+	b, err := readRegular(path)
+	return err == nil && digest(b) == want
 }
 
 // configChanges lists a config file's changed key paths for review (names
@@ -318,8 +369,9 @@ func configKeyChange(c Change) (keys []string, persist bool, ok bool) {
 // class, each naming its keys: "persist" and "persist key(s): …" for keys
 // that run code or change trust, "unknown key(s): …" for keys the table
 // does not list (shown plainly, not as persistence), and "benign key(s):
-// …" for listed benign keys that were not written back (the real file
-// could not be written). nil when c is not a config file.
+// …" for listed benign keys that were not written back (removed by the
+// agent, or the real file could not be written). nil when c is not a
+// config file.
 func configFlags(c Change) []string {
 	changes, readable, ok := configChanges(c)
 	if !ok {
@@ -345,10 +397,15 @@ func configFlags(c Change) []string {
 	return out
 }
 
+// topLevel parses a config file, which must be a JSON object: null or
+// any other value is malformed, so it stays in the branch for review.
 func topLevel(b []byte) (map[string]json.RawMessage, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
+	}
+	if m == nil {
+		return nil, errNotObject
 	}
 	return m, nil
 }
@@ -391,16 +448,15 @@ func readRegular(path string) ([]byte, error) {
 
 // object parses an object value; an absent value counts as an empty
 // object, so a key added or removed on one side is compared by sub-key.
+// A present null is not an object: replacing an object with null is one
+// change of the whole subtree, never a deletion of each key in it.
 func object(b json.RawMessage) (map[string]json.RawMessage, bool) {
-	m := map[string]json.RawMessage{}
 	if len(b) == 0 {
-		return m, true
+		return map[string]json.RawMessage{}, true
 	}
-	if err := json.Unmarshal(b, &m); err != nil {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil || m == nil {
 		return nil, false
-	}
-	if m == nil { // JSON null
-		m = map[string]json.RawMessage{}
 	}
 	return m, true
 }
@@ -446,30 +502,6 @@ func setPath(m map[string]json.RawMessage, path []string, v json.RawMessage) err
 		return errNotObject
 	}
 	if err := setPath(child, path[1:], v); err != nil {
-		return err
-	}
-	b, err := marshalJSON(child, "")
-	if err != nil {
-		return err
-	}
-	m[path[0]] = b
-	return nil
-}
-
-func deletePath(m map[string]json.RawMessage, path []string) error {
-	if len(path) == 1 {
-		delete(m, path[0])
-		return nil
-	}
-	cur, present := m[path[0]]
-	if !present {
-		return nil
-	}
-	child, ok := object(cur)
-	if !ok {
-		return errNotObject
-	}
-	if err := deletePath(child, path[1:]); err != nil {
 		return err
 	}
 	b, err := marshalJSON(child, "")

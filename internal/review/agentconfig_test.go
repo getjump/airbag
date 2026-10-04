@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/session"
 )
@@ -353,5 +354,86 @@ func TestReviewListsUnknownKeys(t *testing.T) {
 		if !slices.Contains(fl, want) {
 			t.Errorf("mixed flags %v lack %q", fl, want)
 		}
+	}
+}
+
+// A null where an object was is not a deletion of every key in it: the
+// whole subtree is one change, left in the branch, and nothing is
+// written back from it.
+func TestWriteBackNullStaysInBranch(t *testing.T) {
+	for _, branch := range []string{
+		`null`,
+		`{"numStartups":1,"userID":"u","projects":null}`,
+		`{"numStartups":1,"userID":"u","projects":{"/w":null}}`,
+	} {
+		s, realPath, branchPath := cfgSession(t)
+		real := `{"numStartups":1,"userID":"u","projects":{"/w":{"lastCost":1,"allowedTools":[]}}}`
+		writeCfg(t, realPath, real)
+		writeCfg(t, branchPath, branch)
+		if msgs := WriteBackConfigs(s); len(msgs) != 0 {
+			t.Errorf("%s: wrote back %v", branch, msgs)
+		}
+		if b, _ := os.ReadFile(realPath); string(b) != real {
+			t.Errorf("%s: real file changed to %s", branch, b)
+		}
+		if _, err := os.Stat(branchPath); err != nil {
+			t.Errorf("%s: branch copy dropped: %v", branch, err)
+		}
+		c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+		if flags := configFlags(c); len(flags) == 0 {
+			t.Errorf("%s: review shows nothing", branch)
+		}
+	}
+}
+
+// A benign key the agent removed is not removed from the real file: it
+// stays a change for review.
+func TestWriteBackNeverWritesDeletion(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1,"oauthAccount":{"emailAddress":"me@example.com"}}`)
+	writeCfg(t, branchPath, `{"numStartups":2}`)
+	WriteBackConfigs(s)
+	got := readCfg(t, realPath)
+	if got["numStartups"] != float64(2) || got["oauthAccount"] == nil {
+		t.Fatalf("real file = %v, want the counter written and the account kept", got)
+	}
+	if _, err := os.Stat(branchPath); err != nil {
+		t.Fatalf("branch copy dropped: %v", err)
+	}
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+	if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "benign key(s): oauthAccount") {
+		t.Fatalf("flags = %q, want the removed key listed", flags)
+	}
+}
+
+// After a write-back, the real file's new change time is airbag's own,
+// until the host edits it again; when the host had edited it during the
+// session, nothing is recorded, so apply still reports the conflict.
+func TestOwnWriteRecordsOnlyAirbagsWrite(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1}`)
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(realPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	writeCfg(t, branchPath, `{"numStartups":2,"mcpServers":{"x":{"command":"/bin/true"}}}`)
+	WriteBackConfigs(s)
+	if !OwnWrite(s, realPath) {
+		t.Fatal("airbag's own write-back is not recognized")
+	}
+	if re, err := session.Load(s.Dir); err != nil || !OwnWrite(re, realPath) {
+		t.Fatalf("the record is not saved with the session: %v", err)
+	}
+	writeCfg(t, realPath, `{"numStartups":3}`)
+	if OwnWrite(s, realPath) {
+		t.Fatal("a later host edit counts as airbag's write")
+	}
+
+	s2, realPath2, branchPath2 := cfgSession(t)
+	writeCfg(t, realPath2, `{"numStartups":1,"theme":"dark"}`) // a host edit during the session
+	writeCfg(t, branchPath2, `{"numStartups":2,"mcpServers":{}}`)
+	WriteBackConfigs(s2)
+	if OwnWrite(s2, realPath2) {
+		t.Fatal("a file the host also edited is recorded as airbag's write")
 	}
 }

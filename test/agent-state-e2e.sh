@@ -114,4 +114,23 @@ $(cat "$T/run.out")"
 "$AIRBAG" apply --yes >/dev/null
 [ "$(tail -1 "$proj/memory/OLD.md")" = "kept by apply" ] || fail "apply did not write the memory edit: $(cat "$proj/memory/OLD.md")"
 [ ! -e "$proj/memory/GONE.md" ] || fail "apply did not carry the memory delete"
+
+# A third session changes a benign counter and a reviewed key together,
+# as Claude Code does when it adds trust or an MCP server: the counter is
+# written back at session end, and that write of airbag's own is not a
+# host edit, so apply takes the reviewed key without --force.
+cat > "$T/agent3.sh" <<'EOF2'
+set -eu
+cat > "$HOME/.claude.json" <<JSON
+{"numStartups":3,"userID":"seed","mcpServers":{"ok":{"command":"/bin/true"}}}
+JSON
+EOF2
+"$AIRBAG" run -- sh "$T/agent3.sh" >"$T/run.out" 2>&1 || fail "third agent run failed:
+$(cat "$T/run.out")"
+grep -Eq '"numStartups": *3' "$HOME/.claude.json" || fail "counter not written back in the third run"
+grep -q '"ok"' "$HOME/.claude.json" && fail "mcpServers reached the real file before apply"
+"$AIRBAG" apply --yes >"$T/apply.out" 2>&1 || fail "apply refused airbag's own write-back as a conflict:
+$(cat "$T/apply.out")"
+grep -q '"ok"' "$HOME/.claude.json" || fail "apply did not write the reviewed key: $(cat "$HOME/.claude.json")"
+grep -Eq '"numStartups": *3' "$HOME/.claude.json" || fail "apply lost the written-back counter"
 echo "PASS"
