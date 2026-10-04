@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -99,8 +100,45 @@ func allNumberings() []struct {
 	return out
 }
 
-// TestDeniedCalls checks every denied number on every ABI.
+// deniedVerdict is the expected verdict for each refused-by-number call,
+// written out independently of the filter's own eperm()/enosys() lists.
+// If a call is dropped from those lists the filter stops refusing it, but
+// this table still expects the refusal, so TestDeniedCalls fails. The
+// argument-checked calls (argChecked) are not here; they have their own
+// tests.
+var deniedVerdict = map[string]struct {
+	errno      uint32
+	strictOnly bool // the new mount API: refused only in --strict mode
+}{
+	"io_uring_setup": {retENOSYS, false}, "io_uring_enter": {retENOSYS, false}, "io_uring_register": {retENOSYS, false},
+	"bpf": {retEPERM, false}, "perf_event_open": {retEPERM, false}, "userfaultfd": {retEPERM, false},
+	"keyctl": {retEPERM, false}, "add_key": {retEPERM, false}, "request_key": {retEPERM, false},
+	"kexec_load": {retEPERM, false}, "kexec_file_load": {retEPERM, false},
+	"init_module": {retEPERM, false}, "finit_module": {retEPERM, false}, "delete_module": {retEPERM, false},
+	"open_by_handle_at": {retEPERM, false}, "quotactl": {retEPERM, false}, "acct": {retEPERM, false},
+	"swapon": {retEPERM, false}, "swapoff": {retEPERM, false}, "reboot": {retEPERM, false},
+	"syslog": {retEPERM, false}, "uselib": {retEPERM, false}, "lookup_dcookie": {retEPERM, false},
+	"move_pages": {retEPERM, false}, "migrate_pages": {retEPERM, false}, "fanotify_init": {retEPERM, false},
+	"open_tree": {retENOSYS, true}, "move_mount": {retENOSYS, true}, "fsopen": {retENOSYS, true},
+	"fsconfig": {retENOSYS, true}, "fsmount": {retENOSYS, true}, "fspick": {retENOSYS, true},
+	"mount_setattr": {retENOSYS, true},
+}
+
+// argChecked are refused or allowed by an argument, not a flat verdict.
+var argChecked = map[string]bool{
+	"ioctl": true, "socket": true, "socketpair": true, "personality": true, "socketcall": true,
+}
+
+// TestDeniedCalls checks every refused-by-number call on every ABI
+// against deniedVerdict, so a call silently dropped from the filter is
+// caught. It also checks every nrSet field is accounted for: either in
+// deniedVerdict or argChecked.
 func TestDeniedCalls(t *testing.T) {
+	for name := range nrsByName(nrSet{}) {
+		if _, ok := deniedVerdict[name]; !ok && !argChecked[name] {
+			t.Errorf("nrSet field %q is in neither deniedVerdict nor argChecked", name)
+		}
+	}
 	for _, g := range allNumberings() {
 		for _, strict := range []bool{false, true} {
 			p := agentFilter(abisFor(g.goarch), strict)
@@ -108,26 +146,87 @@ func TestDeniedCalls(t *testing.T) {
 				t.Fatalf("program too long: %d", len(p))
 			}
 			for _, a := range g.ns {
-				check := func(name string, nr uint32, want uint32) {
+				for name, nr := range nrsByName(a.n) {
+					v, ok := deniedVerdict[name]
+					if nr == 0 || !ok {
+						continue // absent on this ABI, or argument-checked
+					}
+					want := v.errno
+					if v.strictOnly && !strict {
+						want = retAllow
+					}
 					if got := runBPF(t, p, seccompData(a.audit, nr|a.bit, 0, 0)); got != want {
 						t.Errorf("%s strict=%v arch=%#x %s(nr=%d|%#x): got %#x want %#x",
 							g.goarch, strict, a.audit, name, nr, a.bit, got, want)
 					}
 				}
-				for _, nr := range a.n.eperm() {
-					check("eperm", nr, retEPERM)
-				}
-				for _, nr := range a.n.enosys() {
-					check("io_uring", nr, retENOSYS)
-				}
-				for _, nr := range a.n.strictENOSYS() {
-					want := uint32(retAllow)
-					if strict {
-						want = retENOSYS
+			}
+		}
+	}
+}
+
+// netlinkData builds seccomp_data for socket(AF_NETLINK, *, proto).
+func netlinkData(arch, nr, proto uint32) []byte {
+	b := seccompData(arch, nr, uint64(unix.AF_NETLINK), 0)
+	binary.LittleEndian.PutUint64(b[offArg2Low:], uint64(proto))
+	return b
+}
+
+// TestNetlinkProtocolFilter: the risky netlink protocols are refused on
+// every ABI and in both modes, the common ones pass. The denied list
+// here is fixed, not read from deniedNetlinkProtocols, so emptying that
+// variable fails this test.
+func TestNetlinkProtocolFilter(t *testing.T) {
+	denied := []uint32{unix.NETLINK_XFRM, unix.NETLINK_NETFILTER}
+	allowed := []uint32{
+		unix.NETLINK_ROUTE, unix.NETLINK_SOCK_DIAG, unix.NETLINK_AUDIT,
+		unix.NETLINK_KOBJECT_UEVENT, unix.NETLINK_GENERIC,
+	}
+	for _, g := range allNumberings() {
+		for _, strict := range []bool{false, true} {
+			p := agentFilter(abisFor(g.goarch), strict)
+			for _, a := range g.ns {
+				for _, nr := range []uint32{a.n.socket | a.bit, a.n.socketpair | a.bit} {
+					for _, proto := range denied {
+						if got := runBPF(t, p, netlinkData(a.audit, nr, proto)); got != retEPERM {
+							t.Errorf("%s arch %#x netlink proto %d: got %#x want EPERM", g.goarch, a.audit, proto, got)
+						}
+						// A protocol is an int: high bits must not change it.
+						d := netlinkData(a.audit, nr, proto)
+						binary.LittleEndian.PutUint64(d[offArg2Low:], 1<<32|uint64(proto))
+						if got := runBPF(t, p, d); got != retEPERM {
+							t.Errorf("%s arch %#x netlink proto %d high bits: got %#x want EPERM", g.goarch, a.audit, proto, got)
+						}
 					}
-					check("mount-api", nr, want)
+					for _, proto := range allowed {
+						if got := runBPF(t, p, netlinkData(a.audit, nr, proto)); got != retAllow {
+							t.Errorf("%s arch %#x netlink proto %d: got %#x want allow", g.goarch, a.audit, proto, got)
+						}
+					}
 				}
 			}
+		}
+	}
+}
+
+// TestSocketcallStrict: on i386 the socket-creating socketcall sub-calls
+// are refused in --strict mode and allowed by default; other sub-calls
+// pass in both.
+func TestSocketcallStrict(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		p := agentFilter(abisFor("amd64"), strict)
+		for _, call := range []uint32{1 /* SYS_SOCKET */, 8 /* SYS_SOCKETPAIR */} {
+			want := uint32(retAllow)
+			if strict {
+				want = retEPERM
+			}
+			if got := runBPF(t, p, seccompData(unix.AUDIT_ARCH_I386, nrs386.socketcall, uint64(call), 0)); got != want {
+				t.Errorf("strict=%v socketcall(%d): got %#x want %#x", strict, call, got, want)
+			}
+		}
+		// SYS_CONNECT (3) is not a socket-creating call: always allowed.
+		if got := runBPF(t, p, seccompData(unix.AUDIT_ARCH_I386, nrs386.socketcall, 3, 0)); got != retAllow {
+			t.Errorf("strict=%v socketcall(connect): got %#x want allow", strict, got)
 		}
 	}
 }
@@ -258,8 +357,15 @@ func TestUnknownArch(t *testing.T) {
 
 // TestSyscallNumbers cross-checks the hand-maintained number tables
 // against golang.org/x/sys's generated zsysnum tables, so a wrong or
-// stale number is caught in CI rather than shipped.
+// stale number is caught in CI rather than shipped. The call list comes
+// from nrsByName, so a new field cannot be left unchecked, and a field
+// left 0 must be genuinely absent from that ABI, not a silent typo.
 func TestSyscallNumbers(t *testing.T) {
+	// Every nrSet field is in nrsByName, so the checks below cover all
+	// of them.
+	if n := reflect.TypeOf(nrSet{}).NumField(); n != len(nrsByName(nrSet{})) {
+		t.Fatalf("nrSet has %d fields but nrsByName lists %d; keep them in step", n, len(nrsByName(nrSet{})))
+	}
 	dir := xsysUnixDir(t)
 	cases := []struct {
 		file string
@@ -272,93 +378,26 @@ func TestSyscallNumbers(t *testing.T) {
 	}
 	for _, c := range cases {
 		want := parseSysnums(t, filepath.Join(dir, c.file))
-		check := func(sym string, got uint32) {
+		for name, got := range nrsByName(c.nrs) {
+			sym := "SYS_" + strings.ToUpper(name)
+			w, ok := want[sym]
 			if got == 0 {
-				return // marked absent on this ABI
+				// 0 claims the call does not exist on this ABI; make sure
+				// x/sys agrees, so a real call is not silently skipped.
+				if ok {
+					t.Errorf("%s: %s is 0 in the table but x/sys has %s=%d", c.file, name, sym, w)
+				}
+				continue
 			}
-			if w, ok := want[sym]; !ok {
+			if !ok {
 				t.Errorf("%s: %s not in x/sys table", c.file, sym)
 			} else if w != got {
 				t.Errorf("%s: %s table has %d, x/sys has %d", c.file, sym, got, w)
 			}
 		}
-		n := c.nrs
-		check("SYS_IO_URING_SETUP", n.ioURingSetup)
-		check("SYS_IO_URING_ENTER", n.ioURingEnter)
-		check("SYS_IO_URING_REGISTER", n.ioURingRegister)
-		check("SYS_BPF", n.bpf)
-		check("SYS_PERF_EVENT_OPEN", n.perfEventOpen)
-		check("SYS_USERFAULTFD", n.userfaultfd)
-		check("SYS_KEYCTL", n.keyctl)
-		check("SYS_ADD_KEY", n.addKey)
-		check("SYS_REQUEST_KEY", n.requestKey)
-		check("SYS_KEXEC_LOAD", n.kexecLoad)
-		check("SYS_KEXEC_FILE_LOAD", n.kexecFileLoad)
-		check("SYS_INIT_MODULE", n.initModule)
-		check("SYS_FINIT_MODULE", n.finitModule)
-		check("SYS_DELETE_MODULE", n.deleteModule)
-		check("SYS_OPEN_BY_HANDLE_AT", n.openByHandleAt)
-		check("SYS_QUOTACTL", n.quotactl)
-		check("SYS_ACCT", n.acct)
-		check("SYS_SWAPON", n.swapon)
-		check("SYS_SWAPOFF", n.swapoff)
-		check("SYS_REBOOT", n.reboot)
-		check("SYS_SYSLOG", n.syslog)
-		check("SYS_USELIB", n.uselib)
-		check("SYS_LOOKUP_DCOOKIE", n.lookupDcookie)
-		check("SYS_OPEN_TREE", n.openTree)
-		check("SYS_MOVE_MOUNT", n.moveMount)
-		check("SYS_FSOPEN", n.fsopen)
-		check("SYS_FSCONFIG", n.fsconfig)
-		check("SYS_FSMOUNT", n.fsmount)
-		check("SYS_FSPICK", n.fspick)
-		check("SYS_MOUNT_SETATTR", n.mountSetattr)
-		check("SYS_IOCTL", n.ioctl)
-		check("SYS_SOCKET", n.socket)
-		check("SYS_SOCKETPAIR", n.socketpair)
-		check("SYS_PERSONALITY", n.personality)
 	}
 }
 
-func goArch() string { return runtime.GOARCH }
-
-func xsysUnixDir(t *testing.T) string {
-	t.Helper()
-	out, err := exec.CommandContext(t.Context(), "go", "list", "-m", "-f", "{{.Dir}}", "golang.org/x/sys").Output()
-	if err != nil {
-		t.Skipf("locate golang.org/x/sys: %v", err)
-	}
-	dir := filepath.Join(strings.TrimSpace(string(out)), "unix")
-	if _, err := os.Stat(dir); err != nil {
-		t.Skipf("x/sys unix dir: %v", err)
-	}
-	return dir
-}
-
-var sysnumLine = regexp.MustCompile(`^\s*(SYS_[A-Z0-9_]+)\s*=\s*(\d+)`)
-
-func parseSysnums(t *testing.T, path string) map[string]uint32 {
-	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Skipf("open %s: %v", path, err)
-	}
-	defer func() { _ = f.Close() }()
-	out := map[string]uint32{}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if m := sysnumLine.FindStringSubmatch(sc.Text()); m != nil {
-			n, err := strconv.ParseUint(m[2], 10, 32)
-			if err != nil {
-				t.Fatalf("%s: %q: %v", path, sc.Text(), err)
-			}
-			out[m[1]] = uint32(n)
-		}
-	}
-	return out
-}
-
-// nrsByName maps kernel syscall names to an nrSet's numbers.
 func nrsByName(n nrSet) map[string]uint32 {
 	return map[string]uint32{
 		"io_uring_setup": n.ioURingSetup, "io_uring_enter": n.ioURingEnter, "io_uring_register": n.ioURingRegister,
@@ -369,9 +408,11 @@ func nrsByName(n nrSet) map[string]uint32 {
 		"open_by_handle_at": n.openByHandleAt, "quotactl": n.quotactl, "acct": n.acct,
 		"swapon": n.swapon, "swapoff": n.swapoff, "reboot": n.reboot, "syslog": n.syslog, "uselib": n.uselib,
 		"lookup_dcookie": n.lookupDcookie,
-		"open_tree":      n.openTree, "move_mount": n.moveMount, "fsopen": n.fsopen,
+		"move_pages":     n.movePages, "migrate_pages": n.migratePages, "fanotify_init": n.fanotifyInit,
+		"open_tree": n.openTree, "move_mount": n.moveMount, "fsopen": n.fsopen,
 		"fsconfig": n.fsconfig, "fsmount": n.fsmount, "fspick": n.fspick, "mount_setattr": n.mountSetattr,
 		"ioctl": n.ioctl, "socket": n.socket, "socketpair": n.socketpair, "personality": n.personality,
+		"socketcall": n.socketcall,
 	}
 }
 
@@ -409,7 +450,11 @@ func TestX32SyscallNumbers(t *testing.T) {
 	for name, got := range nrsByName(nrsX32) {
 		rs, ok := rows[name]
 		if !ok {
-			t.Errorf("%s: not in the syscall_64.tbl excerpt", name)
+			// A call absent from the x86_64 table (socketcall) must be 0
+			// in the x32 set; a nonzero number for it is a mistake.
+			if got != 0 {
+				t.Errorf("%s=%d is not in the syscall_64.tbl excerpt", name, got)
+			}
 			continue
 		}
 		var want uint32
@@ -453,4 +498,42 @@ func TestJumpFits(t *testing.T) {
 		}
 	}()
 	jump(256)
+}
+
+func goArch() string { return runtime.GOARCH }
+
+func xsysUnixDir(t *testing.T) string {
+	t.Helper()
+	out, err := exec.CommandContext(t.Context(), "go", "list", "-m", "-f", "{{.Dir}}", "golang.org/x/sys").Output()
+	if err != nil {
+		t.Fatalf("locate golang.org/x/sys: %v", err)
+	}
+	dir := filepath.Join(strings.TrimSpace(string(out)), "unix")
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("x/sys unix dir: %v", err)
+	}
+	return dir
+}
+
+var sysnumLine = regexp.MustCompile(`^\s*(SYS_[A-Z0-9_]+)\s*=\s*(\d+)`)
+
+func parseSysnums(t *testing.T, path string) map[string]uint32 {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	out := map[string]uint32{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if m := sysnumLine.FindStringSubmatch(sc.Text()); m != nil {
+			n, err := strconv.ParseUint(m[2], 10, 32)
+			if err != nil {
+				t.Fatalf("%s: %q: %v", path, sc.Text(), err)
+			}
+			out[m[1]] = uint32(n)
+		}
+	}
+	return out
 }

@@ -3,6 +3,7 @@
 # Only the rows for the calls the seccomp filter routes; lines kept verbatim.
 # Columns: <number> <abi> <name> <entry point>. abi "common" = x86_64 and x32,
 # "64" = x86_64 only, "x32" = x32 only. TestX32SyscallNumbers reads this.
+# socketcall is not here: it is an i386/arm-oabi call, absent from the x86_64 table.
 16	64	ioctl			sys_ioctl
 41	common	socket			sys_socket
 53	common	socketpair		sys_socketpair
@@ -21,7 +22,10 @@
 248	common	add_key			sys_add_key
 249	common	request_key		sys_request_key
 250	common	keyctl			sys_keyctl
+256	common	migrate_pages		sys_migrate_pages
+279	64	move_pages		sys_move_pages
 298	common	perf_event_open		sys_perf_event_open
+300	common	fanotify_init		sys_fanotify_init
 304	common	open_by_handle_at	sys_open_by_handle_at
 313	common	finit_module		sys_finit_module
 320	common	kexec_file_load		sys_kexec_file_load
@@ -39,3 +43,4 @@
 442	common	mount_setattr		sys_mount_setattr
 514	x32	ioctl			compat_sys_ioctl
 528	x32	kexec_load		compat_sys_kexec_load
+533	x32	move_pages		sys_move_pages

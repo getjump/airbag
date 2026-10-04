@@ -23,8 +23,8 @@ import (
 // restrictAgent installs the filter with TSYNC just before the agent is
 // started, so it also governs PID 1 (the supervisor). Everything PID 1
 // does afterwards -- forking the agent, the proxy/forward bridges over
-// AF_UNIX, FUSE, reaping, signalling -- stays allowed; see the allow
-// list reasoning in restrictAgent's caller (init.go).
+// AF_UNIX, FUSE, reaping, signalling -- calls none of the refused
+// syscalls, so the filter does not get in its way.
 
 // seccomp_data layout. Arguments are 64-bit; only the low 32 bits are
 // compared, because the kernel truncates a syscall's register to the
@@ -37,6 +37,7 @@ const (
 	offArch    = 4
 	offArg0Low = 16 + 8*0
 	offArg1Low = 16 + 8*1
+	offArg2Low = 16 + 8*2
 
 	// x32SyscallBit marks a syscall made through the x32 ABI; it shares
 	// the AUDIT_ARCH_X86_64 value with 64-bit calls and is told apart
@@ -66,11 +67,24 @@ var allowedSocketFamilies = []uint32{
 	unix.AF_UNSPEC, unix.AF_UNIX, unix.AF_INET, unix.AF_INET6, unix.AF_NETLINK,
 }
 
-// Personality values Docker's default profile allows: PER_LINUX and the
-// read-implies-exec / ADDR_NO_RANDOMIZE combinations, plus 0xffffffff,
-// which queries the current personality without changing it. Anything
-// else (a switch to another execution domain) is refused.
-var allowedPersonality = []uint32{0x0, 0x8, 0x20000, 0x20008, 0xffffffff}
+// deniedNetlinkProtocols are refused even for an AF_NETLINK socket. The
+// agent can make its own user+network namespace, where it is root, and
+// from there NETLINK_NETFILTER configures nf_tables and NETLINK_XFRM the
+// IPsec state -- both kernel subsystems with a history of
+// unprivileged-userns bugs. Everything else (NETLINK_ROUTE, SOCK_DIAG,
+// KOBJECT_UEVENT, GENERIC, ...) stays allowed, because getaddrinfo, ss,
+// udev and generic-netlink tools need it; a denylist of the two risky
+// protocols breaks less than an allowlist of the safe ones would.
+var deniedNetlinkProtocols = []uint32{unix.NETLINK_XFRM, unix.NETLINK_NETFILTER}
+
+// Personality values the agent may set. 0x0 is PER_LINUX, the default
+// domain. 0x8 is PER_LINUX32, 0x20000 is UNAME26 and 0x20008 is both
+// (the set Docker's default profile allows). 0x40000 is ADDR_NO_RANDOMIZE
+// and 0x40008 ADDR_NO_RANDOMIZE|PER_LINUX32, which turn off the agent's
+// own ASLR and nothing else, so gdb, rr and `setarch -R` work. 0xffffffff
+// queries the current personality without changing it. Any other value --
+// a switch to another execution domain -- is refused.
+var allowedPersonality = []uint32{0x0, 0x8, 0x20000, 0x20008, 0x40000, 0x40008, 0xffffffff}
 
 // terminalIoctls are the ioctl requests refused on every ABI: TIOCSTI
 // pushes bytes into a terminal's input as if typed (CVE-2017-5226),
@@ -80,8 +94,8 @@ var terminalIoctls = []uint32{unix.TIOCSTI, unix.TIOCLINUX}
 
 // nrSet is one architecture's syscall numbers for the calls the filter
 // treats specially. A zero means the call does not exist on that ABI
-// (for example uselib and socketcall on arm64, kexec_file_load on
-// 32-bit x86) and is skipped.
+// (for example uselib on arm64, kexec_file_load on i386, socketcall
+// anywhere but i386) and is skipped.
 type nrSet struct {
 	// EPERM: refused outright.
 	ioURingSetup, ioURingEnter, ioURingRegister uint32
@@ -92,6 +106,7 @@ type nrSet struct {
 	openByHandleAt, quotactl, acct              uint32
 	swapon, swapoff, reboot, syslog, uselib     uint32
 	lookupDcookie                               uint32
+	movePages, migratePages, fanotifyInit       uint32
 
 	// ENOSYS: refused so the caller falls back. io_uring can create
 	// sockets (AF_VSOCK included) without a socket() call, so it is kept
@@ -110,8 +125,12 @@ type nrSet struct {
 	// Argument-checked. socketpair takes the family as its first
 	// argument like socket, and creates sockets of that family (for
 	// example AF_TIPC since Linux 4.12), so it goes through the same
-	// family check.
-	ioctl, socket, socketpair, personality uint32
+	// family check. socketcall is i386's multiplexer: in --strict mode
+	// its SYS_SOCKET/SYS_SOCKETPAIR sub-calls are refused by the call
+	// number in arg0. The family is behind a pointer the filter cannot
+	// read, so this is coarse -- in --strict mode 32-bit socket creation
+	// is refused outright.
+	ioctl, socket, socketpair, personality, socketcall uint32
 }
 
 // abi is one ABI the filter covers: an AUDIT_ARCH value and the syscall
@@ -138,18 +157,20 @@ var (
 		openByHandleAt: 304, quotactl: 179, acct: 163,
 		swapon: 167, swapoff: 168, reboot: 169, syslog: 103, uselib: 134,
 		lookupDcookie: 212,
-		openTree:      428, moveMount: 429, fsopen: 430,
+		movePages:     279, migratePages: 256, fanotifyInit: 300,
+		openTree: 428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
 		ioctl: 16, socket: 41, socketpair: 53, personality: 135,
 	}
 	// nrsX32 is the x32 ABI, from arch/x86/entry/syscalls/syscall_64.tbl
 	// (https://github.com/torvalds/linux/blob/v6.18/arch/x86/entry/syscalls/syscall_64.tbl):
 	// a "common" row has the same number as x86_64, an "x32" row
-	// (512-547) is x32's own. kexec_load (528) and ioctl (514) are x32
-	// rows. uselib (134) is "64"-only and has no x32 entry, so it is 0
-	// here; the kernel returns ENOSYS for it, as for the "64"-only ioctl
-	// (16) and kexec_load (246) numbers, when called through x32. The
-	// filter adds x32SyscallBit to every number below.
+	// (512-547) is x32's own. kexec_load (528), ioctl (514) and
+	// move_pages (533) are x32 rows. uselib (134) is "64"-only and has
+	// no x32 entry, so it is 0 here; the kernel returns ENOSYS for it, as
+	// for the "64"-only ioctl (16), kexec_load (246) and move_pages (279)
+	// numbers, when called through x32. The filter adds x32SyscallBit to
+	// every number below.
 	nrsX32 = nrSet{
 		ioURingSetup: 425, ioURingEnter: 426, ioURingRegister: 427,
 		bpf: 321, perfEventOpen: 298, userfaultfd: 323,
@@ -159,7 +180,8 @@ var (
 		openByHandleAt: 304, quotactl: 179, acct: 163,
 		swapon: 167, swapoff: 168, reboot: 169, syslog: 103, uselib: 0, // "64"-only
 		lookupDcookie: 212,
-		openTree:      428, moveMount: 429, fsopen: 430,
+		movePages:     533 /* x32 row */, migratePages: 256, fanotifyInit: 300,
+		openTree: 428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
 		ioctl: 514, socket: 41, socketpair: 53, personality: 135,
 	}
@@ -172,9 +194,10 @@ var (
 		openByHandleAt: 342, quotactl: 131, acct: 51,
 		swapon: 87, swapoff: 115, reboot: 88, syslog: 103, uselib: 86,
 		lookupDcookie: 253,
-		openTree:      428, moveMount: 429, fsopen: 430,
+		movePages:     317, migratePages: 294, fanotifyInit: 338,
+		openTree: 428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
-		ioctl: 54, socket: 359, socketpair: 360, personality: 136,
+		ioctl: 54, socket: 359, socketpair: 360, personality: 136, socketcall: 102,
 	}
 	nrsARM64 = nrSet{
 		ioURingSetup: 425, ioURingEnter: 426, ioURingRegister: 427,
@@ -185,7 +208,8 @@ var (
 		openByHandleAt: 265, quotactl: 60, acct: 89,
 		swapon: 224, swapoff: 225, reboot: 142, syslog: 116, uselib: 0, // no uselib on arm64
 		lookupDcookie: 18,
-		openTree:      428, moveMount: 429, fsopen: 430,
+		movePages:     239, migratePages: 238, fanotifyInit: 262,
+		openTree: 428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
 		ioctl: 29, socket: 198, socketpair: 199, personality: 92,
 	}
@@ -198,7 +222,8 @@ var (
 		openByHandleAt: 371, quotactl: 131, acct: 51,
 		swapon: 87, swapoff: 115, reboot: 88, syslog: 103, uselib: 86,
 		lookupDcookie: 249,
-		openTree:      428, moveMount: 429, fsopen: 430,
+		movePages:     344, migratePages: 400, fanotifyInit: 367,
+		openTree: 428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
 		ioctl: 54, socket: 281, socketpair: 288, personality: 136,
 	}
@@ -234,6 +259,7 @@ func (n nrSet) eperm() []uint32 {
 		n.openByHandleAt, n.quotactl, n.acct,
 		n.swapon, n.swapoff, n.reboot, n.syslog, n.uselib,
 		n.lookupDcookie,
+		n.movePages, n.migratePages, n.fanotifyInit,
 	)
 }
 
@@ -360,6 +386,12 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 			route(nonzero(s.n.ioctl), "ioctl")
 			route(nonzero(s.n.socket, s.n.socketpair), "socket")
 			route(nonzero(s.n.personality), "personality")
+			if strict {
+				// i386 socketcall only; the family is behind a pointer
+				// the filter cannot read, so refuse socket creation by
+				// the sub-call number instead (coarse, --strict only).
+				route(nonzero(s.n.socketcall), "socketcall")
+			}
 		}
 		b.jmp("allow")
 	}
@@ -377,11 +409,35 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 	b.jmp("allow")
 
 	b.label("socket")
-	b.ld(offArg0Low)
+	b.ld(offArg0Low) // family
+	// AF_NETLINK is allowed, but not every netlink protocol: divert to
+	// the protocol check. Every other allowed family passes here.
+	b.jeqNext(unix.AF_NETLINK)
+	b.jmp("netlinkproto")
 	for _, fam := range allowedSocketFamilies {
 		b.jeqAllow(fam)
 	}
 	b.jmp("eperm")
+
+	// netlinkproto refuses the risky netlink protocols (arg2) and allows
+	// the rest. It is reached only for an AF_NETLINK socket/socketpair.
+	b.label("netlinkproto")
+	b.ld(offArg2Low)
+	for _, proto := range deniedNetlinkProtocols {
+		b.jeqNext(proto)
+		b.jmp("eperm")
+	}
+	b.jmp("allow")
+
+	// socketcall (i386, --strict): refuse the socket-creating sub-calls
+	// by the call number in arg0.
+	b.label("socketcall")
+	b.ld(offArg0Low)
+	for _, call := range []uint32{1 /* SYS_SOCKET */, 8 /* SYS_SOCKETPAIR */} {
+		b.jeqNext(call)
+		b.jmp("eperm")
+	}
+	b.jmp("allow")
 
 	b.label("personality")
 	b.ld(offArg0Low)
