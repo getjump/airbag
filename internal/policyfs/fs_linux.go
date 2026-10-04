@@ -44,10 +44,14 @@ func (v *View) Close() error { return unix.Close(v.fd) }
 
 func (v *View) Mount() (*fuse.Server, error) {
 	zero := time.Duration(0)
-	return fs.Mount(v.path, &node{view: v}, &fs.Options{
+	server, err := fs.Mount(v.path, &node{view: v}, &fs.Options{
 		MountOptions: fuse.MountOptions{DirectMount: true, DirectMountStrict: true, FsName: "airbag-policy", Name: "airbag", Options: []string{"default_permissions"}, EnableLocks: true},
 		AttrTimeout:  &zero, EntryTimeout: &zero, NegativeTimeout: &zero,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", v.path, err)
+	}
+	return server, nil
 }
 
 type node struct {
@@ -115,6 +119,7 @@ func (n *node) stat(rel string, st *syscall.Stat_t) syscall.Errno {
 func (n *node) newChild(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	var st syscall.Stat_t
 	if errno := n.stat(n.child(name), &st); errno != 0 {
+		fmt.Fprintf(os.Stderr, "airbag: backing lookup %s: %v\n", n.absolute(n.child(name)), errno)
 		return nil, errno
 	}
 	out.Attr.FromStat(&st)
