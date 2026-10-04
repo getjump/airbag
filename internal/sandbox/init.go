@@ -122,11 +122,13 @@ func buildWorld(s *session.Session) error {
 		// deletions land in the branch. That view is the home overlay's
 		// own at the hole's path, which the passthrough bind below would
 		// cover, so take a bind of it first and put it back after.
+		// A hole that cannot be set up fails the session: its parent
+		// would pass through whole, and the hole's writes with it.
 		views := make([]string, len(s.BranchHoles))
 		for i, h := range s.BranchHoles {
 			src := filepath.Join(s.Home, h)
 			if st, err := os.Lstat(src); err != nil || !st.IsDir() {
-				continue
+				return fmt.Errorf("branch hole ~/%s: not a directory", h)
 			}
 			view := s.MountDir(fmt.Sprintf("hole-%d", i))
 			if err := os.MkdirAll(view, 0o700); err != nil {
@@ -153,12 +155,9 @@ func buildWorld(s *session.Session) error {
 		// The mount taken above keeps its own reference to the overlay,
 		// so it survives /tmp and the session root being hidden below.
 		for i, h := range s.BranchHoles {
-			if views[i] == "" {
-				continue
-			}
 			dst := filepath.Join(s.Home, h)
 			if st, err := os.Lstat(dst); err != nil || !st.IsDir() {
-				continue
+				return fmt.Errorf("branch hole ~/%s: not a directory under the passed-through parent", h)
 			}
 			if err := bind(views[i], dst, true); err != nil {
 				return err

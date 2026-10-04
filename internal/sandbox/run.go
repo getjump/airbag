@@ -106,7 +106,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	// in the real $HOME: as a mountpoint inside the passed-through parent,
 	// and as the lower layer of the copy-on-write view put on it (init.go).
 	for _, h := range s.BranchHoles {
-		_ = os.MkdirAll(filepath.Join(s.Home, h), 0o700)
+		if err := os.MkdirAll(filepath.Join(s.Home, h), 0o700); err != nil {
+			return 1, fmt.Errorf("branch hole ~/%s: %w", h, err)
+		}
 	}
 
 	self, err := os.Executable()
