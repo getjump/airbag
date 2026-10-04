@@ -461,12 +461,15 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 			return fmt.Sprintf("could not write ~/%s back: %v", cf.path, err), false
 		}
 		out = append(out, '\n')
-		err = replaceIf(realPath, out, realRaw, exists, func() bool {
+		err = replaceIf(realPath, out, realRaw, exists, filepath.Join(s.Dir, "displaced"), func() bool {
 			now, nowExists, err := fileState(realPath)
 			return err == nil && nowExists == exists && now == before
 		})
 		if errors.Is(err, errChanged) {
 			continue
+		}
+		if errors.Is(err, errNoAtomic) {
+			return fmt.Sprintf("~/%s not written back (%v); its changes stay in the branch", cf.path, err), false
 		}
 		if err != nil {
 			return fmt.Sprintf("could not write ~/%s back: %v", cf.path, err), false
@@ -870,18 +873,29 @@ func writeAtomic(path string, data []byte, unchanged func() bool) error {
 }
 
 // replaceIf is writeAtomic for the real file, as a compare-and-swap:
-// the replacement happens only while path still holds want (existed)
-// or is still absent (!existed). A rename cannot compare, so the new
-// file is swapped in atomically and what it displaced is checked after;
-// when that is not want, the host wrote in between, and the swap is
-// undone. Where the filesystem cannot swap, it falls back to a plain
-// rename after unchanged.
-func replaceIf(path string, data, want []byte, existed bool, unchanged func() bool) error {
+// the replacement happens only while path still holds want, with the
+// same mode (existed), or is still absent (!existed). A rename cannot
+// compare, so the new file is swapped in atomically and what it
+// displaced is checked after; when that is not want, the host wrote in
+// between, and the swap is undone. Without an atomic swap or create
+// the filesystem gets no write-back at all (errNoAtomic). A file this
+// displaces that is not airbag's own is never deleted: if one is left
+// over, it is moved to keepDir and reported as a *keptError.
+func replaceIf(path string, data, want []byte, existed bool, keepDir string, unchanged func() bool) (err error) {
 	tmp, mode, err := writeTemp(path, data)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(tmp) }() // after a swap it holds the displaced file
+	accepted := false
+	defer func() {
+		if got, rerr := readRegular(tmp); rerr == nil && !accepted && !bytes.Equal(got, data) {
+			if kept, kerr := keepAside(tmp, keepDir); kerr == nil {
+				err = &keptError{kept}
+				return
+			}
+		}
+		_ = os.Remove(tmp)
+	}()
 	if !unchanged() {
 		return errChanged
 	}
@@ -891,7 +905,7 @@ func replaceIf(path string, data, want []byte, existed bool, unchanged func() bo
 		case errors.Is(err, fs.ErrExist):
 			return errChanged // the host created it meanwhile
 		case cannotSwap(err):
-			return os.Rename(tmp, path)
+			return errNoAtomic
 		}
 		return err
 	}
@@ -900,7 +914,7 @@ func replaceIf(path string, data, want []byte, existed bool, unchanged func() bo
 	case errors.Is(err, fs.ErrNotExist):
 		return errChanged // the host removed it meanwhile
 	case cannotSwap(err):
-		return os.Rename(tmp, path)
+		return errNoAtomic
 	case err != nil:
 		return err
 	}
@@ -908,13 +922,15 @@ func replaceIf(path string, data, want []byte, existed bool, unchanged func() bo
 	// the replacement was given: a host chmod in between is a change too.
 	if got, err := readRegular(tmp); err == nil && bytes.Equal(got, want) {
 		if fi, err := os.Lstat(tmp); err == nil && fi.Mode().Perm() == mode {
+			accepted = true
 			return nil
 		}
 	}
 	afterSwap()
 	// Put the host's write back. If the host replaced airbag's file in
 	// the meantime, the swap brings back airbag's file instead of the
-	// newer host write: swap once more, so the newest write stays.
+	// newer host write: swap once more, so the newer write is at path.
+	// Whatever host write ends up displaced is kept, not deleted.
 	if err := renameExchange(tmp, path); err != nil {
 		return err
 	}
@@ -924,6 +940,34 @@ func replaceIf(path string, data, want []byte, existed bool, unchanged func() bo
 		}
 	}
 	return errChanged
+}
+
+// errNoAtomic: the filesystem cannot swap or create a file atomically.
+var errNoAtomic = errors.New("this filesystem cannot replace it atomically")
+
+// keptError reports a host write that a write-back displaced and could
+// not put back, kept at path.
+type keptError struct{ path string }
+
+func (e *keptError) Error() string {
+	return "a version written on the host meanwhile is kept in " + e.path
+}
+
+// keepAside moves a displaced file into dir under a new name.
+func keepAside(tmp, dir string) (string, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, "displaced-*")
+	if err != nil {
+		return "", err
+	}
+	_ = f.Close()
+	if err := os.Rename(tmp, f.Name()); err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 // afterSwap is a test hook: a host write between the swap and its undo.

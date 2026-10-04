@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/getjump/airbag/internal/session"
 )
 
@@ -743,7 +745,7 @@ func TestReplaceIfKeepsARacingHostWrite(t *testing.T) {
 		}
 		return true
 	}
-	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, hostWrite); !errors.Is(err, errChanged) {
+	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), hostWrite); !errors.Is(err, errChanged) {
 		t.Fatalf("err = %v, want errChanged", err)
 	}
 	if got := readCfg(t, p); got["a"] != "host" {
@@ -752,14 +754,14 @@ func TestReplaceIfKeepsARacingHostWrite(t *testing.T) {
 	// Absent at the start, created by the host meanwhile: not replaced.
 	q := filepath.Join(dir, "new.json")
 	hostCreate := func() bool { writeCfg(t, q, `{"b":"host"}`); return true }
-	if err := replaceIf(q, []byte(`{"b":2}`), nil, false, hostCreate); !errors.Is(err, errChanged) {
+	if err := replaceIf(q, []byte(`{"b":2}`), nil, false, filepath.Join(dir, "kept"), hostCreate); !errors.Is(err, errChanged) {
 		t.Fatalf("err = %v, want errChanged", err)
 	}
 	if got := readCfg(t, q); got["b"] != "host" {
 		t.Fatalf("file = %v, want the host's file kept", got)
 	}
 	// Unchanged: replaced, and no scratch file is left.
-	if err := replaceIf(p, []byte(`{"a":3}`), []byte(`{"a":"host"}`), true, func() bool { return true }); err != nil {
+	if err := replaceIf(p, []byte(`{"a":3}`), []byte(`{"a":"host"}`), true, filepath.Join(dir, "kept"), func() bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	if got := readCfg(t, p); got["a"] != float64(3) {
@@ -773,7 +775,8 @@ func TestReplaceIfKeepsARacingHostWrite(t *testing.T) {
 // A host chmod after the check is a change too: the swap is undone and
 // the host's mode stays.
 func TestReplaceIfKeepsARacingChmod(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "cfg.json")
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfg.json")
 	writeCfg(t, p, `{"a":1}`)
 	chmod := func() bool {
 		if err := os.Chmod(p, 0o644); err != nil {
@@ -781,7 +784,7 @@ func TestReplaceIfKeepsARacingChmod(t *testing.T) {
 		}
 		return true
 	}
-	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, chmod); !errors.Is(err, errChanged) {
+	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), chmod); !errors.Is(err, errChanged) {
 		t.Fatalf("err = %v, want errChanged", err)
 	}
 	fi, err := os.Stat(p)
@@ -793,7 +796,8 @@ func TestReplaceIfKeepsARacingChmod(t *testing.T) {
 // Undoing the swap does not bury a host write that replaced airbag's
 // file in the meantime: the newest host write stays.
 func TestReplaceIfUndoKeepsTheNewestHostWrite(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "cfg.json")
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfg.json")
 	writeCfg(t, p, `{"a":1}`)
 	replace := func(v string) {
 		writeCfg(t, p+".host", v)
@@ -804,11 +808,45 @@ func TestReplaceIfUndoKeepsTheNewestHostWrite(t *testing.T) {
 	afterSwap = func() { replace(`{"a":"second"}`) }
 	t.Cleanup(func() { afterSwap = func() {} })
 	first := func() bool { replace(`{"a":"first"}`); return true }
-	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, first); !errors.Is(err, errChanged) {
-		t.Fatalf("err = %v, want errChanged", err)
+	err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), first)
+	var kept *keptError
+	if !errors.As(err, &kept) {
+		t.Fatalf("err = %v, want the displaced host write reported as kept", err)
 	}
 	if got := readCfg(t, p); got["a"] != "second" {
 		t.Fatalf("file = %v, want the newest host write", got)
+	}
+	// The older host write is not deleted: it is kept aside.
+	if got := readCfg(t, kept.path); got["a"] != "first" {
+		t.Fatalf("kept = %v, want the older host write", got)
+	}
+}
+
+// Where the filesystem cannot swap atomically, nothing is written: the
+// changes stay in the branch rather than racing the host.
+func TestReplaceIfRefusesWithoutAtomicSwap(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfg.json")
+	writeCfg(t, p, `{"a":1}`)
+	saved, savedNR := renameExchange, renameNoReplace
+	t.Cleanup(func() { renameExchange, renameNoReplace = saved, savedNR })
+	renameExchange = func(string, string) error { return unix.ENOTSUP }
+	renameNoReplace = func(string, string) error { return unix.EINVAL }
+	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), func() bool { return true }); !errors.Is(err, errNoAtomic) {
+		t.Fatalf("err = %v, want errNoAtomic", err)
+	}
+	if got := readCfg(t, p); got["a"] != float64(1) {
+		t.Fatalf("file = %v, want it untouched", got)
+	}
+	q := filepath.Join(dir, "new.json")
+	if err := replaceIf(q, []byte(`{"b":1}`), nil, false, filepath.Join(dir, "kept"), func() bool { return true }); !errors.Is(err, errNoAtomic) {
+		t.Fatalf("err = %v, want errNoAtomic", err)
+	}
+	if _, err := os.Lstat(q); !os.IsNotExist(err) {
+		t.Fatalf("a file was created without an atomic create (err %v)", err)
+	}
+	if es, _ := os.ReadDir(dir); len(es) != 1 {
+		t.Fatalf("scratch files left: %v", es)
 	}
 }
 
