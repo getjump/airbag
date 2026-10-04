@@ -26,7 +26,8 @@ var homeNoise = []struct{ match, group, kind string }{
 	{".local/state/", "", "cache"}, {".rustup/", "", "cache"},
 	// Codex keeps its state in SQLite next to config.toml; config.toml,
 	// AGENTS.md, rules and user skills stay visible.
-	{".codex/.tmp/", ".codex/", "agent state"}, {".codex/tmp/", ".codex/", "agent state"}, {".codex/shell_snapshots/", ".codex/", "agent state"},
+	{".codex/.tmp/", ".codex/", "agent state"}, {".codex/tmp/", ".codex/", "agent state"},
+	{".codex/thread-writer-locks/", ".codex/", "agent state"}, {".codex/shell_snapshots/", ".codex/", "agent state"},
 	{".codex/skills/.system/", ".codex/", "agent state"}, {".codex/*.sqlite*", ".codex/", "agent state"},
 	{".codex/installation_id", ".codex/", "agent state"}, {".codex/.sandbox_migration", ".codex/", "agent state"},
 	{".codex/version.json", ".codex/", "agent state"}, {".codex/models_cache.json", ".codex/", "agent state"},
@@ -326,11 +327,16 @@ func renderSteps(w io.Writer, sts []steps.Step) {
 		}
 		var shown []string
 		git, more := 0, 0
+		noise := map[string]int{}
 		for _, c := range st.Changes {
 			mark, rest := c[:1], c[1:]
 			layer, path, _ := strings.Cut(rest, ":")
 			if GitDir(path) != "" {
 				git++
+				continue
+			}
+			if _, kind := Noise(path); layer == "home" && kind != "" {
+				noise[kind]++
 				continue
 			}
 			if layer == "home" {
@@ -347,6 +353,9 @@ func renderSteps(w io.Writer, sts []steps.Step) {
 		}
 		if git > 0 {
 			shown = append(shown, fmt.Sprintf("(git: %d files)", git))
+		}
+		for _, kind := range sortedKeys(noise) {
+			shown = append(shown, fmt.Sprintf("(%s: %d files)", kind, noise[kind]))
 		}
 		fmt.Fprintf(w, "  #%-3d %-6s %-38s → %s\n", st.N, st.Tool, clip(st.Summary, 38), strings.Join(shown, " "))
 	}

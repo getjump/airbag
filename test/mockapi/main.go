@@ -58,16 +58,13 @@ func main() {
 		var req request
 		_ = json.Unmarshal(body, &req)
 		done := strings.Count(string(body), `"type":"tool_result"`)
+		if *verbose {
+			showResult(lastResult(body))
+		}
 		if len(req.Tools) > 0 && done < len(calls) {
 			c := calls[done]
 			if *verbose {
-				var in map[string]any
-				_ = json.Unmarshal(c.Input, &in)
-				what, _ := in["command"].(string)
-				if what == "" {
-					what, _ = in["file_path"].(string)
-				}
-				fmt.Fprintf(os.Stderr, "  \033[2magent ▶ %s: %s\033[0m\n", c.Name, what)
+				fmt.Fprintf(os.Stderr, "  \033[2magent ▶ %s: %s\033[0m\n", c.Name, c.summary())
 			}
 			respond(w, req.Stream, map[string]any{"type": "tool_use", "id": fmt.Sprintf("toolu_mock_%02d", done+1), "name": c.Name, "input": json.RawMessage(c.Input)}, "tool_use")
 			return
@@ -84,11 +81,14 @@ func main() {
 			}
 		}
 		done := strings.Count(string(body), `"type":"function_call_output"`) + strings.Count(string(body), `"type":"custom_tool_call_output"`)
+		if *verbose {
+			showResult(lastResult(body))
+		}
 		var item map[string]any
 		if done < len(calls) {
 			c := calls[done]
 			if *verbose {
-				fmt.Fprintf(os.Stderr, "  \033[2magent ▶ %s: %s\033[0m\n", c.Name, string(c.Input))
+				fmt.Fprintf(os.Stderr, "  \033[2magent ▶ %s: %s\033[0m\n", c.Name, c.summary())
 			}
 			item = map[string]any{"type": "function_call", "name": c.Name, "arguments": string(c.Input),
 				"call_id": fmt.Sprintf("call_mock_%02d", done+1), "id": fmt.Sprintf("fc_mock_%02d", done+1)}
@@ -162,4 +162,107 @@ func respond(w http.ResponseWriter, stream bool, block map[string]any, stop stri
 	send("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 	send("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": stop, "stop_sequence": nil}, "usage": map[string]int{"output_tokens": 10}})
 	send("message_stop", map[string]any{"type": "message_stop"})
+}
+
+// summary is how -v shows a call.
+func (c call) summary() string {
+	var in map[string]any
+	_ = json.Unmarshal(c.Input, &in)
+	for _, k := range []string{"command", "cmd", "file_path"} {
+		if s, ok := in[k].(string); ok {
+			return s
+		}
+	}
+	return string(c.Input)
+}
+
+// lastResult is what the agent sent back for its previous call, in
+// either API: the last tool_result block or function_call_output item.
+func lastResult(body []byte) string {
+	var r struct {
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+		Input json.RawMessage `json:"input"`
+	}
+	_ = json.Unmarshal(body, &r)
+	var items []map[string]json.RawMessage
+	for _, m := range r.Messages {
+		var c []map[string]json.RawMessage
+		_ = json.Unmarshal(m.Content, &c)
+		items = append(items, c...)
+	}
+	if len(r.Messages) == 0 {
+		_ = json.Unmarshal(r.Input, &items)
+	}
+	for i := len(items) - 1; i >= 0; i-- {
+		var typ string
+		_ = json.Unmarshal(items[i]["type"], &typ)
+		switch typ {
+		case "tool_result":
+			return text(items[i]["content"])
+		case "function_call_output", "custom_tool_call_output":
+			return text(items[i]["output"])
+		}
+	}
+	return ""
+}
+
+// text flattens a string or a list of text blocks.
+func text(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(raw, &blocks)
+	var parts []string
+	for _, b := range blocks {
+		parts = append(parts, b.Text)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// showResult prints the first lines of a result, dimmed and wrapped.
+func showResult(s string) {
+	// Codex frames exec_command output with chunk and timing headers.
+	if i := strings.Index(s, "Output:\n"); i >= 0 && strings.HasPrefix(s, "Chunk ID:") {
+		s = s[i+len("Output:\n"):]
+	}
+	// Claude wraps a hook's refusal.
+	s = strings.NewReplacer("<tool_use_error>", "", "</tool_use_error>", "").Replace(s)
+	if _, after, ok := strings.Cut(s, " hook error: "); ok {
+		s = after
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return
+	}
+	const width, rows = 100, 5
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		r := []rune(l)
+		for first := true; first || len(r) > 0; first = false {
+			n := min(len(r), width)
+			if n < len(r) {
+				if sp := strings.LastIndex(string(r[:n]), " "); sp > 0 {
+					n = len([]rune(string(r[:n])[:sp])) + 1
+				}
+			}
+			prefix := "  agent ◀ "
+			if !first {
+				prefix = "          "
+			}
+			out = append(out, prefix+strings.TrimRight(string(r[:n]), " "))
+			r = r[n:]
+		}
+	}
+	if len(out) > rows {
+		out = append(out[:rows-1], fmt.Sprintf("  agent ◀ … %d more lines", len(out)-rows+1))
+	}
+	for _, l := range out {
+		fmt.Fprintf(os.Stderr, "\033[2m%s\033[0m\n", l)
+	}
 }

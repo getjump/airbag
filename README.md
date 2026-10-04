@@ -14,7 +14,9 @@ $ airbag apply        # or: airbag apply -i, or: airbag discard
 ![demo: the agent deletes src, reads .env, tries to send it out, plants a line in ~/.bashrc and pushes; airbag review shows all of it; discard, and nothing happened](demo/demo.gif)
 
 The demo runs the real Claude Code; the "model" is `test/mockapi` playing a fixed
-script, so it is repeatable without an account (`demo/demo.sh`).
+script, so it is repeatable without an account (`demo/demo.sh`). `agent ▶` lines are
+the calls the model makes, `agent ◀` what the agent sends back. More scenes, one GIF
+each, in `demo/`: `sandbox`, `codex`, `ask`, `apply`, `mirror` (`demo/scenes.sh NAME`).
 
 ## What the agent gets
 

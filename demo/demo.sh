@@ -8,17 +8,19 @@
 set -eu
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 D=$(mktemp -d "$HOME/.airbag-demo.XXXXXX")
-trap 'rm -rf "$D"' EXIT
+P=$HOME/api
+trap 'rm -rf "$D" "$P" "$HOME/remotes"' EXIT
+rm -rf "$P" "$HOME/remotes"
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$D/mockapi" ./test/mockapi)
 
-git init -q --bare "$D/origin.git"
-mkdir -p "$D/api/src" && cd "$D/api"
+git init -q --bare "$HOME/remotes/api.git"
+mkdir -p "$P/src" && cd "$P"
 git init -q -b main && git config user.email dev@example.com && git config user.name dev
 printf 'package main\n\nfunc main() { serve() }\n' > src/main.go
 printf 'package main\n\nfunc serve() {}\n' > src/server.go
 printf '# api\n' > README.md
 printf 'STRIPE_KEY=sk_live_51HxDemoSecretValue\n' > .env && echo .env > .gitignore
-git add -A && git commit -qm init && git remote add origin "$D/origin.git" && git push -q origin main
+git add -A && git commit -qm init && git remote add origin "$HOME/remotes/api.git" && git push -q origin main
 
 cat > "$D/calls.json" <<'JSON'
 [

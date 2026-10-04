@@ -161,8 +161,7 @@ func cmdRun(args []string) (int, error) {
 		}
 	}
 	if len(hidden) > 0 {
-		fmt.Fprintf(os.Stderr, "airbag: hiding %d credential variables from the agent (%s); --pass-env NAME keeps one\n",
-			len(hidden), strings.Join(hidden, ", "))
+		fmt.Fprintf(os.Stderr, "airbag: hidden from the agent: %s (--pass-env NAME keeps one)\n", strings.Join(hidden, ", "))
 	}
 	if len(pol.Sources) > 1 {
 		fmt.Fprintf(os.Stderr, "airbag: policy: %s\n", strings.Join(pol.Sources, " + "))
