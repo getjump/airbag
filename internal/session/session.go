@@ -59,6 +59,10 @@ type Meta struct {
 	// Forwards: TCP ports the agent reaches on its own loopback
 	// (tcp://HOST:PORT in allow), each relayed by airbag to HOST:PORT.
 	Forwards []Forward `json:"forwards,omitempty"`
+	// Credentials the agent uses through placeholders: names, hosts,
+	// the variables it sees them in, and the placeholders, kept so a
+	// resumed run uses the same ones. Values are never stored.
+	Credentials []Credential `json:"credentials,omitempty"`
 	// Deferred: programs with a shim in the sandbox, because a
 	// `defer:` entry in airbag.yaml holds some of their calls.
 	Deferred []string `json:"deferred,omitempty"`
@@ -71,6 +75,13 @@ type Meta struct {
 	// branch. The session's start, or the last rollback, which put the
 	// files back as they were.
 	Baseline time.Time `json:"baseline,omitempty"`
+}
+
+type Credential struct {
+	Name        string   `json:"name"`
+	Hosts       []string `json:"hosts"`
+	Env         []string `json:"env,omitempty"`
+	Placeholder string   `json:"placeholder"`
 }
 
 type Session struct {
@@ -177,6 +188,12 @@ func (s *Session) WSBranch() string {
 }
 func (s *Session) ProxySock() string   { return filepath.Join(s.RunDir(), "proxy.sock") }
 func (s *Session) ControlSock() string { return filepath.Join(s.RunDir(), "ctl.sock") }
+
+// CACert and CABundle: the session CA's certificate, and the machine's
+// roots with it, for tools in the sandbox to trust the hosts airbag
+// intercepts. Public; the CA's key never leaves memory.
+func (s *Session) CACert() string   { return filepath.Join(s.RunDir(), "ca.pem") }
+func (s *Session) CABundle() string { return filepath.Join(s.RunDir(), "ca-bundle.pem") }
 
 // EffectsPath is the session database: the effect log and the outbox.
 func (s *Session) EffectsPath() string { return filepath.Join(s.Dir, "effects.db") }

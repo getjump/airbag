@@ -50,7 +50,7 @@ Tools that also let you decide after the run, at least for files:
 | [AgentFS](https://github.com/tursodatabase/agentfs) | copy-on-write branch of the working directory (SQLite delta), `agentfs diff`; no apply command | not controlled | run as they happen | not handled |
 | [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) in clone mode, or [Code Airlock](https://github.com/Trivo25/code-airlock) on top of it | microVM with a private clone, host repo read-only; review and merge with `git fetch`, `git diff` | allowlist through a proxy | not held | proxy injects credentials, values stay outside the VM |
 | Claude Code sandbox and checkpoints | writes in the workspace, `/rewind` restores the agent's own file edits, not Bash's | allowlist through a proxy, asks for new domains | auto mode's classifier blocks some | denied or masked behind a proxy |
-| airbag | copy-on-write branch of the workspace and `$HOME`; persistence flagged; apply all, part or none, or onto a git branch; `rollback` | allowlist, every host logged, mirror, cut on a secret read | `git push` and the commands `defer:` names (`gh pr create`) queued in the outbox, run after review; other publishing fails at the read-only mirror; calls to allowed hosts happen when made, a rule can `ask` | hidden; a read labels the session and narrows egress |
+| airbag | copy-on-write branch of the workspace and `$HOME`; persistence flagged; apply all, part or none, or onto a git branch; `rollback` | allowlist, every host logged, mirror, cut on a secret read | `git push` and the commands `defer:` names (`gh pr create`) queued in the outbox, run after review; other publishing fails at the read-only mirror; calls to allowed hosts happen when made, a rule can `ask` | hidden; a read labels the session and narrows egress; tokens you bind reach the agent as placeholders, the proxy puts the value in |
 
 What airbag adds is around the branch rather than the branch itself: the outbox
 that holds `git push` and the commands you name until review, the `$HOME` branch with persistence called out,
@@ -118,6 +118,10 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   that keep their socket elsewhere are hidden by name: Incus and LXD (root for
   their admin group) and the Nix daemon, whose builds reach the network outside
   the proxy; `--nix-daemon` gives the agent Nix anyway.
+- **Tokens it uses but never holds.** A credential you bind to hosts in your own
+  `~/.config/airbag/airbag.yaml` reaches the agent as a placeholder; airbag's
+  proxy puts the real value in on the way to those hosts and takes it out of
+  what comes back ([below](#credentials)).
 - **Watched secrets.** The workspace's secret files are served read-only through
   FUSE (`.env` and `.env.*` at any depth, private keys, `.npmrc`, `.pypirc`,
   cloud credentials, `*.tfvars`). The first read by anything but airbag taints
@@ -279,6 +283,52 @@ It reads the workspace as applied, as it would if you ran it yourself after
 merging: `npm publish` runs the scripts in `package.json`, `make release` the
 `Makefile`. Review those first.
 
+### Credentials
+
+Some tasks need a token to work at all: listing pull requests, reading a private
+API. Bind the token to the hosts it is for, in your own
+`~/.config/airbag/airbag.yaml` (a repository's `airbag.yaml` cannot, since it
+would decide where your tokens go):
+
+```yaml
+credentials:
+  - name: github
+    hosts: [api.github.com, uploads.github.com]
+    source: command:gh auth token      # or env:GH_TOKEN, or file:~/.config/x/token
+    env: [GH_TOKEN]
+```
+
+The agent sees `GH_TOKEN` set to a placeholder of the same shape (`ghp_` and
+random characters). For the bound hosts, and only for them, airbag terminates
+TLS with a certificate authority made for the session: its key stays in
+airbag's memory, and it is constrained to those hosts, so it cannot vouch for
+any other site. airbag replaces the placeholder with the value in the request's
+headers (Basic credentials included) and query, checks the real host against this
+machine's roots, and replaces the value with the placeholder in the response, so a
+host that echoes the request does not hand the token to the agent. The value is
+read when the session starts and is never written to disk. Tools in the sandbox
+trust the session's authority through `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and
+the like.
+
+Because airbag sees these requests, review lists each one with its method and
+path, and rules can match them as `http.request` effects:
+
+```yaml
+rules:
+  - name: github-read-only
+    when: effect.kind == "http.request" && effect.target.startsWith("api.github.com/") && effect.detail != "GET"
+    verdict: deny
+    message: reads only; open the pull request with `defer:`
+```
+
+The agent can do with the token whatever the token allows on those hosts,
+right away: bind a token with the least scope that does the job, and use rules or
+`defer:` for writes. After a secret read the bound hosts are cut off like any host
+that is not a model API. Not covered: tokens in request bodies (OAuth flows),
+tools that pin certificates or keep their own trust store (Java), Go programs on
+macOS (they ignore `SSL_CERT_FILE`), and Node's built-in `fetch`, which ignores
+`HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` (Node 22.21 and later).
+
 Which tools an agent may call is the agent's own setting (Claude Code's
 permissions, Codex's configuration), and airbag does not duplicate it. airbag
 governs the effects any tool has: files, network, processes and secrets.
@@ -310,7 +360,7 @@ Early v0, not yet tried by anyone outside the project. Working on Linux: sandbox
 branch, proxy with allowlist and address checks, mirror, outbox for git push and
 `defer:` commands, review (text, `--attention`, `--json`), diff, apply with conflict
 check (all or nothing), `apply --branch`, `rollback`, `run --session`, `tcp://`
-forwards, discard. On macOS: a prototype (see above). Claude Code gets airbag's hooks as
+forwards, credentials through placeholders, discard. On macOS: a prototype (see above). Claude Code gets airbag's hooks as
 read-only managed settings, Codex as a read-only `/etc/codex/requirements.toml`
 (unless the host has its own), so the review shows which tool call changed which
 file. Codex's own SQLite state folds into one review line.
@@ -337,8 +387,9 @@ secret read. Tools that ignore the mirror settings cannot reach registries;
 `--allow HOST` opens one directly.
 
 Deliberately left for later, each with the reason and what would bring it back
-([docs/roadmap.md](docs/roadmap.md)): secret handles and TLS termination for model
-APIs, data flow labels per value, syscall-level control, savepoints per tool call.
+([docs/roadmap.md](docs/roadmap.md)): placeholders in `.env` files, TLS termination
+for model APIs, data flow labels per value, syscall-level control, savepoints per
+tool call.
 Before more features comes a measurement on real work against the alternatives:
 [docs/evaluation.md](docs/evaluation.md).
 
@@ -346,7 +397,8 @@ Before more features comes a measurement on real work against the alternatives:
 
 airbag protects against accidents and casual exfiltration by an agent you let run
 without prompts. It is not a VM: the kernel is shared, and whatever the agent reads
-is still sent to the model API.
+is still sent to the model API. A bound credential keeps its value from the agent,
+not its use: through the bound hosts the agent can do what the token allows.
 
 ## License
 

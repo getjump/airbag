@@ -280,6 +280,11 @@ func privateRun(s *session.Session) error {
 	for i := range s.Forwards {
 		socks[s.ForwardSock(i)] = forwardSockInside(i)
 	}
+	for src, dst := range map[string]string{s.CACert(): caCertInside, s.CABundle(): caBundleInside} {
+		if _, err := os.Stat(src); err == nil {
+			socks[src] = dst
+		}
+	}
 	for src, dst := range socks {
 		if err := os.WriteFile(dst, nil, 0o600); err != nil {
 			return err
@@ -395,6 +400,12 @@ func startBridge() error {
 	}()
 	return nil
 }
+
+// Where the agent finds the session CA (sandbox/creds.go).
+const (
+	caCertInside   = "/run/airbag/ca.pem"
+	caBundleInside = "/run/airbag/ca-bundle.pem"
+)
 
 func forwardSockInside(i int) string { return fmt.Sprintf("/run/airbag/fwd-%d.sock", i) }
 
@@ -535,5 +546,9 @@ func runAgent(s *session.Session, ctl *os.File) int {
 }
 
 func agentEnv(s *session.Session) []string {
-	return agentEnvFor(s, ProxyAddr, shim.BinDir, fmt.Sprintf(runtimeDirFormat, s.UID))
+	bundle := ""
+	if _, err := os.Stat(caBundleInside); err == nil {
+		bundle = caBundleInside
+	}
+	return agentEnvFor(s, ProxyAddr, shim.BinDir, fmt.Sprintf(runtimeDirFormat, s.UID), credEnv(s, caCertInside, bundle))
 }

@@ -153,6 +153,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	if len(cut) > 0 {
 		fmt.Fprintf(w, "           %d cut when a secret was read%s\n", total(cut), hostList(cut))
 	}
+	renderRequests(w, effs)
 
 	if len(sts) > 0 {
 		renderSteps(w, sts)
@@ -468,4 +469,36 @@ func intentHasSecret(in outbox.Intent, secrets []string) bool {
 		}
 	}
 	return false
+}
+
+// renderRequests lists the requests to hosts a credential is bound to:
+// airbag terminated TLS for those, so it saw each method and path.
+func renderRequests(w io.Writer, effs []effects.Effect) {
+	reqs, with := map[string]int{}, map[string]string{}
+	for _, e := range effs {
+		if e.Kind != "http.request" || e.Verdict != "allow" {
+			continue
+		}
+		reqs[e.Target]++
+		if e.Reason != "" {
+			with[e.Target] = e.Reason
+		}
+	}
+	if len(reqs) == 0 {
+		return
+	}
+	keys := sortedKeys(reqs)
+	sort.SliceStable(keys, func(i, j int) bool { return reqs[keys[i]] > reqs[keys[j]] })
+	fmt.Fprintf(w, "Requests   %d to hosts with a credential\n", total(reqs))
+	for i, k := range keys {
+		if i == maxListed {
+			fmt.Fprintf(w, "  … and %d more\n", len(keys)-maxListed)
+			break
+		}
+		note := ""
+		if c := with[k]; c != "" {
+			note = "  with " + c
+		}
+		fmt.Fprintf(w, "  %s ×%d%s\n", k, reqs[k], note)
+	}
 }

@@ -68,6 +68,8 @@ type ReportNetwork struct {
 	Allowed map[string]int `json:"allowed"` // host: connections
 	Denied  map[string]int `json:"denied"`  // host:port: attempts
 	Cut     map[string]int `json:"cut"`     // host:port: tunnels closed on a secret read
+	// Requests: "METHOD host/path" to hosts a credential is bound to.
+	Requests map[string]int `json:"requests"`
 }
 
 type ReportSecret struct {
@@ -101,7 +103,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			ExitCode: s.ExitCode, Created: s.Created, Ended: s.Ended, Runs: max(s.Runs, 1), Branch: s.Branch},
 		Changes:   []ReportChange{},
 		Attention: []ReportItem{},
-		Network:   ReportNetwork{Allowed: map[string]int{}, Denied: map[string]int{}, Cut: map[string]int{}},
+		Network:   ReportNetwork{Allowed: map[string]int{}, Denied: map[string]int{}, Cut: map[string]int{}, Requests: map[string]int{}},
 		Secrets:   []ReportSecret{},
 		Untrusted: []string{},
 		Packages:  []string{},
@@ -153,6 +155,8 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			default:
 				r.Network.Allowed[host]++
 			}
+		case e.Kind == "http.request" && e.Verdict == "allow":
+			r.Network.Requests[e.Target]++
 		case e.Kind == "secret.read":
 			r.Secrets = append(r.Secrets, ReportSecret{File: e.Target, By: e.Reason})
 			r.Attention = append(r.Attention, ReportItem{What: "secret", Target: e.Target, Why: "read by " + e.Reason + "; egress was narrowed from then on"})

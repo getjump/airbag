@@ -27,7 +27,10 @@ Ask the agent to:
   create` answers `queued as intent i-N`, while `gh pr list` runs (and fails
   without a token);
 - [ ] fetch a page from a host that is not allowlisted: it gets `403 ... denied by policy`;
-- [ ] read `~/.ssh/id_*`: nothing is there.
+- [ ] read `~/.ssh/id_*`: nothing is there;
+- [ ] with a `credentials:` entry for GitHub in `~/.config/airbag/airbag.yaml`
+  (`source: command:gh auth token`, `env: [GH_TOKEN]`), `gh pr list` works,
+  `echo $GH_TOKEN` shows a placeholder, and review lists the requests.
 
 Then check the terminal:
 

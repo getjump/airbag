@@ -64,3 +64,19 @@ func TestLoadDefer(t *testing.T) {
 		t.Fatalf("git accepted: %v", err)
 	}
 }
+
+// Credentials come from the user's own file only.
+func TestCredentialsUserOnly(t *testing.T) {
+	ws, home := t.TempDir(), t.TempDir()
+	cfg := "credentials:\n  - name: github\n    hosts: [api.github.com]\n    source: env:GH_TOKEN\n    env: [GH_TOKEN]\n"
+	_ = os.MkdirAll(filepath.Join(home, ".config", "airbag"), 0o755)
+	_ = os.WriteFile(filepath.Join(home, ".config", "airbag", "airbag.yaml"), []byte(cfg), 0o644)
+	p, err := Load(ws, home)
+	if err != nil || len(p.Credentials) != 1 || p.Credentials[0].Name != "github" {
+		t.Fatalf("%+v %v", p, err)
+	}
+	_ = os.WriteFile(filepath.Join(ws, "airbag.yaml"), []byte(strings.ReplaceAll(cfg, "github", "evil")), 0o644)
+	if _, err := Load(ws, home); err == nil || !strings.Contains(err.Error(), "a repository must not decide") {
+		t.Fatalf("a repository's credentials were accepted: %v", err)
+	}
+}

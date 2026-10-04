@@ -161,6 +161,9 @@ func cmdRun(args []string) (int, error) {
 		return 1, fmt.Errorf("policy: %w", err)
 	}
 	allow = append(allow, pol.Allow...)
+	for _, c := range pol.Credentials {
+		allow = append(allow, c.Hosts...) // a credential's hosts are reachable
+	}
 	allow, forwards, err := session.ParseForwards(allow)
 	if err != nil {
 		return 1, err

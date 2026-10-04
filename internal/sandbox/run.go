@@ -49,6 +49,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	defer pl.Close()
 	px := proxy.New(allow, log)
 	px.Gate = gate
+	if px.Creds, px.CA, err = setupCredentials(s, pol.Credentials); err != nil {
+		return 1, err
+	}
 	mr := mirror.New(filepath.Join(session.Root(), "mirror"), log)
 	mr.Tainted = gate.Tainted
 	mr.Pinned = mirror.FindPins(s.Workspace) // read from the real workspace, before the agent starts

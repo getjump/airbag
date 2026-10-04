@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -138,10 +139,12 @@ func knownSecrets() []secret {
 			f.F.Close()
 		}
 	}
+	// Placeholders for credentials airbag substitutes are not secrets.
+	placeholders := strings.Split(os.Getenv("AIRBAG_PLACEHOLDERS"), ",")
 	for _, kv := range os.Environ() {
 		k, v, _ := strings.Cut(kv, "=")
 		u := strings.ToUpper(k)
-		if strings.Contains(u, "PROXY") {
+		if strings.Contains(u, "PROXY") || slices.Contains(placeholders, k) {
 			continue
 		}
 		for _, w := range []string{"TOKEN", "SECRET", "PASSWORD", "API_KEY", "APIKEY", "PRIVATE_KEY", "CREDENTIAL"} {

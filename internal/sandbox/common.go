@@ -78,7 +78,7 @@ func restoreLabels(gate *policy.Gate, s *session.Session) {
 	}
 }
 
-func agentEnvFor(s *session.Session, proxyAddr, binDir, runtimeDir string) []string {
+func agentEnvFor(s *session.Session, proxyAddr, binDir, runtimeDir string, extra map[string]string) []string {
 	drop := map[string]bool{
 		"SSH_AUTH_SOCK": true, "SSH_AGENT_PID": true, "GPG_AGENT_INFO": true,
 		"DBUS_SESSION_BUS_ADDRESS": true, "DISPLAY": true, "WAYLAND_DISPLAY": true,
@@ -94,6 +94,9 @@ func agentEnvFor(s *session.Session, proxyAddr, binDir, runtimeDir string) []str
 		"AIRBAG_WORKSPACE": s.Workspace,
 		// Claude Code runs its Bash tool through this shell.
 		"CLAUDE_CODE_SHELL": binDir + "/bash",
+	}
+	for k, v := range extra {
+		set[k] = v
 	}
 	var env []string
 	for _, kv := range os.Environ() {

@@ -1,11 +1,13 @@
 // Package proxy is the only way out of the sandbox: an HTTP proxy that
 // lets through CONNECT and plain HTTP requests to allowlisted hosts.
-// It sees hosts, not request bodies (no TLS interception in v0).
+// It sees hosts, not requests, except for the hosts a credential is
+// bound to: for those it terminates TLS (mitm.go).
 package proxy
 
 import (
 	"bufio"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -18,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/getjump/airbag/internal/creds"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
 	"github.com/getjump/airbag/internal/policy"
@@ -65,6 +68,13 @@ type Proxy struct {
 	// Upstream returns the host's own proxy for a target, if any, so
 	// airbag works behind a corporate or sandbox proxy.
 	Upstream func(*url.URL) (*url.URL, error)
+	// Creds are the credentials bound to hosts; with CA set, TLS to
+	// those hosts is terminated here (mitm.go).
+	Creds creds.Set
+	CA    *CA
+	// UpstreamRoots verify the real hosts behind intercepted TLS; nil
+	// means this machine's roots (SSL_CERT_FILE is honoured).
+	UpstreamRoots *x509.CertPool
 
 	mu    sync.Mutex
 	flows map[*flow]bool // open tunnels and forwarded requests
@@ -178,6 +188,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if r.Method == http.MethodConnect {
+		if live := p.Creds.For(r.Host); live != nil && p.CA != nil {
+			p.intercept(w, r, host, live)
+			return
+		}
 		p.connect(w, r, host)
 		return
 	}

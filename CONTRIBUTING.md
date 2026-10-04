@@ -71,8 +71,9 @@ bubblewrap 0.9 (no overlay), worth measuring as a hybrid once 0.11+ is common.
 Its `--disable-userns` idea is in airbag as `--strict`.
 
 Deferred on purpose, each with its reason in the roadmap: syscall-level control
-(seccomp user notification, eBPF), data flow labels per value, TLS termination
-for model APIs and secret handles, more command models in `internal/models`.
+(seccomp user notification, eBPF), data flow labels per value, placeholders in
+`.env` files, TLS termination for model APIs, more command models in
+`internal/models`.
 
 Smaller, self-contained tasks are labeled
 [good first issue](https://github.com/getjump/airbag/labels/good%20first%20issue).
