@@ -50,6 +50,11 @@ pushes.
 | One view of what changed | no | no | effect log, steps per tool call, hosts, packages |
 | You decide | before the run | during the run | after the run, once |
 
+Deciding after the run works for what airbag can branch: files, `$HOME`, a push
+that has not left yet. A call to an outside service cannot wait or be undone, so
+there the policy decides beforehand, or `ask` holds the call until you approve
+it.
+
 airbag sets up its namespaces itself. Could it run on bubblewrap underneath?
 Not yet: bubblewrap 0.9, which Ubuntu 24.04 ships, cannot make the overlay the
 branch needs, and FUSE, the proxy bridge and the agent settings would stay
