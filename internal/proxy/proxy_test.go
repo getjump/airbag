@@ -387,3 +387,13 @@ rules:
 		}
 	}
 }
+
+// An allowlist entry matches a request in any spelling of the same host
+// and port, so a canonical request still finds the entry it was given.
+func TestAllowlistCanonical(t *testing.T) {
+	a := Allowlist{"[0:0::1]:443", "Svc.Example.:08443"}
+	if !a.Allows("::1") || !a.explicitIP("::1") || !a.AllowsPort("svc.example", "8443") || a.AllowsPort("svc.example", "9443") {
+		t.Fatalf("Allows(::1)=%v explicitIP(::1)=%v AllowsPort(svc.example, 8443)=%v (9443)=%v",
+			a.Allows("::1"), a.explicitIP("::1"), a.AllowsPort("svc.example", "8443"), a.AllowsPort("svc.example", "9443"))
+	}
+}

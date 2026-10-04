@@ -46,12 +46,12 @@ type Allowlist []string
 // Allows reports whether host is allowed; an entry's port, if any, is
 // checked by AllowsPort.
 func (a Allowlist) Allows(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	host = creds.CanonHost(host)
 	for _, p := range a {
 		if h, _, err := net.SplitHostPort(p); err == nil {
 			p = h
 		}
-		p = strings.ToLower(strings.Trim(p, "[]"))
+		p = creds.CanonHost(p)
 		if p == host || (strings.HasPrefix(p, "*.") && strings.HasSuffix(host, p[1:])) {
 			return true
 		}

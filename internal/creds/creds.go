@@ -20,11 +20,13 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -182,11 +184,11 @@ type Set []*Live
 // For returns the credential bound to host:port, if any.
 func (s Set) For(hostport string) *Live {
 	host, port := SplitHost(hostport)
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	host, port = CanonHost(host), CanonPort(port)
 	for _, l := range s {
 		for _, h := range l.Hosts {
 			bh, bp := SplitHost(h)
-			bh = strings.ToLower(bh)
+			bh, bp = CanonHost(bh), CanonPort(bp)
 			if bp != port {
 				continue
 			}
@@ -196,6 +198,27 @@ func (s Set) For(hostport string) *Live {
 		}
 	}
 	return nil
+}
+
+// CanonHost is how a host is compared, on the request's side and the
+// configuration's alike: lower case without brackets or a trailing dot,
+// and an IP address as netip writes it ("0:0::1" is "::1"; an IPv6
+// zone keeps its case).
+func CanonHost(h string) string {
+	h = strings.TrimSuffix(strings.Trim(h, "[]"), ".")
+	if a, err := netip.ParseAddr(h); err == nil {
+		return a.String()
+	}
+	return strings.ToLower(h)
+}
+
+// CanonPort writes a port number without leading zeros ("0443" is
+// "443"); anything else, such as "*", stays as it is.
+func CanonPort(p string) string {
+	if n, err := strconv.Atoi(p); err == nil && n >= 0 {
+		return strconv.Itoa(n)
+	}
+	return p
 }
 
 // Intercepts reports whether any credential is bound to host:port.
