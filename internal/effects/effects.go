@@ -18,6 +18,7 @@ import (
 
 // Effect is a fact: something changed or something left the machine.
 type Effect struct {
+	ID      int64     `json:"id,omitempty"` // position in the log, set by Read
 	Time    time.Time `json:"t"`
 	Kind    string    `json:"kind"`              // net.egress, intent.git_push, ...
 	Target  string    `json:"target"`            // host:port, argv, path
@@ -80,7 +81,10 @@ func (l *Log) Close() error { return l.db.Close() }
 
 // Read returns all effects in order. It opens the database read-only,
 // so it works while the session is still running.
-func Read(path string) ([]Effect, error) {
+func Read(path string) ([]Effect, error) { return ReadSince(path, 0) }
+
+// ReadSince returns the effects logged after the one with id after.
+func ReadSince(path string, after int64) ([]Effect, error) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -89,7 +93,7 @@ func Read(path string) ([]Effect, error) {
 		return nil, err
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT t, kind, target, verdict, reason, predict FROM events ORDER BY id`)
+	rows, err := db.Query(`SELECT id, t, kind, target, verdict, reason, predict FROM events WHERE id > ? ORDER BY id`, after)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +102,7 @@ func Read(path string) ([]Effect, error) {
 	for rows.Next() {
 		var e Effect
 		var t, pred string
-		if err := rows.Scan(&t, &e.Kind, &e.Target, &e.Verdict, &e.Reason, &pred); err != nil {
+		if err := rows.Scan(&e.ID, &t, &e.Kind, &e.Target, &e.Verdict, &e.Reason, &pred); err != nil {
 			return out, err
 		}
 		e.Time, _ = time.Parse(time.RFC3339Nano, t)

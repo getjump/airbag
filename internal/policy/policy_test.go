@@ -66,7 +66,11 @@ func TestBadRule(t *testing.T) {
 }
 
 func TestLabelsAndTaint(t *testing.T) {
-	g := NewGate(&Policy{}, t.TempDir())
+	g, err := NewGate(&Policy{}, filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
 	var got []string
 	g.Labels().OnAdd(func(l taint.Label, src string) { got = append(got, string(l)+":"+src) })
 	g.Taint(".env")

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/cel-go/cel"
 	"gopkg.in/yaml.v3"
@@ -39,13 +40,25 @@ type Rule struct {
 type File struct {
 	Allow []string `yaml:"allow"`
 	Rules []Rule   `yaml:"rules"`
+	// Personal settings, read only from ~/.config/airbag/airbag.yaml: a
+	// repository must not run commands on the host or slow sessions down.
+	OnAsk   []string `yaml:"on_ask"`
+	AskWait string   `yaml:"ask_wait"`
 }
 
 type Policy struct {
 	Allow   []string
 	Rules   []Rule
 	Sources []string
+	// OnAsk runs on the host for every new request, the request as JSON
+	// on stdin; AskWait holds a request that long for a decision.
+	OnAsk    []string
+	AskWait  time.Duration
+	Warnings []string
 }
+
+// MaxAskWait stays under the agents' 30-second hook timeout.
+const MaxAskWait = 25 * time.Second
 
 // Builtin: effects that cannot be undone and cannot wait in the outbox.
 var Builtin = []Rule{
@@ -86,10 +99,8 @@ func Load(workspace, home string) (*Policy, error) {
 			return nil, err
 		}
 	}
-	for _, path := range []string{
-		filepath.Join(home, ".config", "airbag", "airbag.yaml"),
-		filepath.Join(workspace, "airbag.yaml"),
-	} {
+	personal := filepath.Join(home, ".config", "airbag", "airbag.yaml")
+	for _, path := range []string{personal, filepath.Join(workspace, "airbag.yaml")} {
 		b, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -102,6 +113,20 @@ func Load(workspace, home string) (*Policy, error) {
 		}
 		p.Sources = append(p.Sources, path)
 		p.Allow = append(p.Allow, f.Allow...)
+		if path != personal {
+			if len(f.OnAsk) > 0 || f.AskWait != "" {
+				p.Warnings = append(p.Warnings, path+": on_ask and ask_wait are ignored here; set them in "+personal)
+			}
+		} else {
+			p.OnAsk = f.OnAsk
+			if f.AskWait != "" {
+				w, err := time.ParseDuration(f.AskWait)
+				if err != nil {
+					return nil, fmt.Errorf("%s: ask_wait: %w", path, err)
+				}
+				p.AskWait = min(w, MaxAskWait)
+			}
+		}
 		for i, r := range f.Rules {
 			if r.Name == "" {
 				r.Name = fmt.Sprintf("%s#%d", filepath.Base(path), i+1)

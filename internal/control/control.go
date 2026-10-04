@@ -209,7 +209,8 @@ func clip(s string, n int) string {
 func ReportExec(e Exec) Verdict {
 	body, _ := json.Marshal(e)
 	v := Verdict{Verdict: policy.Allow}
-	resp, err := client(3*time.Second).Post("http://airbag/exec", "application/json", bytes.NewReader(body))
+	// A request can be held for a decision up to policy.MaxAskWait.
+	resp, err := client(policy.MaxAskWait+5*time.Second).Post("http://airbag/exec", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return v
 	}
@@ -220,7 +221,8 @@ func ReportExec(e Exec) Verdict {
 
 // Hook forwards a hook event from inside the sandbox.
 func Hook(agent, event string, payload []byte) ([]byte, error) {
-	resp, err := client(5*time.Second).Post("http://airbag/hook/"+agent+"/"+event, "application/json", bytes.NewReader(payload))
+	// Under the agents' 30-second hook timeout, above policy.MaxAskWait.
+	resp, err := client(policy.MaxAskWait+3*time.Second).Post("http://airbag/hook/"+agent+"/"+event, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}

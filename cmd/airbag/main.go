@@ -38,10 +38,16 @@ const usage = `airbag — approve outcomes, not commands
   airbag discard [ID] [--yes] throw the branch away
   airbag ls                   list sessions
   airbag log [ID]             raw effect log
-  airbag approve [ID]         list or approve requests blocked by an "ask" rule
+  airbag approve [--always] [ASK]
+                              list requests held by an "ask" rule, or approve one
+                              (--always: from now on, in this workspace)
+  airbag deny ASK             refuse a request
+  airbag watch                follow running sessions, answer requests y/n/always
+  airbag events [-f] [ID]     events as JSON lines, for scripts and bridges
   airbag doctor               check that this machine can run airbag
 
-ID defaults to the newest open session of the current workspace.
+ID defaults to the newest open session of the current workspace. ASK is a-N,
+all, or SESSION/a-N.
 `
 
 func main() {
@@ -85,7 +91,13 @@ func main() {
 	case "doctor":
 		err = cmdDoctor()
 	case "approve":
-		err = cmdApprove(args)
+		err = cmdDecide(args, policy.Approved)
+	case "deny":
+		err = cmdDecide(args, policy.Denied)
+	case "events":
+		err = cmdEvents(args)
+	case "watch":
+		err = cmdWatch(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -137,6 +149,9 @@ func cmdRun(args []string) (int, error) {
 	pol, err := policy.Load(ws, home)
 	if err != nil {
 		return 1, fmt.Errorf("policy: %w", err)
+	}
+	for _, w := range pol.Warnings {
+		fmt.Fprintln(os.Stderr, "airbag: warning: "+w)
 	}
 	allow = append(allow, pol.Allow...)
 	s, err := session.Create(session.Meta{
@@ -355,40 +370,6 @@ func cmdDiscard(args []string) error {
 // cmdApprove lets a running agent continue past an "ask" rule:
 // `airbag approve` lists pending requests, `airbag approve a-3` (or
 // `all`) approves.
-func cmdApprove(args []string) error {
-	var id, sid string
-	for _, a := range args {
-		if strings.HasPrefix(a, "s-") {
-			sid = a
-		} else {
-			id = a
-		}
-	}
-	s, err := findSession(sid)
-	if err != nil {
-		return err
-	}
-	if id == "" {
-		asks, _ := policy.ReadAsks(s.Dir)
-		n := 0
-		for _, a := range asks {
-			if !a.Approved {
-				fmt.Printf("%-5s %-24s %s  %s\n", a.ID, a.Rule, a.What, a.Message)
-				n++
-			}
-		}
-		if n == 0 {
-			fmt.Println("No pending requests.")
-		}
-		return nil
-	}
-	done, err := policy.Approve(s.Dir, id)
-	for _, a := range done {
-		fmt.Printf("Approved %s: %s (%s). The agent can retry.\n", a.ID, a.What, a.Rule)
-	}
-	return err
-}
-
 // withPendingIntents finds an applied session of this workspace whose
 // outbox still has intents waiting for confirmation.
 func withPendingIntents() (*session.Session, error) {

@@ -52,11 +52,24 @@ var DefaultHidden = []string{
 }
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
-	gate := policy.NewGate(pol, s.Dir)
 	log, err := effects.Open(s.EffectsPath())
 	if err != nil {
 		return 1, err
 	}
+	gate, err := policy.NewGate(pol, s.EffectsPath())
+	if err != nil {
+		log.Close()
+		return 1, err
+	}
+	defer gate.Close()
+	gate.Workspace, gate.AskWait = s.Workspace, pol.AskWait
+	gate.ApprovalsPath = policy.ApprovalsPath(s.Home)
+	// A new request goes into the log, where `airbag events` and
+	// `airbag watch` see it, and to the user's on_ask command.
+	gate.OnAsk(func(r policy.Request) {
+		log.Add(effects.Effect{Kind: "ask", Target: r.ID, Verdict: "ask", Reason: r.Rule, Predict: []string{r.What}})
+		go runOnAsk(pol.OnAsk, r, s)
+	})
 	defer log.Close()
 
 	pl, err := net.Listen("unix", s.ProxySock())

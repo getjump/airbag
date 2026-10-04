@@ -169,6 +169,7 @@ var persistHome = []string{
 	".claude/skills/", ".claude/commands/", ".claude/plugins/", ".claude/CLAUDE.md", ".claude.json",
 	".codex/config.toml", ".codex/hooks.json", ".codex/rules/", ".codex/AGENTS.md",
 	".npmrc", ".pypirc", ".docker/", ".config/gh/", ".ssh/", ".bin/", "bin/",
+	".config/airbag/", // hooks run on the host, standing approvals
 }
 
 var buildDirs = []string{"bin/", "build/", "dist/", "target/", "out/", "node_modules/", ".venv/", "vendor/"}

@@ -160,7 +160,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	renderShell(w, effs)
 	var blocked []effects.Effect
 	for _, e := range effs {
-		if (e.Verdict == "deny" || e.Verdict == "ask") && e.Kind != "net.egress" {
+		if (e.Verdict == "deny" || e.Verdict == "ask") && e.Kind != "net.egress" && e.Kind != "ask" {
 			blocked = append(blocked, e)
 		}
 	}
@@ -170,6 +170,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 			fmt.Fprintf(w, "  %-4s %-40s %s\n", e.Verdict, clip(e.Target, 40), e.Reason)
 		}
 	}
+	renderRequests(w, effs)
 
 	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))
 	for _, in := range intents {
@@ -440,4 +441,34 @@ func Diff(w io.Writer, c Change) {
 	cmd := exec.Command("diff", "-u", "--label", "a/"+display(c), "--label", "b/"+display(c), a, b)
 	cmd.Stdout, cmd.Stderr = w, w
 	_ = cmd.Run() // diff exits 1 when files differ
+}
+
+// renderRequests lists the session's "ask" requests and what the human
+// decided about each.
+func renderRequests(w io.Writer, effs []effects.Effect) {
+	type req struct{ id, what, rule, decision string }
+	var reqs []*req
+	byID := map[string]*req{}
+	for _, e := range effs {
+		switch e.Kind {
+		case "ask":
+			r := &req{id: e.Target, rule: e.Reason, decision: "pending"}
+			if len(e.Predict) > 0 {
+				r.what = e.Predict[0]
+			}
+			byID[r.id] = r
+			reqs = append(reqs, r)
+		case "ask.decided":
+			if r := byID[e.Target]; r != nil {
+				r.decision = e.Verdict
+			}
+		}
+	}
+	if len(reqs) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nRequests   %d\n", len(reqs))
+	for _, r := range reqs {
+		fmt.Fprintf(w, "  %-4s %-40s %-16s %s\n", r.id, clip(r.what, 40), r.decision, r.rule)
+	}
 }
