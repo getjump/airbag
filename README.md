@@ -331,7 +331,8 @@ right away: bind a token with the least scope that does the job, and use rules o
 `defer:` for writes. After a secret read the bound hosts are cut off like any host
 that is not a model API. Not covered: tokens in request bodies (OAuth flows),
 tools that pin certificates or keep their own trust store (Java), Go programs on
-macOS built with Go before 1.27 (they ignore `SSL_CERT_FILE`), and Node's built-in `fetch`, which ignores
+macOS whose `go.mod` declares a Go version before 1.27, most Go tools today (they
+ignore `SSL_CERT_FILE` whichever Go builds them), and Node's built-in `fetch`, which ignores
 `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` (Node 22.21 and later).
 
 Which tools an agent may call is the agent's own setting (Claude Code's

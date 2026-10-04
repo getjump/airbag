@@ -278,11 +278,17 @@ func TestExportStaysInside(t *testing.T) {
 		_ = fs.Rename(mine, name)
 		_ = fs.Remove(name)
 	}
-	for _, name := range []string{"../outside/sub", sub, "link/sub", "../outside", "link"} {
+	for i, name := range []string{"../outside/sub", sub, "link/sub", "../outside", "link"} {
 		_ = fs.Remove(name)
-		if rfs, ok := fs.(interface{ RemoveAll(string) error }); ok {
-			_ = rfs.RemoveAll(name)
-		}
+		// go-nfs calls MkdirAll for MKDIR and Symlink for SYMLINK.
+		_ = fs.MkdirAll(filepath.Join(name, "made"), 0o755)
+		_ = fs.Symlink("/", filepath.Join(name, fmt.Sprintf("planted%d", i)))
+	}
+	if ents, _ := os.ReadDir(outside); len(ents) != 2 {
+		t.Errorf("entries outside the export: %v, want secret and sub", ents)
+	}
+	if ents, _ := os.ReadDir(sub); len(ents) != 0 {
+		t.Errorf("entries in the directory outside: %v, want none", ents)
 	}
 	st, err := os.Stat(secret)
 	if err != nil {

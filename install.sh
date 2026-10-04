@@ -17,8 +17,8 @@ case $os in
 	linux) ;;
 	darwin)
 		# The release binaries are built with a Go that needs macOS 13.
-		v=$(sw_vers -productVersion)
-		[ "${v%%.*}" -ge 13 ] || { echo "airbag: needs macOS 13 or later, this is $v" >&2; exit 1; }
+		v=$(/usr/bin/sw_vers -productVersion 2>/dev/null || :)
+		[ "${v%%.*}" -ge 13 ] 2>/dev/null || { echo "airbag: needs macOS 13 or later, this is ${v:-unknown}" >&2; exit 1; }
 		;;
 	*) echo "airbag: unsupported system $os" >&2; exit 1 ;;
 esac

@@ -60,8 +60,8 @@ func TestDenyIsLogged(t *testing.T) {
 
 // Request lines whose host is malformed (a bracketed IPv4 address, two
 // ports) are refused by net/http's parser before ServeHTTP, so they are
-// not logged and never dialled. This pins that behaviour of Go 1.27,
-// which airbag relies on instead of repeating the parse.
+// not logged and never dialled. This pins that behaviour of Go 1.27; the
+// proxy's own checks deny or canonicalize them too, should it change.
 func TestMalformedHostRefusedByServer(t *testing.T) {
 	log, path := newLog(t)
 	p := New(Allowlist{"127.0.0.1:*", "h:*", "1.2.3.4:*"}, log)
@@ -92,8 +92,9 @@ func TestMalformedHostRefusedByServer(t *testing.T) {
 			t.Errorf("%q: %v %v, want 400", line, resp, err)
 		}
 	}
-	if effs, _ := effects.Read(path); len(effs) != 0 {
-		t.Fatalf("effects = %+v, want none", effs)
+	effs, err := effects.Read(path)
+	if err != nil || len(effs) != 0 {
+		t.Fatalf("effects = %+v, %v, want none", effs, err)
 	}
 }
 
