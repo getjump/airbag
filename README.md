@@ -131,8 +131,13 @@ session; `apply --only PATH` takes just part of the branch.
 ## Policies
 
 `airbag.yaml` in the repository (and `~/.config/airbag/airbag.yaml`) adds hosts and
-rules. Rules are [CEL](https://cel.dev) expressions over effects, not over command
-strings, so `bash -c` or a different spelling does not slip past them:
+rules. Rules are [CEL](https://cel.dev) expressions over effects. Some effects are
+observed, so a rule holds whatever program causes them: every connection passes
+the proxy (`net.connect`), every secret read passes FUSE. Others are predicted from
+a command line by built-in models (`net.egress` for `curl -d`, `fs.delete` for
+`rm`): a rule on those refuses early and marks the review, but a script can do
+more than its command line shows, so for them the sandbox and the review are the
+boundary.
 
 ```yaml
 allow: [api.github.com]
@@ -155,6 +160,11 @@ host. That keeps outside input from driving an irreversible effect:
     when: '"untrusted" in session.labels && effect.kind == "intent.git_push"'
     verdict: deny
 ```
+
+Rules are type-checked when airbag starts: a misspelled field (`effect.knd`) is an
+error, not a rule that never matches. A `deny` or `ask` rule that fails while
+evaluating (say `command.argv[0]` on an effect with no command) counts as
+matched, and the message says so; guard such rules with `command.argv.size() > 0`.
 
 Verdicts are `allow`, `deny` and `ask`; a deny anywhere wins. An `ask` blocks the
 command and tells the agent to have you run `airbag approve a-N`; after that the

@@ -1,7 +1,14 @@
 // Package policy decides what happens to an effect: allow, deny or ask.
-// Rules are CEL expressions over the effect, not over command strings,
-// so `bash -c`, base64 or a different spelling of the same command do
-// not slip past them.
+// Rules are CEL expressions over effects. Some effects are observed (the
+// proxy sees every connection, FUSE every secret read); others are
+// predicted from a command line by internal/models, and a prediction
+// can miss what a script does. A rule on a predicted effect is an early
+// refusal and a hint for review; the boundary is the sandbox itself.
+//
+// Rules are type-checked when loaded: a misspelled field is an error,
+// not a rule that never matches. A deny or ask rule that fails to
+// evaluate counts as matched (fail closed); an allow rule that fails
+// does not.
 //
 // Sources, merged in order: built-in rules, ~/.config/airbag/airbag.yaml,
 // airbag.yaml in the workspace (read from the real workspace, so the
@@ -13,9 +20,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
-	"github.com/google/cel-go/cel"
+	"cel.dev/cel-go/cel"
+	"cel.dev/cel-go/ext"
 	"gopkg.in/yaml.v3"
 
 	"github.com/getjump/airbag/internal/models"
@@ -63,14 +72,36 @@ var Builtin = []Rule{
 	},
 }
 
+// The variables a rule sees. Field names come from the cel tags.
+type (
+	CELEffect struct {
+		Kind   string `cel:"kind"`
+		Target string `cel:"target"`
+		Detail string `cel:"detail"`
+	}
+	CELCommand struct {
+		Argv []string `cel:"argv"`
+		Line string   `cel:"line"`
+	}
+	CELSession struct {
+		Tainted bool     `cel:"tainted"`
+		Labels  []string `cel:"labels"`
+	}
+)
+
+// costLimit bounds one rule's evaluation; rules are small predicates.
+const costLimit = 100_000
+
 var env *cel.Env
 
 func init() {
 	var err error
 	env, err = cel.NewEnv(
-		cel.Variable("effect", cel.MapType(cel.StringType, cel.StringType)),
-		cel.Variable("command", cel.MapType(cel.StringType, cel.DynType)),
-		cel.Variable("session", cel.MapType(cel.StringType, cel.DynType)),
+		ext.NativeTypes(reflect.TypeOf(CELEffect{}), reflect.TypeOf(CELCommand{}), reflect.TypeOf(CELSession{}),
+			ext.ParseStructTags(true)),
+		cel.Variable("effect", cel.ObjectType("policy.CELEffect")),
+		cel.Variable("command", cel.ObjectType("policy.CELCommand")),
+		cel.Variable("session", cel.ObjectType("policy.CELSession")),
 	)
 	if err != nil {
 		panic(err)
@@ -130,7 +161,7 @@ func (p *Policy) add(r Rule) error {
 	if ast.OutputType() != cel.BoolType {
 		return fmt.Errorf("`when` must be a boolean expression")
 	}
-	prg, err := env.Program(ast)
+	prg, err := env.Program(ast, cel.CostLimit(costLimit))
 	if err != nil {
 		return err
 	}
@@ -156,23 +187,33 @@ type Decision struct {
 // Decide evaluates every rule; deny beats ask beats allow. No matching
 // rule means allow: the sandbox and the review cover the rest.
 func (p *Policy) Decide(in Input) Decision {
+	argv, labels := in.Argv, in.Labels
+	if argv == nil {
+		argv = []string{}
+	}
+	if labels == nil {
+		labels = []string{}
+	}
 	vars := map[string]any{
-		"effect":  map[string]string{"kind": in.Effect.Kind, "target": in.Effect.Target, "detail": in.Effect.Detail},
-		"command": map[string]any{"argv": in.Argv, "line": strings.Join(in.Argv, " ")},
-		"session": map[string]any{"tainted": in.Tainted, "labels": in.Labels},
+		"effect":  CELEffect{Kind: in.Effect.Kind, Target: in.Effect.Target, Detail: in.Effect.Detail},
+		"command": CELCommand{Argv: argv, Line: strings.Join(argv, " ")},
+		"session": CELSession{Tainted: in.Tainted, Labels: labels},
 	}
 	best := Decision{Verdict: Allow}
 	rank := map[string]int{Allow: 1, Ask: 2, Deny: 3}
 	for _, r := range p.Rules {
+		msg := r.Message
 		out, _, err := r.prg.Eval(vars)
 		if err != nil {
-			continue
-		}
-		if hit, ok := out.Value().(bool); !ok || !hit {
+			if r.Verdict == Allow {
+				continue
+			}
+			msg = fmt.Sprintf("rule %q failed to evaluate (%v); treated as %s", r.Name, err, r.Verdict)
+		} else if hit, ok := out.Value().(bool); !ok || !hit {
 			continue
 		}
 		if best.Rule == "" || rank[r.Verdict] > rank[best.Verdict] {
-			best = Decision{Verdict: r.Verdict, Rule: r.Name, Message: r.Message}
+			best = Decision{Verdict: r.Verdict, Rule: r.Name, Message: msg}
 		}
 	}
 	return best

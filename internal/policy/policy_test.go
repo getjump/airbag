@@ -83,3 +83,40 @@ func TestLabelsAndTaint(t *testing.T) {
 		t.Fatalf("labels = %q", labels)
 	}
 }
+
+// A misspelled field is a load error, not a rule that never matches.
+func TestTypedVariables(t *testing.T) {
+	for _, when := range []string{`effect.knd == "x"`, `session.label.exists(l, l == "x")`, `command.argv == "x"`} {
+		p := &Policy{}
+		if err := p.add(Rule{Name: "r", When: when, Verdict: Deny}); err == nil {
+			t.Errorf("%s: loaded", when)
+		}
+	}
+	p := &Policy{}
+	for _, when := range []string{`command.argv.exists(a, a == "--force")`, `"secret" in session.labels`, `effect.target.startsWith(".git/")`} {
+		if err := p.add(Rule{Name: when, When: when, Verdict: Deny}); err != nil {
+			t.Errorf("%s: %v", when, err)
+		}
+	}
+}
+
+// A deny or ask rule that fails at run time counts as matched; an
+// allow rule does not.
+func TestFailClosed(t *testing.T) {
+	p := &Policy{}
+	for _, r := range []Rule{
+		{Name: "allow-first", When: `command.argv[0] == "ls"`, Verdict: Allow},
+		{Name: "ask-first", When: `command.argv[0] == "curl"`, Verdict: Ask},
+	} {
+		if err := p.add(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := p.Decide(Input{Effect: models.Effect{Kind: "net.egress"}})
+	if d.Verdict != Ask || d.Rule != "ask-first" || !strings.Contains(d.Message, "failed to evaluate") {
+		t.Fatalf("empty argv: %+v", d)
+	}
+	if d := p.Decide(Input{Argv: []string{"ls"}}); d.Verdict != Allow || d.Rule != "allow-first" {
+		t.Fatalf("ls: %+v", d)
+	}
+}
