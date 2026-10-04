@@ -297,6 +297,9 @@ rules:
 		{"api.example..:443", http.StatusBadRequest, "empty label"},
 		{".api.example:443", http.StatusBadRequest, "empty label"},
 		{"api..example:443", http.StatusBadRequest, "empty label"},
+		{"API.EXAMPLE:0443", http.StatusForbidden, "not this host"},
+		{"api.example:99999", http.StatusBadRequest, "not a port number"},
+		{"[::1..]:443", http.StatusBadRequest, "not an IP address"},
 		{"ap\u0130.example:443", http.StatusBadRequest, "ASCII"},
 		{"\u212Aite.example:443", http.StatusBadRequest, "ASCII"},
 	} {
@@ -333,5 +336,24 @@ func TestPlainHTTPHostSpelledOneWay(t *testing.T) {
 	effs, _ := effects.Read(path)
 	if len(effs) < 2 || effs[0].Target != "127.0.0.1:"+port || effs[len(effs)-1].Target != "api.example" {
 		t.Fatalf("effects = %+v", effs)
+	}
+}
+
+func TestCanonHost(t *testing.T) {
+	for _, c := range []struct{ in, out string }{
+		{"API.Example.", "api.example"},
+		{"FE80::1%ETH0", "fe80::1%ETH0"}, // the zone is an interface name: its case stays
+		{"0:0::1", "::1"},
+		{"127.0.0.1.", "127.0.0.1"},
+		{"", ""},
+	} {
+		if got, why := canonHost(c.in); got != c.out || why != "" {
+			t.Errorf("canonHost(%q) = %q, %q; want %q", c.in, got, why, c.out)
+		}
+	}
+	for _, bad := range []string{"a..b", ".a", "a..", "::1.", "[::1]", "ap\u0130.example"} {
+		if _, why := canonHost(bad); why == "" {
+			t.Errorf("canonHost(%q) accepted", bad)
+		}
 	}
 }
