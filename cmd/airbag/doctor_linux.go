@@ -1,3 +1,5 @@
+//go:build linux
+
 package main
 
 import (
@@ -50,6 +52,14 @@ func cmdDoctor() error {
 	if !restricted {
 		err := exec.Command("unshare", "--user", "--map-root-user", "--mount", "true").Run()
 		check("can create a user + mount namespace", err == nil, "check kernel.unprivileged_userns_clone and user.max_user_namespaces")
+	}
+	// FUSE is optional: without it secret files are hidden rather than
+	// served and tracked, so the session runs but cannot read them.
+	if unix.Access("/dev/fuse", unix.W_OK) != nil {
+		fmt.Println("note: /dev/fuse is not writable: .env and other secret files will be hidden from the agent " +
+			"instead of tracked (install fuse3, or give your user access to /dev/fuse)")
+	} else {
+		fmt.Println("ok   /dev/fuse writable: reads of secret files are tracked")
 	}
 	if os.Getuid() == 0 {
 		fmt.Println("note: running as root; Claude Code refuses --dangerously-skip-permissions as root, run airbag as your user")

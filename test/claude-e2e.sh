@@ -6,6 +6,8 @@
 set -eu
 AIRBAG=${AIRBAG:-airbag}
 command -v claude >/dev/null || { echo "SKIP: claude not in PATH"; exit 0; }
+# The secret read and what follows from it need FUSE.
+[ -w /dev/fuse ] || { echo "SKIP: /dev/fuse not writable"; exit 0; }
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d "$HOME/.airbag-claude-e2e.XXXXXX")
 trap 'rm -rf "$T"' EXIT

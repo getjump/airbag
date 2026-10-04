@@ -1,0 +1,38 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: |
+          go vet ./...
+          GOOS=darwin GOARCH=arm64 go vet ./...
+      - name: unit tests
+        run: go test ./...
+      - name: build
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag" ./cmd/airbag
+          sudo install -m 755 "$RUNNER_TEMP/airbag" /usr/local/bin/airbag
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/airbag
+      - name: end-to-end tests
+        # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor;
+        # airbag doctor prints the profile a user would install, CI lifts it.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo chmod 666 /dev/fuse || true
+          sudo mkdir -m 1777 -p /var/lib/airbag-e2e
+          airbag doctor
+          for t in test/e2e.sh test/*-e2e.sh; do echo "== $t"; sh "$t"; done
+          python3 test/ctrlc.py

@@ -70,3 +70,36 @@ func TestBox(t *testing.T) {
 		t.Errorf("effect log disturbed: %+v", effs)
 	}
 }
+
+// A deferred command keeps the files it runs on; a database from
+// before that column existed opens and reads as before.
+func TestFilesAndOldDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE intents (id TEXT PRIMARY KEY, kind TEXT NOT NULL, argv TEXT NOT NULL, cwd TEXT NOT NULL, created TEXT NOT NULL);
+		CREATE TABLE intent_status (seq INTEGER PRIMARY KEY AUTOINCREMENT, intent TEXT NOT NULL, t TEXT NOT NULL, status TEXT NOT NULL, output TEXT NOT NULL DEFAULT '');
+		INSERT INTO intents VALUES ('i-1', 'git.push', '["git","push"]', '/w', '2026-10-04T00:00:00Z');
+		INSERT INTO intent_status (intent, t, status) VALUES ('i-1', '2026-10-04T00:00:00Z', 'pending');`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	two, err := b.Push(Intent{Kind: KindCmd, Argv: []string{"gh", "pr", "create"}, Cwd: "/w", Files: map[string]string{"notes.md": "abc"}})
+	if err != nil || two.ID != "i-2" {
+		t.Fatalf("push: %+v %v", two, err)
+	}
+	all, err := b.List()
+	if err != nil || len(all) != 2 {
+		t.Fatalf("list: %+v %v", all, err)
+	}
+	if all[0].Files != nil || all[1].Files["notes.md"] != "abc" || all[1].Kind != KindCmd {
+		t.Fatalf("files: %+v", all)
+	}
+}

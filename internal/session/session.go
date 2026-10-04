@@ -8,9 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,6 +49,39 @@ type Meta struct {
 	PassEnv []string `json:"pass_env,omitempty"`
 	// Strict keeps the agent from creating user namespaces.
 	Strict bool `json:"strict,omitempty"`
+	// GitTouched: an apply of this session wrote .git/config or git
+	// hooks into the real repository. It stays set for every later
+	// apply, so the session's pushes keep running untrusted.
+	GitTouched bool `json:"git_touched,omitempty"`
+	// Branch: the workspace result went to this branch of the real
+	// repository (apply --branch) instead of the working tree.
+	Branch string `json:"branch,omitempty"`
+	// Forwards: TCP ports the agent reaches on its own loopback
+	// (tcp://HOST:PORT in allow), each relayed by airbag to HOST:PORT.
+	Forwards []Forward `json:"forwards,omitempty"`
+	// Credentials the agent uses through placeholders: names, hosts,
+	// the variables it sees them in, and the placeholders, kept so a
+	// resumed run uses the same ones. Values are never stored.
+	Credentials []Credential `json:"credentials,omitempty"`
+	// Deferred: programs with a shim in the sandbox, because a
+	// `defer:` entry in airbag.yaml holds some of their calls.
+	Deferred []string `json:"deferred,omitempty"`
+	// Clone: the workspace branch is a full copy (an APFS clone on
+	// macOS) at CloneDir, not an overlayfs upper layer.
+	Clone bool `json:"clone,omitempty"`
+	// Runs counts the agent runs on this branch; 0 or 1 for one run.
+	Runs int `json:"runs,omitempty"`
+	// Baseline: real files changed after this time conflict with the
+	// branch. The session's start, or the last rollback, which put the
+	// files back as they were.
+	Baseline time.Time `json:"baseline,omitempty"`
+}
+
+type Credential struct {
+	Name        string   `json:"name"`
+	Hosts       []string `json:"hosts"`
+	Env         []string `json:"env,omitempty"`
+	Placeholder string   `json:"placeholder"`
 }
 
 type Session struct {
@@ -81,6 +117,7 @@ func Create(m Meta) (*Session, error) {
 	m.ID = newID()
 	m.Created = time.Now()
 	m.Status = StatusRunning
+	m.Runs = 1
 	s := &Session{Meta: m, Dir: filepath.Join(root, m.ID)}
 	for _, d := range []string{
 		s.WSUpper(), s.WSWork(), s.HomeUpper(), s.HomeWork(), s.EtcUpper(), s.EtcWork(),
@@ -101,8 +138,62 @@ func (s *Session) EtcUpper() string            { return filepath.Join(s.Dir, "et
 func (s *Session) EtcWork() string             { return filepath.Join(s.Dir, "etc", "work") }
 func (s *Session) MountDir(name string) string { return filepath.Join(s.Dir, "mnt", name) }
 func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "run") }
-func (s *Session) ProxySock() string           { return filepath.Join(s.RunDir(), "proxy.sock") }
-func (s *Session) ControlSock() string         { return filepath.Join(s.RunDir(), "ctl.sock") }
+func (s *Session) CloneDir() string            { return filepath.Join(s.Dir, "ws", "clone") }
+func (s *Session) ForwardSock(i int) string {
+	return filepath.Join(s.RunDir(), fmt.Sprintf("fwd-%d.sock", i))
+}
+
+// Forward is one tcp:// entry: the agent connects to 127.0.0.1:Port in
+// the sandbox, airbag connects to Host:Port.
+type Forward struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+func (f Forward) String() string {
+	return fmt.Sprintf("tcp://%s", net.JoinHostPort(f.Host, strconv.Itoa(f.Port)))
+}
+
+// ParseForwards splits tcp:// entries off an allowlist.
+func ParseForwards(allow []string) (hosts []string, fw []Forward, err error) {
+	for _, a := range allow {
+		rest, ok := strings.CutPrefix(a, "tcp://")
+		if !ok {
+			hosts = append(hosts, a)
+			continue
+		}
+		h, p, err := net.SplitHostPort(rest)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: want tcp://HOST:PORT", a)
+		}
+		port, err := strconv.Atoi(p)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, nil, fmt.Errorf("%s: bad port", a)
+		}
+		f := Forward{Host: h, Port: port}
+		if !slices.Contains(fw, f) {
+			fw = append(fw, f)
+		}
+	}
+	return hosts, fw, nil
+}
+
+// WSBranch is where the agent's version of the workspace lives: the
+// clone, or the overlayfs upper layer (changes only).
+func (s *Session) WSBranch() string {
+	if s.Clone {
+		return s.CloneDir()
+	}
+	return s.WSUpper()
+}
+func (s *Session) ProxySock() string   { return filepath.Join(s.RunDir(), "proxy.sock") }
+func (s *Session) ControlSock() string { return filepath.Join(s.RunDir(), "ctl.sock") }
+
+// CACert and CABundle: the session CA's certificate, and the machine's
+// roots with it, for tools in the sandbox to trust the hosts airbag
+// intercepts. Public; the CA's key never leaves memory.
+func (s *Session) CACert() string   { return filepath.Join(s.RunDir(), "ca.pem") }
+func (s *Session) CABundle() string { return filepath.Join(s.RunDir(), "ca-bundle.pem") }
 
 // EffectsPath is the session database: the effect log and the outbox.
 func (s *Session) EffectsPath() string { return filepath.Join(s.Dir, "effects.db") }
@@ -165,6 +256,58 @@ func Find(id, workspace string) (*Session, error) {
 		}
 	}
 	return nil, fmt.Errorf("no open session for %s", workspace)
+}
+
+// Resume reopens a stopped session for another run on the same branch:
+// the upper layers stay, overlayfs gets fresh work directories and the
+// run directory loses the sockets of the previous run.
+func Resume(id, workspace string) (*Session, error) {
+	var s *Session
+	if id == "last" {
+		all, err := List()
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range all {
+			if c.Workspace == workspace && c.Status == StatusStopped {
+				s = c
+				break
+			}
+		}
+		if s == nil {
+			return nil, fmt.Errorf("no stopped session to resume for %s", workspace)
+		}
+	} else {
+		var err error
+		if s, err = Load(filepath.Join(Root(), id)); err != nil {
+			return nil, err
+		}
+	}
+	switch {
+	case s.Workspace != workspace:
+		return nil, fmt.Errorf("session %s is a branch of %s, not of %s", s.ID, s.Workspace, workspace)
+	case s.Status == StatusRunning:
+		return nil, fmt.Errorf("session %s is running", s.ID)
+	case s.Status != StatusStopped:
+		return nil, fmt.Errorf("session %s is %s; only a stopped session can be resumed", s.ID, s.Status)
+	}
+	for _, d := range []string{s.WSWork(), s.HomeWork(), s.EtcWork(), s.RunDir()} {
+		_ = filepath.WalkDir(d, func(p string, de os.DirEntry, err error) error {
+			if err == nil && de.IsDir() {
+				_ = os.Chmod(p, 0o700)
+			}
+			return nil
+		})
+		if err := os.RemoveAll(d); err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	s.Status = StatusRunning
+	s.Runs = max(s.Runs, 1) + 1
+	return s, s.Save()
 }
 
 // RemoveAll deletes a session. Overlay leaves a mode-000 work dir

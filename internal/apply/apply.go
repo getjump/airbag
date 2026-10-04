@@ -4,12 +4,15 @@ package apply
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,8 +28,12 @@ type Options struct {
 	Force       bool     // apply over files changed on the host during the session
 	Interactive bool     // ask about each unit
 	Only        []string // apply only units touching these paths
-	In          io.Reader
-	Out         io.Writer
+	Branch      string   // put the workspace result on this new branch instead
+	// TrustGit runs the session's pushes although the session changed
+	// .git/config or git hooks; hooks stay disabled.
+	TrustGit bool
+	In       io.Reader
+	Out      io.Writer
 }
 
 type Conflict struct {
@@ -38,6 +45,10 @@ type Conflict struct {
 // Overlay reads the live workspace, so the agent's version was based
 // on the old file; applying it would silently drop the human's edit.
 func Conflicts(s *session.Session, cs []review.Change) []Conflict {
+	since := s.Created
+	if !s.Baseline.IsZero() {
+		since = s.Baseline
+	}
 	var out []Conflict
 	for _, c := range cs {
 		st, err := os.Lstat(c.Path)
@@ -55,10 +66,10 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 				continue
 			}
 			if st.IsDir() && (c.Kind == review.Deleted || c.Kind == review.Replaced) {
-				if p := changedInside(c.Path, s.Created); p != "" {
+				if p := changedInside(c.Path, since); p != "" {
 					out = append(out, Conflict{p, "changed on the host during the session, inside a directory the agent removed"})
 				}
-			} else if !st.IsDir() && changedAfter(c.Path, s.Created) {
+			} else if !st.IsDir() && changedAfter(c.Path, since) {
 				out = append(out, Conflict{c.Path, "changed on the host during the session"})
 			}
 		}
@@ -71,7 +82,7 @@ func changedAfter(p string, t time.Time) bool {
 	if unix.Lstat(p, &st) != nil {
 		return false
 	}
-	return time.Unix(st.Ctim.Sec, st.Ctim.Nsec).After(t)
+	return ctime(&st).After(t)
 }
 
 func changedInside(dir string, t time.Time) string {
@@ -89,8 +100,18 @@ func changedInside(dir string, t time.Time) string {
 }
 
 func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) error {
+	if o.Branch != "" {
+		if err := ApplyBranch(s, cs, o.Branch, o); err != nil {
+			return err
+		}
+		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
+	}
+	if g := interrupted(s); g != nil {
+		return fmt.Errorf("an apply of session %s started %s did not finish; run `airbag rollback %s` to undo its part, then apply again",
+			s.ID, g.Started.Format("15:04:05"), s.ID)
+	}
 	if s.Status == session.StatusApplied {
-		return runIntents(s, box, false, bufio.NewReader(o.In), o)
+		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
 	}
 	if s.Status == session.StatusRunning {
 		return fmt.Errorf("session %s is still running", s.ID)
@@ -111,12 +132,30 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 		return fmt.Errorf("nothing applied; rerun with --force to overwrite, or discard the session")
 	}
-	for _, c := range picked {
-		if err := applyOne(c); err != nil {
-			return fmt.Errorf("%s: %w (earlier changes are already applied)", c.Path, err)
+	if len(picked) > 0 {
+		gen, err := beginGeneration(s)
+		if err != nil {
+			return fmt.Errorf("start the undo journal: %w", err)
+		}
+		for _, c := range picked {
+			if err := gen.apply(c); err != nil {
+				left, rerr := gen.rollback(o.Out)
+				if rerr != nil || left > 0 {
+					return fmt.Errorf("%s: %w; rolling back what was applied also failed (%v), see `airbag rollback %s`", c.Path, err, rerr, s.ID)
+				}
+				return fmt.Errorf("%s: %w; nothing applied, the changes are back in the session", c.Path, err)
+			}
+		}
+		if err := gen.finish(); err != nil {
+			return err
 		}
 	}
-	forget(picked)
+	if !s.Clone {
+		forget(picked) // a clone matches the real files once they are applied
+	}
+	if gitTouched(picked) {
+		s.GitTouched = true
+	}
 	if len(picked) > 0 {
 		fmt.Fprintf(o.Out, "Applied %d changes.\n", len(picked))
 	}
@@ -139,7 +178,7 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 			return nil
 		}
 	}
-	return runIntents(s, box, gitTouched(picked), in, o)
+	return runIntents(s, box, s.GitTouched, in, o)
 }
 
 // choose picks the units to apply: all of them, the ones matching
@@ -222,45 +261,231 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	if err != nil {
 		return err
 	}
+	failed := "" // after a failure the rest wait: a PR without its push means nothing
 	for _, it := range intents {
+		if it.Status == outbox.Running {
+			// A run was recorded but not its end: airbag stopped mid-push.
+			it.Status = outbox.Unknown
+			it.Output = "airbag stopped while this ran, so whether it took effect is not known; it is not run again"
+			if it.Kind == outbox.KindPush {
+				it.Output = "airbag stopped while this ran, so it may or may not have reached the remote " +
+					"(check with git ls-remote); it is not run again"
+			}
+			if err := box.Update(it); err != nil {
+				return fmt.Errorf("intent %s: %w", it.ID, err)
+			}
+			fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
+			continue
+		}
 		if it.Status != outbox.Pending {
 			continue
 		}
-		args, err := outbox.GitPush(it.Argv)
-		if err != nil || !within(it.Cwd, s.Workspace) {
-			it.Status, it.Output = outbox.Rejected, fmt.Sprintf("invalid intent: %v (cwd %s)", err, it.Cwd)
-			fmt.Fprintf(o.Out, "intent %s rejected: %s\n", it.ID, it.Output)
-			_ = box.Update(it)
+		if failed != "" {
+			fmt.Fprintf(o.Out, "intent %s left pending: %s failed before it; once that is sorted out, `airbag apply %s` runs the rest\n",
+				it.ID, failed, s.ID)
 			continue
 		}
-		if risky {
-			// The agent's hooks never run on the host.
-			args = append([]string{"-c", "core.hooksPath=/dev/null"}, args...)
+		var status string
+		switch it.Kind {
+		case outbox.KindPush:
+			status, err = runPush(s, box, it, risky, in, o)
+		case outbox.KindCmd:
+			status, err = runCmd(s, box, it, risky, in, o)
+		default:
+			status, err = reject(box, it, "unknown kind "+it.Kind, o)
 		}
-		where := pushTarget(it.Cwd, args)
-		if risky && o.Yes {
-			fmt.Fprintf(o.Out, "intent %s left pending: the session changed .git/config or git hooks; "+
-				"check the push target (%s) and run `airbag apply %s` without --yes\n", it.ID, where, s.ID)
-			continue
-		}
-		if !confirm(in, o, fmt.Sprintf("Run intent %s: `git %s` → %s?", it.ID, strings.Join(args, " "), where)) {
-			it.Status = outbox.Rejected
-			_ = box.Update(it)
-			continue
-		}
-		cmd := exec.Command("git", args...)
-		cmd.Dir = it.Cwd
-		outb, err := cmd.CombinedOutput()
-		_, _ = o.Out.Write(outb)
-		it.Output = string(outb)
-		it.Status = outbox.Done
 		if err != nil {
-			it.Status = outbox.Failed
-			fmt.Fprintf(o.Out, "intent %s failed: %v\n", it.ID, err)
+			return err
 		}
-		_ = box.Update(it)
+		if status == outbox.Failed {
+			failed = it.ID
+		}
 	}
 	return nil
+}
+
+func reject(box *outbox.Box, it outbox.Intent, why string, o Options) (string, error) {
+	it.Status, it.Output = outbox.Rejected, why
+	fmt.Fprintf(o.Out, "intent %s rejected: %s\n", it.ID, why)
+	if err := box.Update(it); err != nil {
+		return "", fmt.Errorf("intent %s: %w", it.ID, err)
+	}
+	return outbox.Rejected, nil
+}
+
+// run records the start first: if airbag stops while the command runs,
+// the next apply reports the outcome as unknown instead of running it
+// again.
+func run(box *outbox.Box, it outbox.Intent, cmd *exec.Cmd, o Options) (string, error) {
+	it.Status = outbox.Running
+	if err := box.Update(it); err != nil {
+		return "", fmt.Errorf("intent %s not run: %w", it.ID, err)
+	}
+	outb, err := cmd.CombinedOutput()
+	_, _ = o.Out.Write(outb)
+	it.Output = clipOutput(string(outb))
+	it.Status = outbox.Done
+	if err != nil {
+		it.Status = outbox.Failed
+		fmt.Fprintf(o.Out, "intent %s failed: %v\n", it.ID, err)
+	}
+	if err := box.Update(it); err != nil {
+		return "", fmt.Errorf("intent %s ran (%s), but its result was not recorded: %w", it.ID, it.Status, err)
+	}
+	return it.Status, nil
+}
+
+func clipOutput(s string) string {
+	const max = 64 << 10
+	if len(s) > max {
+		return s[:max] + "\n[airbag: output clipped]"
+	}
+	return s
+}
+
+func runPush(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, in *bufio.Reader, o Options) (string, error) {
+	if s.Branch != "" {
+		// The push names the agent's branch, which is not the
+		// user's: the work is on s.Branch now.
+		fmt.Fprintf(o.Out, "intent %s (git %s) left pending: the session's work is on branch %s; "+
+			"push that when ready (git push origin %s)\n", it.ID, strings.Join(it.Argv[1:], " "), s.Branch, s.Branch)
+		return outbox.Pending, nil
+	}
+	cwd := hostDir(s, it.Cwd)
+	args, err := outbox.GitPush(it.Argv)
+	if err != nil || !within(cwd, s.Workspace) {
+		return reject(box, it, fmt.Sprintf("invalid intent: %v (cwd %s)", err, it.Cwd), o)
+	}
+	if risky {
+		// The repository now carries the agent's git config or hooks,
+		// which run on the host during a push (hooks, credential
+		// helpers, ssh commands). Nothing runs until the user has
+		// looked and says so; even then hooks stay off.
+		if !o.TrustGit {
+			fmt.Fprintf(o.Out, "intent %s left pending: session %s changed .git/config or git hooks, which run on this "+
+				"machine during a push. Inspect them (git config --local --list; ls .git/hooks), then run "+
+				"`airbag apply --trust-git %s`, or push yourself\n", it.ID, s.ID, s.ID)
+			return outbox.Pending, nil
+		}
+		args = append([]string{"-c", "core.hooksPath=/dev/null"}, args...)
+	}
+	where := pushTarget(cwd, args)
+	if !confirm(in, o, fmt.Sprintf("Run intent %s: `git %s` → %s?", it.ID, strings.Join(args, " "), where)) {
+		it.Status = outbox.Rejected
+		if err := box.Update(it); err != nil {
+			return "", fmt.Errorf("intent %s: %w", it.ID, err)
+		}
+		return outbox.Rejected, nil
+	}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = cwd
+	return run(box, it, cmd, o)
+}
+
+// runCmd runs a call a `defer:` entry held back. It runs on this
+// machine with the user's credentials, so: the program comes from this
+// machine's PATH and not from the workspace, the files it names must
+// hold what they held when it was queued, and the user confirms each
+// one; --yes does not.
+func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, in *bufio.Reader, o Options) (string, error) {
+	line := outbox.Line(it.Argv)
+	if s.Branch != "" {
+		// The working tree is not the session's result, so there is
+		// nothing for the command to act on; on the branch it may be.
+		fmt.Fprintf(o.Out, "intent %s (`%s`) left pending: the session's work is on branch %s, not in the working tree; "+
+			"run it yourself from that branch when it is ready\n", it.ID, line, s.Branch)
+		return outbox.Pending, nil
+	}
+	cwd := hostDir(s, it.Cwd)
+	if len(it.Argv) == 0 || strings.ContainsRune(it.Argv[0], '/') || !within(cwd, s.Workspace) {
+		return reject(box, it, fmt.Sprintf("invalid intent (cwd %s)", it.Cwd), o)
+	}
+	prog, err := exec.LookPath(it.Argv[0])
+	if err != nil {
+		return reject(box, it, fmt.Sprintf("%s: not found on this machine", it.Argv[0]), o)
+	}
+	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, s.Workspace) {
+		return reject(box, it, fmt.Sprintf("%s resolves to %s, inside the workspace; deferred commands run only programs from outside it", it.Argv[0], prog), o)
+	}
+	rels := make([]string, 0, len(it.Files))
+	for rel := range it.Files {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		p := filepath.Join(s.Workspace, filepath.FromSlash(rel))
+		if !within(p, s.Workspace) {
+			return reject(box, it, "invalid intent: file "+rel, o)
+		}
+		if got, err := hashFile(p); err != nil || got != it.Files[rel] {
+			return reject(box, it, fmt.Sprintf("%s is not what it was when the command was queued; not run", rel), o)
+		}
+	}
+	env := os.Environ()
+	if risky {
+		// The program may run git in the repository, and the agent's
+		// git config can run code from there (hooks, fsmonitor).
+		if !o.TrustGit {
+			fmt.Fprintf(o.Out, "intent %s left pending: session %s changed .git/config or git hooks, which run on this "+
+				"machine when a program uses git here. Inspect them (git config --local --list; ls .git/hooks), then run "+
+				"`airbag apply --trust-git %s`\n", it.ID, s.ID, s.ID)
+			return outbox.Pending, nil
+		}
+		env = append(env, "GIT_CONFIG_COUNT=2",
+			"GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=/dev/null",
+			"GIT_CONFIG_KEY_1=core.fsmonitor", "GIT_CONFIG_VALUE_1=false")
+	}
+	if o.Yes {
+		fmt.Fprintf(o.Out, "intent %s (`%s`) left pending: commands other than git push are confirmed one by one; "+
+			"run `airbag apply %s` without --yes\n", it.ID, line, s.ID)
+		return outbox.Pending, nil
+	}
+	q := fmt.Sprintf("Run intent %s on this machine, with your credentials, in %s (it reads the workspace as applied):\n  %s\n",
+		it.ID, cwd, line)
+	q = strings.TrimSuffix(q, "\n")
+	if !confirm(in, o, q) {
+		it.Status = outbox.Rejected
+		if err := box.Update(it); err != nil {
+			return "", fmt.Errorf("intent %s: %w", it.ID, err)
+		}
+		return outbox.Rejected, nil
+	}
+	cmd := exec.Command(prog, it.Argv[1:]...)
+	cmd.Args[0] = it.Argv[0]
+	cmd.Dir, cmd.Env = cwd, env
+	return run(box, it, cmd, o)
+}
+
+// hostDir maps a directory the agent saw to the real workspace: on
+// macOS the agent worked in the clone.
+func hostDir(s *session.Session, dir string) string {
+	if !s.Clone {
+		return dir
+	}
+	clones := []string{s.CloneDir()}
+	if r, err := filepath.EvalSymlinks(s.CloneDir()); err == nil {
+		clones = append(clones, r)
+	}
+	for _, c := range clones {
+		if within(dir, c) {
+			rel, _ := filepath.Rel(c, dir)
+			return filepath.Join(s.Workspace, rel)
+		}
+	}
+	return dir
+}
+
+func hashFile(p string) (string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // pushTarget resolves where a push really goes, after the branch's

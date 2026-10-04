@@ -23,8 +23,14 @@ Ask the agent to:
 
 - [ ] edit two files and add one, then run the tests;
 - [ ] `git commit` and `git push`: the push answers `queued as intent i-N`;
+- [ ] with `defer: [gh pr create]` in `airbag.yaml`, open a pull request: `gh pr
+  create` answers `queued as intent i-N`, while `gh pr list` runs (and fails
+  without a token);
 - [ ] fetch a page from a host that is not allowlisted: it gets `403 ... denied by policy`;
-- [ ] read `~/.ssh/id_*`: nothing is there.
+- [ ] read `~/.ssh/id_*`: nothing is there;
+- [ ] with a `credentials:` entry for GitHub in `~/.config/airbag/airbag.yaml`
+  (`source: command:gh auth token`, `env: [GH_TOKEN]`), `gh pr list` works,
+  `echo $GH_TOKEN` shows a placeholder, and review lists the requests.
 
 Then check the terminal:
 
@@ -42,10 +48,25 @@ $ airbag diff
 
 - [ ] Steps list the agent's tool calls with the files each one changed;
 - [ ] Network shows `api.anthropic.com` and any denied hosts;
-- [ ] the real files are unchanged (`git status` is clean).
+- [ ] the real files are unchanged (`git status` is clean);
+- [ ] `airbag review --attention` lists the waiting push and any flagged change;
+- [ ] `airbag review --json | jq -r .schema` prints `airbag.review/v1`.
 
-Then either `airbag apply` (the files land, the push runs after confirmation)
-or `airbag discard`.
+## Iterate, then take the result
+
+- [ ] `airbag run --session last -- claude --continue` continues on the same
+  branch: the agent sees its earlier edits, and review numbers the steps on.
+
+Then one of:
+
+- [ ] `airbag apply`: the files land, the push runs after confirmation, then
+  `gh pr create` asks on its own and opens the pull request with your login; then
+  `airbag rollback` puts the files back as they were and the changes back into
+  the session (`airbag review` shows them again);
+- [ ] `airbag apply --branch try-1`: `git log try-1` has the agent's commits and
+  one commit with what it left uncommitted; `git status` and the current branch
+  are unchanged, and the queued push is reported for you to run yourself;
+- [ ] `airbag discard`: the session's branch is gone, the real files untouched.
 
 ## Resume
 

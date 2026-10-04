@@ -27,6 +27,7 @@ import (
 	"cel.dev/cel-go/ext"
 	"gopkg.in/yaml.v3"
 
+	"github.com/getjump/airbag/internal/creds"
 	"github.com/getjump/airbag/internal/models"
 )
 
@@ -49,15 +50,23 @@ type File struct {
 	Allow []string `yaml:"allow"`
 	// Hide: more paths to hide from the agent, relative to $HOME or
 	// absolute. Hiding only takes away, so the repository may add some.
-	Hide  []string `yaml:"hide"`
-	Rules []Rule   `yaml:"rules"`
+	Hide []string `yaml:"hide"`
+	// Defer: commands that wait in the outbox instead of running, each
+	// a program and the words that select its calls ("gh pr create").
+	Defer []string `yaml:"defer"`
+	// Credentials: tokens the agent uses without holding them. Only the
+	// user's own file may name them, never a repository's.
+	Credentials []creds.Binding `yaml:"credentials"`
+	Rules       []Rule          `yaml:"rules"`
 }
 
 type Policy struct {
-	Allow   []string
-	Hide    []string
-	Rules   []Rule
-	Sources []string
+	Allow       []string
+	Hide        []string
+	Defer       []Pattern
+	Credentials []creds.Binding
+	Rules       []Rule
+	Sources     []string
 }
 
 // Builtin: effects that cannot be undone and cannot wait in the outbox.
@@ -121,10 +130,8 @@ func Load(workspace, home string) (*Policy, error) {
 			return nil, err
 		}
 	}
-	for _, path := range []string{
-		filepath.Join(home, ".config", "airbag", "airbag.yaml"),
-		filepath.Join(workspace, "airbag.yaml"),
-	} {
+	userFile := filepath.Join(home, ".config", "airbag", "airbag.yaml")
+	for _, path := range []string{userFile, filepath.Join(workspace, "airbag.yaml")} {
 		b, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -136,8 +143,29 @@ func Load(workspace, home string) (*Policy, error) {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 		p.Sources = append(p.Sources, path)
+		if len(f.Credentials) > 0 && path != userFile {
+			return nil, fmt.Errorf("%s: credentials can only be set in %s: a repository must not decide which hosts get your tokens", path, userFile)
+		}
+		for _, b := range f.Credentials {
+			if err := b.Validate(); err != nil {
+				return nil, fmt.Errorf("%s: credentials: %w", path, err)
+			}
+			for _, o := range p.Credentials {
+				if o.Name == b.Name {
+					return nil, fmt.Errorf("%s: credentials: %s twice", path, b.Name)
+				}
+			}
+			p.Credentials = append(p.Credentials, b)
+		}
 		p.Allow = append(p.Allow, f.Allow...)
 		p.Hide = append(p.Hide, f.Hide...)
+		for _, d := range f.Defer {
+			pat, err := ParsePattern(d)
+			if err != nil {
+				return nil, fmt.Errorf("%s: defer %q: %w", path, d, err)
+			}
+			p.Defer = append(p.Defer, pat)
+		}
 		for i, r := range f.Rules {
 			if r.Name == "" {
 				r.Name = fmt.Sprintf("%s#%d", filepath.Base(path), i+1)
@@ -155,7 +183,9 @@ func (p *Policy) add(r Rule) error {
 	switch r.Verdict {
 	case Allow, Deny, Ask:
 	case "defer":
-		r.Verdict = Ask // only git push can wait in the outbox for now
+		// What waits is chosen by `defer:` entries, which put a shim in
+		// front of the program; a rule cannot reach a call without one.
+		r.Verdict = Ask
 	default:
 		return fmt.Errorf("verdict %q: want allow, deny or ask", r.Verdict)
 	}

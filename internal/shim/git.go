@@ -13,8 +13,16 @@ import (
 	"github.com/getjump/airbag/internal/outbox"
 )
 
-// BinDir is the shim directory inside the sandbox.
-const BinDir = "/run/airbag/bin"
+// BinDir is the shim directory inside the sandbox: /run/airbag/bin on
+// Linux, a directory of the session on macOS (AIRBAG_SHIM_DIR).
+var BinDir = binDir()
+
+func binDir() string {
+	if d := os.Getenv("AIRBAG_SHIM_DIR"); d != "" {
+		return d
+	}
+	return "/run/airbag/bin"
+}
 
 // Git turns `git push` into an outbox intent and runs any other git
 // command unchanged. Bypassing the shim does not help the agent: the

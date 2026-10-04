@@ -26,6 +26,7 @@ echo new > new.txt
 rm old.txt
 echo "alias evil=1" >> ~/.airbag-e2e-rc
 printf '#!/bin/sh\n' > .git/hooks/post-checkout && chmod +x .git/hooks/post-checkout
+printf '#!/bin/sh\ntouch hook-ran\n' > .git/hooks/pre-push && chmod +x .git/hooks/pre-push
 git add -A && git commit -qm "agent work"
 git push origin main
 curl -s --unix-socket /run/airbag/ctl.sock -d '{"kind":"git.push","argv":["rm","-rf","/"]}' http://x/intent | grep -q "only" || echo "LEAK: forged intent accepted"
@@ -51,14 +52,44 @@ for want in "~ README.md" "+ new.txt" "- old.txt" ".git/hooks/post-checkout  per
 $rev"
 done
 
+# The same review as data, and as a short list of decisions.
+"$AIRBAG" review --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["schema"] == "airbag.review/v1", r["schema"]
+att = {(a["what"], a["target"]) for a in r["attention"]}
+for want in [("change", ".git/hooks/post-checkout"), ("change", ".git/hooks/pre-push"), ("intent", "i-1")]:
+    assert want in att, (want, att)
+assert any(c["layer"] == "home" and c["path"] == ".airbag-e2e-rc" for c in r["changes"])
+assert any(c["path"] == "README.md" and c["kind"] == "modified" for c in r["changes"])
+assert r["network"]["denied"].get("example.com:443"), r["network"]
+' || fail "review --json"
+"$AIRBAG" review --attention | grep -q "things need a decision" || fail "review --attention"
+
+# rollback undoes the apply, and the changes come back to the session.
+"$AIRBAG" apply --yes >/dev/null
+rb=$("$AIRBAG" rollback)
+echo "$rb" | grep -q "Rolled back" || fail "rollback: $rb"
+[ "$(cat README.md)" = hello ] || fail "README not restored by rollback"
+[ -f old.txt ] && [ ! -e new.txt ] || fail "files not restored by rollback"
+[ ! -s "$HOME/.airbag-e2e-rc" ] || fail "~ not restored by rollback"
+[ ! -f .git/hooks/post-checkout ] || fail "hook left behind by rollback"
+[ "$(git rev-parse HEAD)" = "$before" ] || fail "HEAD not restored by rollback"
+"$AIRBAG" review | grep -qF "~ README.md" || fail "changes not back in the session after rollback"
+
 applied=$("$AIRBAG" apply --yes)
 echo "$applied" | grep -q "left pending" || fail "intent ran under --yes although the agent added a git hook: $applied"
 [ "$(cat README.md)" = changed ] || fail "README not applied"
 [ ! -f old.txt ] || fail "old.txt not deleted"
 grep -q evil "$HOME/.airbag-e2e-rc" || fail "~ change not applied"
 [ "$(git -C "$T/remote.git" rev-parse main)" = "$before" ] || fail "remote changed before the intent was confirmed"
-printf 'y\n' | "$AIRBAG" apply >/dev/null
+# A later apply keeps the session's pushes untrusted: they wait for --trust-git.
+again=$(printf 'y\n' | "$AIRBAG" apply)
+echo "$again" | grep -q -- "--trust-git" || fail "second apply did not hold the push: $again"
+[ "$(git -C "$T/remote.git" rev-parse main)" = "$before" ] || fail "second apply pushed without --trust-git"
+printf 'y\n' | "$AIRBAG" apply --trust-git >/dev/null
 [ "$(git -C "$T/remote.git" rev-parse main)" = "$(git rev-parse HEAD)" ] || fail "push intent did not run"
+[ ! -e hook-ran ] || fail "the agent's pre-push hook ran on the host"
 # User namespaces: allowed by default, refused under --strict.
 if command -v unshare >/dev/null; then
 	probe='unshare -Ur true 2>/dev/null && echo nested-allowed || echo nested-refused'

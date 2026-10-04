@@ -3,7 +3,8 @@
 airbag is built on Linux namespaces, overlayfs and FUSE; macOS has none of
 them. This page records how the agents and agent sandboxes that run natively
 on macOS do it (as of October 2026), the native design that follows for
-airbag, and the Linux VM setup that works until then.
+airbag, the prototype of it, and the Linux VM setup, which stays the tested way
+until the prototype has run on a real Mac.
 
 ## How others sandbox agents on macOS
 
@@ -84,14 +85,46 @@ speed checks (5000 by default), `-v` prints command output under passing checks.
 
 ### Order
 
-1. Seatbelt profile and proxy, no branch: network control, hidden credentials,
-   read-only `$HOME`. Most of the safety comes from this step alone.
-2. NFS overlay branch of the workspace, sharing review and apply with Linux.
+1. Seatbelt profile and proxy, with an APFS clone as the workspace branch.
+   This is the prototype below.
+2. NFS overlay branch of the workspace instead of the clone, if the probe
+   (`cmd/airbag-macprobe`, see the macos-probe PR) shows it works without root
+   and fast enough: the agent then works at a path of its own without a copy.
 3. Secret tracking through the same server.
 
-## Until then: a Linux VM
+## The prototype
 
-If you need airbag on a Mac before the native port, run it in a Linux VM.
+`airbag` builds for macOS and runs the agent natively, without a VM. It is a
+prototype: built and unit-tested on Linux, not yet run on a Mac.
+
+```console
+$ go build ./cmd/airbag        # on the Mac, or GOOS=darwin GOARCH=arm64 elsewhere
+$ ./airbag doctor              # sandbox-exec, and an APFS clone to the session dir
+$ cd ~/src/project
+$ ./airbag run -- claude --dangerously-skip-permissions
+$ ./airbag review              # then apply, apply --branch NAME, or discard
+```
+
+| | Linux | macOS prototype |
+|---|---|---|
+| Workspace branch | overlayfs, at the workspace's own path | an APFS clone (`cp -c`) in the session directory; the agent works at that path |
+| `$HOME` | a branch, reviewed | read-only, except the agent's state (`~/.claude`, `~/.codex`, without their settings, hooks and instructions); caches (`TMPDIR`, Go, npm, pip, uv, cargo) point into the session |
+| Network | network namespace, only the proxy | Seatbelt allows outbound traffic only to the proxy's localhost port and airbag's control socket |
+| Secret files | served through FUSE, a read taints the session | not readable at all, in the clone or the real workspace (no FUSE, so a read could not be tracked) |
+| Credentials | hidden by bind mounts | denied by the profile |
+| Shims, outbox, mirror, policies, review, apply, rollback, `--branch`, `--session` | yes | the same code |
+| Agent hooks (steps per tool call) | managed settings in a private `/etc` | not installed: managed settings need root on macOS |
+| Terminal | a pseudo-terminal of its own, TIOCSTI filtered | the agent shares your terminal |
+
+What to report from a first run: whether Claude Code and Codex start and finish a
+task, which Seatbelt denials they hit (`log stream --predicate 'eventMessage
+CONTAINS "airbag-s-"'` shows them with the session's tag), and how long the clone
+takes on a large repository.
+
+## The tested way: a Linux VM
+
+Until the prototype has run on a real Mac, the way to use airbag there that the
+tests cover is a Linux VM.
 
 **OrbStack.** Create an Ubuntu machine and install airbag inside it. Mac files
 are under `/mnt/mac`; a server on the Mac is reachable as `host.orb.internal`.
@@ -110,6 +143,8 @@ Log in to the agent inside the VM, and give the VM your git credentials:
 the outbox pushes from there.
 
 The Mac's home is visible in the VM outside the VM's `$HOME`
-(`/Users/<you>` in Lima, `/mnt/mac/Users/<you>` in OrbStack), and airbag does
-not hide it yet, so the agent can read the Mac's `~/.ssh` there. Share only the
-projects directory with the VM.
+(`/Users/<you>` in Lima, `/mnt/mac/Users/<you>` in OrbStack). airbag hides the
+credentials in every Mac home it finds there, as in the VM's own home (`~/.ssh`,
+`~/.aws`, ... plus the Mac's keychains, sops keys and browser profiles), but the
+rest of the Mac's files stay readable: share only the projects directory with the
+VM.

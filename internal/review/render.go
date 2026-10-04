@@ -92,7 +92,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 
 	allowed, denied, cut := map[string]int{}, map[string]int{}, map[string]int{}
 	for _, e := range effs {
-		if e.Kind != "net.egress" {
+		if e.Kind != "net.egress" && e.Kind != "net.tcp" {
 			continue
 		}
 		host, _, err := net.SplitHostPort(e.Target)
@@ -153,6 +153,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	if len(cut) > 0 {
 		fmt.Fprintf(w, "           %d cut when a secret was read%s\n", total(cut), hostList(cut))
 	}
+	renderRequests(w, effs)
 
 	if len(sts) > 0 {
 		renderSteps(w, sts)
@@ -172,8 +173,15 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	}
 
 	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))
+	secrets := knownSecrets(s.Workspace)
 	for _, in := range intents {
-		fmt.Fprintf(w, "  %-4s %-44s %s\n", in.ID, strings.Join(in.Argv, " "), in.Status)
+		fmt.Fprintf(w, "  %-4s %-44s %s\n", in.ID, outbox.Line(in.Argv), in.Status)
+		if len(in.Files) > 0 {
+			fmt.Fprintf(w, "       runs only on these as queued: %s\n", strings.Join(fileNames(in.Files), ", "))
+		}
+		if intentHasSecret(in, secrets) {
+			fmt.Fprintf(w, "       ! carries a value from a secret file\n")
+		}
 	}
 
 	if att := Attention(cs); len(att) > 0 {
@@ -440,4 +448,57 @@ func Diff(w io.Writer, c Change) {
 	cmd := exec.Command("diff", "-u", "--label", "a/"+display(c), "--label", "b/"+display(c), a, b)
 	cmd.Stdout, cmd.Stderr = w, w
 	_ = cmd.Run() // diff exits 1 when files differ
+}
+
+func fileNames(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// intentHasSecret: an intent runs on the host and sends what its
+// command line says, so a secret value in it leaves when it runs.
+func intentHasSecret(in outbox.Intent, secrets []string) bool {
+	line := strings.Join(in.Argv, " ")
+	for _, v := range secrets {
+		if strings.Contains(line, v) {
+			return true
+		}
+	}
+	return false
+}
+
+// renderRequests lists the requests to hosts a credential is bound to:
+// airbag terminated TLS for those, so it saw each method and path.
+func renderRequests(w io.Writer, effs []effects.Effect) {
+	reqs, with := map[string]int{}, map[string]string{}
+	for _, e := range effs {
+		if e.Kind != "http.request" || e.Verdict != "allow" {
+			continue
+		}
+		reqs[e.Target]++
+		if e.Reason != "" {
+			with[e.Target] = e.Reason
+		}
+	}
+	if len(reqs) == 0 {
+		return
+	}
+	keys := sortedKeys(reqs)
+	sort.SliceStable(keys, func(i, j int) bool { return reqs[keys[i]] > reqs[keys[j]] })
+	fmt.Fprintf(w, "Requests   %d to hosts with a credential\n", total(reqs))
+	for i, k := range keys {
+		if i == maxListed {
+			fmt.Fprintf(w, "  … and %d more\n", len(keys)-maxListed)
+			break
+		}
+		note := ""
+		if c := with[k]; c != "" {
+			note = "  with " + c
+		}
+		fmt.Fprintf(w, "  %s ×%d%s\n", k, reqs[k], note)
+	}
 }

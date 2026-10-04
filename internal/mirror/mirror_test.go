@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -56,5 +58,58 @@ func TestTaintedServesOnlyCache(t *testing.T) {
 	}
 	if len(reg.calls) != before {
 		t.Fatalf("a tainted session reached the registry: %v", reg.calls[before:])
+	}
+
+	// What the real workspace's lock file pins is fetched even now.
+	m.Pinned = Pins{"https://registry.npmjs.org/@scope/pinned/-/pinned-2.0.0.tgz": "package-lock.json"}
+	if w := get("/npm/@scope/pinned/-/pinned-2.0.0.tgz"); w.Code != 200 || w.Body.String() != "TARBALL" {
+		t.Fatalf("pinned tarball after taint: %d %s", w.Code, w.Body)
+	}
+	if w := get("/npm/@scope/pinned/-/pinned-2.0.1.tgz"); w.Code != http.StatusForbidden {
+		t.Fatalf("an unpinned version after taint: %d", w.Code)
+	}
+}
+
+func TestFindPins(t *testing.T) {
+	ws := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(ws, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("web/package-lock.json", `{"lockfileVersion":3,"packages":{"":{},
+		"node_modules/left-pad":{"resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz","integrity":"sha512-x"},
+		"node_modules/@s/p":{"resolved":"https://registry.npmjs.org/@s/p/-/p-1.0.0.tgz"}}}`)
+	write("old/package-lock.json", `{"lockfileVersion":1,"dependencies":{"a":{"resolved":"https://registry.npmjs.org/a/-/a-1.0.0.tgz",
+		"dependencies":{"b":{"resolved":"https://registry.npmjs.org/b/-/b-2.0.0.tgz"}}}}}`)
+	write("yarn.lock", `left-pad@^1.3.0:
+  version "1.3.0"
+  resolved "https://registry.yarnpkg.com/left-pad/-/left-pad-1.3.1.tgz#abc"
+`)
+	write("go.sum", `github.com/BurntSushi/toml v1.4.0 h1:aaa=
+github.com/BurntSushi/toml v1.4.0/go.mod h1:bbb=
+`)
+	write("py/uv.lock", `wheels = [{ url = "https://files.pythonhosted.org/packages/ab/six-1.16.0-py2.py3-none-any.whl", hash = "sha256:x" }]
+`)
+	write("node_modules/x/package-lock.json", `{"packages":{"node_modules/z":{"resolved":"https://registry.npmjs.org/z/-/z-9.tgz"}}}`)
+	p := FindPins(ws)
+	for _, want := range []string{
+		"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+		"https://registry.npmjs.org/@s/p/-/p-1.0.0.tgz",
+		"https://registry.npmjs.org/a/-/a-1.0.0.tgz",
+		"https://registry.npmjs.org/b/-/b-2.0.0.tgz",
+		"https://registry.npmjs.org/left-pad/-/left-pad-1.3.1.tgz",
+		"https://proxy.golang.org/github.com/!burnt!sushi/toml/@v/v1.4.0.zip",
+		"https://proxy.golang.org/github.com/!burnt!sushi/toml/@v/v1.4.0.mod",
+		"https://files.pythonhosted.org/packages/ab/six-1.16.0-py2.py3-none-any.whl",
+	} {
+		if _, ok := p.Has(want); !ok {
+			t.Errorf("not pinned: %s", want)
+		}
+	}
+	if _, ok := p.Has("https://registry.npmjs.org/z/-/z-9.tgz"); ok {
+		t.Error("a lock file inside node_modules counted")
 	}
 }

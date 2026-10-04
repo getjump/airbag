@@ -41,7 +41,13 @@ done
 
 # Second session: the same artifacts come from the cache, also after
 # the session read a secret; anything new is refused then, and the
-# registries themselves are reachable only through the mirror.
+# registries themselves are reachable only through the mirror. Reading
+# the secret needs FUSE (without it the file is hidden and nothing taints).
+if [ ! -w /dev/fuse ]; then
+	echo "SKIP: tainted part (/dev/fuse not writable)"
+	echo PASS
+	exit 0
+fi
 printf 'API_TOKEN=sk-mirror-0123456789\n' > .env
 out=$("$AIRBAG" run -- sh -c "cat .env >/dev/null; $script
 	curl -s -o /dev/null --max-time 5 https://registry.npmjs.org/left-pad; true" 2>&1)
@@ -55,5 +61,24 @@ if command -v npm >/dev/null; then
 	grep -q LEAK "$T/out" && fail "a tainted session fetched a new package"
 	"$AIRBAG" log | grep 'pkg.fetch' | grep -q 'deny.*secret-taint' || fail "refused fetch not logged: $("$AIRBAG" log)"
 	"$AIRBAG" discard --yes >/dev/null
+
+	# What the real workspace's lock file pins still installs after the
+	# secret read. A fresh mirror cache makes it a real fetch.
+	mkdir pinned && cat > pinned/package.json <<'EOJ'
+{"name":"pinned","version":"1.0.0","dependencies":{"is-plain-obj":"4.1.0"}}
+EOJ
+	cat > pinned/package-lock.json <<'EOJ'
+{"name":"pinned","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{
+ "":{"name":"pinned","version":"1.0.0","dependencies":{"is-plain-obj":"4.1.0"}},
+ "node_modules/is-plain-obj":{"version":"4.1.0",
+  "resolved":"https://registry.npmjs.org/is-plain-obj/-/is-plain-obj-4.1.0.tgz",
+  "integrity":"sha512-+Pgi+vMuUNkJyExiMBt5IlFoMyKnr5zhJ4Uspz58WOhBF5QoIZkFyNHIbBAtHwzVAgk5RtndVNsDRN61/mmDqg=="}}}
+EOJ
+	fresh=$(mktemp -d /var/tmp/airbag-pins.XXXXXX)
+	AIRBAG_HOME=$fresh "$AIRBAG" run -- sh -c "cat .env >/dev/null; cd pinned && npm ci --no-audit --no-fund >/dev/null 2>&1 && echo INSTALLED; true" >"$T/out" 2>&1
+	grep -q INSTALLED "$T/out" || fail "a lock-pinned package did not install after the secret read: $(cat "$T/out")"
+	AIRBAG_HOME=$fresh "$AIRBAG" log | grep -q 'pkg.fetch.*is-plain-obj.*pinned by pinned/package-lock.json' || fail "pinned fetch not logged: $(AIRBAG_HOME=$fresh "$AIRBAG" log | grep pkg)"
+	AIRBAG_HOME=$fresh "$AIRBAG" discard --yes >/dev/null
+	rm -rf "$fresh"
 fi
 echo PASS

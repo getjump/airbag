@@ -1,5 +1,6 @@
-// Package outbox holds irreversible actions the agent asked for. They
-// run on the host after the human approves them in review.
+// Package outbox holds irreversible actions the agent asked for: git
+// push, and the calls `defer:` entries name. They run on the host after
+// the human approves them in review.
 //
 // Intents live in the session database next to the effect log. An
 // intent is one immutable row; its status is a history of rows, the
@@ -14,6 +15,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -21,19 +24,33 @@ import (
 
 const (
 	Pending  = "pending"
+	Running  = "running" // recorded before the action starts
 	Done     = "done"
 	Failed   = "failed"
 	Rejected = "rejected"
+	// Unknown: airbag stopped while the action ran, so whether it took
+	// effect is not known. It is never run again on its own.
+	Unknown = "unknown"
+)
+
+// Kinds of intent.
+const (
+	KindPush = "git.push"
+	// KindCmd: a call that a `defer:` entry in airbag.yaml holds back.
+	KindCmd = "cmd"
 )
 
 type Intent struct {
-	ID      string    `json:"id"`
-	Kind    string    `json:"kind"` // git.push
-	Argv    []string  `json:"argv"`
-	Cwd     string    `json:"cwd"`
-	Created time.Time `json:"created"`
-	Status  string    `json:"status"`
-	Output  string    `json:"output,omitempty"`
+	ID   string   `json:"id"`
+	Kind string   `json:"kind"`
+	Argv []string `json:"argv"`
+	Cwd  string   `json:"cwd"`
+	// Files the command names, relative to the workspace, with their
+	// SHA-256 when it was queued: it runs only on that content.
+	Files   map[string]string `json:"files,omitempty"`
+	Created time.Time         `json:"created"`
+	Status  string            `json:"status"`
+	Output  string            `json:"output,omitempty"`
 }
 
 const schema = `
@@ -42,7 +59,8 @@ CREATE TABLE IF NOT EXISTS intents (
 	kind    TEXT NOT NULL,
 	argv    TEXT NOT NULL,
 	cwd     TEXT NOT NULL,
-	created TEXT NOT NULL
+	created TEXT NOT NULL,
+	files   TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS intent_status (
 	seq    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,7 +95,21 @@ func Open(path string) (*Box, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := addFiles(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Box{db: db}, nil
+}
+
+// addFiles brings a database from before deferred commands up to date.
+func addFiles(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('intents') WHERE name = 'files'`).Scan(&n); err != nil || n > 0 {
+		return err
+	}
+	_, err := db.Exec(`ALTER TABLE intents ADD COLUMN files TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 func (b *Box) Close() error { return b.db.Close() }
@@ -86,7 +118,7 @@ func (b *Box) Close() error { return b.db.Close() }
 // current status.
 func (b *Box) List() ([]Intent, error) {
 	rows, err := b.db.Query(`
-		SELECT i.id, i.kind, i.argv, i.cwd, i.created, s.status, s.output
+		SELECT i.id, i.kind, i.argv, i.cwd, i.created, i.files, s.status, s.output
 		FROM intents i
 		JOIN intent_status s ON s.seq = (SELECT max(seq) FROM intent_status WHERE intent = i.id)
 		ORDER BY i.rowid`)
@@ -97,11 +129,14 @@ func (b *Box) List() ([]Intent, error) {
 	var out []Intent
 	for rows.Next() {
 		var in Intent
-		var argv, created string
-		if err := rows.Scan(&in.ID, &in.Kind, &argv, &in.Cwd, &created, &in.Status, &in.Output); err != nil {
+		var argv, created, files string
+		if err := rows.Scan(&in.ID, &in.Kind, &argv, &in.Cwd, &created, &files, &in.Status, &in.Output); err != nil {
 			return out, err
 		}
 		_ = json.Unmarshal([]byte(argv), &in.Argv)
+		if files != "" {
+			_ = json.Unmarshal([]byte(files), &in.Files)
+		}
 		in.Created, _ = time.Parse(time.RFC3339Nano, created)
 		out = append(out, in)
 	}
@@ -123,9 +158,14 @@ func (b *Box) Push(in Intent) (Intent, error) {
 	in.Created = time.Now()
 	in.Status, in.Output = Pending, ""
 	argv, _ := json.Marshal(in.Argv)
+	files := ""
+	if len(in.Files) > 0 {
+		b, _ := json.Marshal(in.Files)
+		files = string(b)
+	}
 	now := in.Created.UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`INSERT INTO intents (id, kind, argv, cwd, created) VALUES (?, ?, ?, ?, ?)`,
-		in.ID, in.Kind, string(argv), in.Cwd, now); err != nil {
+	if _, err := tx.Exec(`INSERT INTO intents (id, kind, argv, cwd, created, files) VALUES (?, ?, ?, ?, ?, ?)`,
+		in.ID, in.Kind, string(argv), in.Cwd, now, files); err != nil {
 		return in, err
 	}
 	if _, err := tx.Exec(`INSERT INTO intent_status (intent, t, status) VALUES (?, ?, ?)`, in.ID, now, Pending); err != nil {
@@ -148,3 +188,20 @@ func (b *Box) Update(in Intent) error {
 	}
 	return nil
 }
+
+// Line shows argv as a shell would need it typed: words with spaces or
+// shell characters in single quotes, so `--title 'Fix retry'` does not
+// read as three words.
+func Line(argv []string) string {
+	out := make([]string, len(argv))
+	for i, a := range argv {
+		if a != "" && plainWord.MatchString(a) {
+			out[i] = a
+		} else {
+			out[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+var plainWord = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)

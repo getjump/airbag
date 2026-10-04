@@ -1,10 +1,14 @@
 package review
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
 )
 
@@ -145,6 +149,51 @@ func TestPersistTable(t *testing.T) {
 	} {
 		if got := persistReason(rel, persistWSTable) != ""; got != want {
 			t.Errorf("ws %s: persist %v, want %v", rel, got, want)
+		}
+	}
+}
+
+func TestReport(t *testing.T) {
+	s := fakeSession(t)
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effs := []effects.Effect{
+		{Kind: "net.egress", Target: "api.anthropic.com:443", Verdict: "allow"},
+		{Kind: "net.egress", Target: "paste.example.net:443", Verdict: "deny", Reason: "host not in allowlist"},
+		{Kind: "secret.read", Target: ".env", Verdict: "taint", Reason: "/usr/bin/cat"},
+		{Kind: "tool.call", Target: "Bash: rm -rf /", Verdict: "deny", Reason: "no-rm"},
+	}
+	intents := []outbox.Intent{{ID: "i-1", Argv: []string{"git", "push", "origin", "main"}, Status: outbox.Pending}}
+	r := BuildReport(s, cs, effs, intents, nil)
+	if r.Schema != Schema || r.Network.Allowed["api.anthropic.com"] != 1 || r.Network.Denied["paste.example.net:443"] != 1 {
+		t.Fatalf("report %+v", r)
+	}
+	var whats []string
+	for _, a := range r.Attention {
+		whats = append(whats, a.What+":"+a.Target)
+	}
+	got := strings.Join(whats, " ")
+	for _, want := range []string{"secret:.env", "change:.git/hooks/pre-commit", "change:~/.bashrc", "intent:i-1", "blocked:Bash: rm -rf /"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("attention lacks %s: %s", want, got)
+		}
+	}
+	if !strings.HasPrefix(got, "secret:") || !strings.HasSuffix(got, "blocked:Bash: rm -rf /") {
+		t.Errorf("attention order: %s", got)
+	}
+	var b strings.Builder
+	if err := WriteJSON(&b, r); err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal([]byte(b.String()), &back); err != nil || back["schema"] != Schema {
+		t.Fatalf("JSON round trip: %v", err)
+	}
+	for _, k := range []string{"changes", "attention", "network", "secrets_read", "untrusted_from", "packages", "blocked", "outbox", "steps"} {
+		if _, ok := back[k]; !ok {
+			t.Errorf("JSON lacks %s", k)
 		}
 	}
 }

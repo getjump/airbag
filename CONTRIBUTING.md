@@ -1,8 +1,8 @@
 # Contributing to airbag
 
-airbag is early: the core works and is tested, but most of the interesting
-design is still open. This page says how to build and test it, and where help
-changes the most.
+airbag is early: the core works and is tested on Linux, and the open question
+is whether it is worth using on real work ([docs/evaluation.md](docs/evaluation.md)).
+This page says how to build and test it, and where help changes the most.
 
 ## Build and test
 
@@ -29,6 +29,9 @@ user can write, to place a host socket there: `sudo mkdir -m 1777
 /var/lib/airbag-e2e` (or set `AIRBAG_E2E_HOSTDIR`); without it the check is
 skipped.
 
+On macOS, `go build ./cmd/airbag` builds the prototype and `go test ./...` runs
+the unit tests; the end-to-end tests are Linux-only.
+
 `test/claude-e2e.sh` and `test/codex-e2e.sh` drive the real Claude Code and
 Codex binaries (they skip when the binary is missing). The model is
 `test/mockapi`, a scripted stand-in for the Anthropic Messages and OpenAI
@@ -37,48 +40,40 @@ the GIFs the same way.
 
 ## Where to help
 
-Each area below is a real gap. Open an issue before a large change, so we can
-agree on the shape first.
+Open an issue before a large change, so we can agree on the shape first.
+[docs/roadmap.md](docs/roadmap.md) lists what is deferred on purpose and what
+would bring it back; please read it before starting on one of those.
 
-**A language for effects.** Commands are modeled in Go in `internal/models`:
-`rm -rf x` deletes `x`, `curl -d @f url` sends `f` to `url`. The goal is to
-describe effects as data, close to function signatures in a functional
-language, and let users add models without rebuilding airbag. Starlark is the
-leading candidate. A first step: port three existing models and keep their
-tests passing.
+**Run it on a Mac.** The macOS prototype ([docs/macos.md](docs/macos.md)) puts
+one Seatbelt profile around the agent, uses an APFS clone as the branch and the
+proxy on a localhost port. It is built and unit-tested on Linux and has not run
+on a Mac yet. Run it with Claude Code or Codex and report what the page asks
+for. The probe in `cmd/airbag-macprobe` (the macos-probe PR) decides whether the
+workspace branch moves to NFS on localhost, as AgentFS does.
 
-**macOS.** There are no Linux namespaces there. [docs/macos.md](docs/macos.md)
-compares how Claude Code, Codex, Gemini CLI, Cursor, nono and AgentFS sandbox
-agents on macOS, and lays out a native design without a VM: one Seatbelt
-profile around the agent, the proxy on a localhost port, and the workspace
-branch served over NFS on localhost, as AgentFS does. It starts with a list of
-things to check on a real Mac.
-
-**Syscall-level control.** The shell shim sees `bash -c` scripts, not what a
-Python program does inside. A seccomp user-notification supervisor
-(`openat`, `connect`, `execve`) would give the same control over any language
-and binary without root. Use `SECCOMP_IOCTL_NOTIF_ADDFD` for allowed opens
-rather than letting the call continue, to avoid time-of-check races.
-
-**Labels and data flow.** `internal/taint` labels the whole session (`secret`,
-`untrusted`) and CEL rules read `session.labels`. Next: follow labels through
-files and processes (a file written from a secret is itself secret), add
-sources of `untrusted` input, and an end-to-end test that no secret value ever
-reaches a model request.
-
-**Model API traffic.** The proxy cannot see inside TLS to model APIs, so it
-cannot tell the agent's key from another one. Terminating TLS for those hosts
-inside the sandbox would allow that check, and secret handles: the agent sees
-a placeholder, airbag substitutes the value at an allowed boundary.
-
-**bubblewrap underneath.** airbag sets up namespaces itself in Go.
-[docs/bwrap-backend.md](docs/bwrap-backend.md) has the evaluation: not with
-bubblewrap 0.9 (no overlay), worth measuring as a hybrid once 0.10+ is common.
-Meanwhile its `--disable-userns` idea can move into airbag now.
+**Use it on real work.** [docs/evaluation.md](docs/evaluation.md) is the plan
+for telling whether airbag is worth using against a worktree with the agent's
+own sandbox, nono and Code Airlock. Runs, and issues about review noise, false
+flags and tools that break in the sandbox, are the most useful input now.
 
 **More agents.** Claude Code and Codex get hooks, so the review shows which
 tool call changed what. Gemini CLI, Aider, OpenCode and others run in the
 sandbox but without that attribution.
+
+**More lock files.** After a secret read the mirror serves only its cache and
+what the workspace's lock files pin. `internal/mirror/pins.go` reads
+`package-lock.json`, `yarn.lock`, `go.sum` and `uv.lock`; `pnpm-lock.yaml`,
+`poetry.lock` and hashed requirements files are missing.
+
+**bubblewrap underneath.** airbag sets up namespaces itself in Go.
+[docs/bwrap-backend.md](docs/bwrap-backend.md) has the evaluation: not with
+bubblewrap 0.9 (no overlay), worth measuring as a hybrid once 0.11+ is common.
+Its `--disable-userns` idea is in airbag as `--strict`.
+
+Deferred on purpose, each with its reason in the roadmap: syscall-level control
+(seccomp user notification, eBPF), data flow labels per value, placeholders in
+`.env` files, TLS termination for model APIs, more command models in
+`internal/models`.
 
 Smaller, self-contained tasks are labeled
 [good first issue](https://github.com/getjump/airbag/labels/good%20first%20issue).

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -27,15 +28,25 @@ import (
 	"github.com/getjump/airbag/internal/term"
 )
 
+// version is set at release: -ldflags "-X main.version=v0.1.0".
+var version = "dev"
+
 const usage = `airbag — approve outcomes, not commands
 
-  airbag run [--allow HOST]... [--no-home] -- AGENT [ARGS...]
-      run the agent in a branch of the workspace and $HOME
-  airbag review [ID]          what the agent changed, sent and queued
+  airbag run [--allow HOST]... [--no-home] [--session ID|last] -- AGENT [ARGS...]
+      run the agent in a branch of the workspace and $HOME (--session: on the
+      branch of a stopped session, with its outbox and labels)
+  airbag review [ID] [--json | --attention]
+                              what the agent changed, sent and queued; --json for
+                              tools, --attention for only what needs a decision
   airbag diff [ID] [PATH...]  unified diff of changed files
-  airbag apply [ID] [-i] [--only PATH]... [--yes] [--force]
+  airbag apply [ID] [-i] [--only PATH]... [--yes] [--force] [--trust-git]
                               write the branch (or part of it) to the real files,
                               then run the outbox
+  airbag apply [ID] --branch NAME
+                              put the result on a new git branch instead;
+                              the working tree is not touched
+  airbag rollback [ID]        undo the last apply; its changes go back to the session
   airbag discard [ID] [--yes] throw the branch away
   airbag ls                   list sessions
   airbag log [ID]             raw effect log
@@ -52,6 +63,10 @@ func main() {
 		return
 	case "bash", "sh":
 		shim.Shell(name, os.Args[1:])
+		return
+	}
+	if shim.IsDeferred(filepath.Base(os.Args[0])) {
+		shim.Deferred(filepath.Base(os.Args[0]), os.Args[1:])
 		return
 	}
 	if len(os.Args) >= 4 && os.Args[1] == "hook" {
@@ -72,13 +87,15 @@ func main() {
 	case "run":
 		code, err = cmdRun(args)
 	case "review", "status":
-		err = withSession(args, cmdReview)
+		err = cmdReviewArgs(args)
 	case "diff":
 		err = cmdDiff(args)
 	case "apply":
 		err = cmdApply(args)
 	case "discard":
 		err = cmdDiscard(args)
+	case "rollback":
+		err = cmdRollback(args)
 	case "ls", "list":
 		err = cmdList()
 	case "log":
@@ -87,6 +104,8 @@ func main() {
 		err = cmdDoctor()
 	case "approve":
 		err = cmdApprove(args)
+	case "version", "--version":
+		fmt.Println("airbag", version)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -118,6 +137,7 @@ func cmdRun(args []string) (int, error) {
 	var passEnv stringList
 	fs.Var(&passEnv, "pass-env", "give the agent this credential-like environment variable (repeatable)")
 	strict := fs.Bool("strict", false, "keep the agent from creating user namespaces; breaks the agents' own sandboxes and Chromium's sandbox")
+	resume := fs.String("session", "", "run on the branch of a stopped session (its ID, or last) instead of a new one")
 	nixDaemon := fs.Bool("nix-daemon", false, "let the agent use the Nix daemon; its builds and substitutes reach the network outside airbag's proxy")
 	_ = fs.Parse(args)
 	argv := fs.Args()
@@ -141,6 +161,13 @@ func cmdRun(args []string) (int, error) {
 		return 1, fmt.Errorf("policy: %w", err)
 	}
 	allow = append(allow, pol.Allow...)
+	for _, c := range pol.Credentials {
+		allow = append(allow, c.Hosts...) // a credential's hosts are reachable
+	}
+	allow, forwards, err := session.ParseForwards(allow)
+	if err != nil {
+		return 1, err
+	}
 	hidden := append(append([]string{}, sandbox.DefaultHidden...), pol.Hide...)
 	var hiddenHost []string
 	for _, p := range sandbox.HostSockets {
@@ -155,18 +182,58 @@ func cmdRun(args []string) (int, error) {
 			i--
 		}
 	}
+	if runtime.GOOS == "linux" {
+		// In a Linux VM on a Mac the Mac's homes are mounted too.
+		hiddenHost = append(hiddenHost, sandbox.MacHomesHidden(sandbox.MacHomeRoots)...)
+	}
 	if *nixDaemon {
 		fmt.Fprintln(os.Stderr, "airbag: warning: --nix-daemon: Nix builds and substitutes run outside the sandbox and reach the network without the proxy")
 	}
-	s, err := session.Create(session.Meta{
-		Workspace: ws, Home: home, OverHome: !*noHome,
-		UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
-		Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
-		Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
-		PassEnv: passEnv, Strict: *strict,
-	})
-	if err != nil {
-		return 1, err
+	var s *session.Session
+	if *resume != "" {
+		// Same branch, same outbox and labels; this run's command, plus
+		// whatever this run's flags add.
+		if s, err = session.Resume(*resume, ws); err != nil {
+			return 1, err
+		}
+		s.Argv, s.Cwd = argv, cwd
+		for _, h := range allow {
+			if !slices.Contains(s.Allow, h) {
+				s.Allow = append(s.Allow, h)
+			}
+		}
+		for _, k := range passEnv {
+			if !slices.Contains(s.PassEnv, k) {
+				s.PassEnv = append(s.PassEnv, k)
+			}
+		}
+		s.Strict = s.Strict || *strict
+		for _, f := range forwards {
+			if !slices.Contains(s.Forwards, f) {
+				s.Forwards = append(s.Forwards, f)
+			}
+		}
+		if err := s.Save(); err != nil {
+			return 1, err
+		}
+		fmt.Fprintf(os.Stderr, "airbag: resuming session %s (run %d) on its branch\n", s.ID, s.Runs)
+	} else {
+		meta := session.Meta{
+			Workspace: ws, Home: home, OverHome: !*noHome,
+			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
+			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
+			Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
+			PassEnv: passEnv, Strict: *strict, Forwards: forwards,
+		}
+		if runtime.GOOS == "darwin" {
+			// The macOS prototype: the workspace branch is a clone, $HOME
+			// has none (docs/macos.md).
+			meta.OverHome, meta.Clone = false, true
+		}
+		s, err = session.Create(meta)
+		if err != nil {
+			return 1, err
+		}
 	}
 	if filepath.Base(argv[0]) == "codex" && !slices.Contains(argv, "--dangerously-bypass-approvals-and-sandbox") && !slices.Contains(argv, "--yolo") {
 		if *strict {
@@ -189,6 +256,14 @@ func cmdRun(args []string) (int, error) {
 	}
 	if len(pol.Sources) > 1 {
 		fmt.Fprintf(os.Stderr, "airbag: policy: %s\n", strings.Join(pol.Sources, " + "))
+	}
+	// The current policy decides which programs get a shim, for a
+	// resumed session too.
+	if d := pol.DeferPrograms(); !slices.Equal(d, s.Deferred) {
+		s.Deferred = d
+		if err := s.Save(); err != nil {
+			return 1, err
+		}
 	}
 	code, err := sandbox.Run(s, proxy.Allowlist(s.Allow), pol)
 	if err != nil {
@@ -248,18 +323,35 @@ func withSession(args []string, f func(*session.Session) error) error {
 	return f(s)
 }
 
-func cmdReview(s *session.Session) error {
-	cs, err := review.Scan(s)
-	if err != nil {
-		return err
-	}
-	effs, _ := effects.Read(s.EffectsPath())
-	intents := listIntents(s)
-	sts, _ := steps.Read(s)
-	out := term.Safe(os.Stdout)
-	defer out.Flush()
-	review.Render(out, s, cs, effs, intents, sts)
-	return nil
+// cmdReviewArgs: review [ID] [--json | --attention].
+func cmdReviewArgs(args []string) error {
+	fs := flag.NewFlagSet("review", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "print the review as JSON (schema "+review.Schema+")")
+	attention := fs.Bool("attention", false, "print only what needs a decision")
+	_ = fs.Parse(reorder(args))
+	return withSession(fs.Args(), func(s *session.Session) error {
+		cs, err := review.Scan(s)
+		if err != nil {
+			return err
+		}
+		effs, _ := effects.Read(s.EffectsPath())
+		intents := listIntents(s)
+		sts, _ := steps.Read(s)
+		switch {
+		case *asJSON:
+			// JSON escapes control characters itself.
+			return review.WriteJSON(os.Stdout, review.BuildReport(s, cs, effs, intents, sts))
+		case *attention:
+			out := term.Safe(os.Stdout)
+			defer out.Flush()
+			review.WriteAttention(out, review.BuildReport(s, cs, effs, intents, sts))
+		default:
+			out := term.Safe(os.Stdout)
+			defer out.Flush()
+			review.Render(out, s, cs, effs, intents, sts)
+		}
+		return nil
+	})
 }
 
 func cmdLog(s *session.Session) error {
@@ -317,6 +409,8 @@ func cmdApply(args []string) error {
 	yes := fs.Bool("yes", false, "do not ask for confirmation")
 	force := fs.Bool("force", false, "overwrite files changed on the host during the session")
 	inter := fs.Bool("i", false, "go through the changes one by one")
+	branch := fs.String("branch", "", "put the workspace result on this new git branch; the working tree is not touched")
+	trustGit := fs.Bool("trust-git", false, "run the session's pushes although it changed .git/config or git hooks (hooks stay off)")
 	var only stringList
 	fs.Var(&only, "only", "apply only changes under this path (repeatable)")
 	_ = fs.Parse(reorder(args))
@@ -339,7 +433,49 @@ func cmdApply(args []string) error {
 	out := term.Safe(os.Stdout)
 	defer out.Flush()
 	return apply.Apply(s, cs, box, apply.Options{
-		Yes: *yes, Force: *force, Interactive: *inter, Only: only, In: os.Stdin, Out: out})
+		Yes: *yes, Force: *force, Interactive: *inter, Only: only, Branch: *branch, TrustGit: *trustGit, In: os.Stdin, Out: out})
+}
+
+// cmdRollback undoes the last apply: of session ID, or of the newest
+// session of this workspace that was applied, fully or in part.
+func cmdRollback(args []string) error {
+	var s *session.Session
+	var err error
+	if len(args) > 0 {
+		s, err = session.Load(filepath.Join(session.Root(), args[0]))
+	} else {
+		s, err = lastApplied()
+	}
+	if err != nil {
+		return err
+	}
+	var done []string
+	for _, it := range listIntents(s) {
+		if it.Status == outbox.Done || it.Status == outbox.Unknown {
+			done = append(done, fmt.Sprintf("intent %s `%s` (%s)", it.ID, strings.Join(it.Argv, " "), it.Status))
+		}
+	}
+	out := term.Safe(os.Stdout)
+	defer out.Flush()
+	return apply.Rollback(s, done, out)
+}
+
+func lastApplied() (*session.Session, error) {
+	cwd, _ := os.Getwd()
+	ws := workspace(cwd)
+	all, err := session.List()
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range all {
+		if s.Workspace != ws || s.Status == session.StatusDiscarded {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(s.Dir, "undo")); err == nil {
+			return s, nil
+		}
+	}
+	return nil, fmt.Errorf("no applied session for %s", ws)
 }
 
 // listIntents reads a session's outbox; a session without one has none.
@@ -445,7 +581,7 @@ func reorder(args []string) []string {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
-		case (a == "--only" || a == "-only") && i+1 < len(args):
+		case (a == "--only" || a == "-only" || a == "--branch" || a == "-branch") && i+1 < len(args):
 			flags = append(flags, a, args[i+1])
 			i++
 		case strings.HasPrefix(a, "-"):

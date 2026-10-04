@@ -1,6 +1,9 @@
+//go:build linux
+
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -8,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,7 +21,6 @@ import (
 
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/control"
-	"github.com/getjump/airbag/internal/mirror"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/shim"
@@ -27,9 +30,10 @@ import (
 const (
 	ProxyAddr        = "127.0.0.1:3128"
 	proxySockInside  = "/run/airbag/proxy.sock"
-	airbagBinInside  = shim.BinDir + "/airbag"
 	runtimeDirFormat = "/run/user/%d"
 )
+
+var airbagBinInside = shim.BinDir + "/airbag"
 
 // Init runs as PID 1 in the new namespaces, as root of the new user
 // namespace (mapped to the real user). With tty, its stdio is the
@@ -49,6 +53,9 @@ func Init(dir string, tty bool) {
 	}
 	if err := startBridge(); err != nil {
 		fatal("proxy bridge", err)
+	}
+	if err := startForwards(s); err != nil {
+		fatal("tcp forward", err)
 	}
 	var ctl *os.File
 	if tty {
@@ -141,8 +148,19 @@ func buildWorld(s *session.Session) error {
 		return err
 	}
 	if len(secrets) > 0 {
-		if err := serveSecrets(s, secrets); err != nil {
-			fmt.Fprintf(os.Stderr, "airbag: warning: reads of .env are not tracked: %v\n", err)
+		// Without FUSE the session cannot see reads of the secret files,
+		// so they are hidden rather than left readable untracked.
+		err := errors.New("AIRBAG_NO_FUSE is set")
+		if os.Getenv("AIRBAG_NO_FUSE") == "" {
+			err = serveSecrets(s, secrets)
+		}
+		if err != nil {
+			for _, f := range secrets {
+				if herr := hide(filepath.Join(s.Workspace, f.Rel)); herr != nil {
+					return fmt.Errorf("secret %s is neither tracked (%v) nor hidden: %w", f.Rel, err, herr)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "airbag: warning: %d secret files are hidden from the agent: reads cannot be tracked (%v)\n", len(secrets), err)
 		}
 	}
 	for _, d := range []string{"/tmp", "/var/tmp", "/dev/shm"} {
@@ -254,11 +272,20 @@ func privateRun(s *session.Session) error {
 	if err := os.MkdirAll(shim.BinDir, 0o755); err != nil {
 		return err
 	}
-	for src, dst := range map[string]string{
+	socks := map[string]string{
 		s.ProxySock():    proxySockInside,
 		s.ControlSock():  control.SocketInSandbox,
 		"/proc/self/exe": airbagBinInside,
-	} {
+	}
+	for i := range s.Forwards {
+		socks[s.ForwardSock(i)] = forwardSockInside(i)
+	}
+	for src, dst := range map[string]string{s.CACert(): caCertInside, s.CABundle(): caBundleInside} {
+		if _, err := os.Stat(src); err == nil {
+			socks[src] = dst
+		}
+	}
+	for src, dst := range socks {
 		if err := os.WriteFile(dst, nil, 0o600); err != nil {
 			return err
 		}
@@ -266,7 +293,7 @@ func privateRun(s *session.Session) error {
 			return err
 		}
 	}
-	for _, name := range []string{"git", "bash", "sh"} {
+	for _, name := range shimNames(s) {
 		if err := os.Symlink(airbagBinInside, filepath.Join(shim.BinDir, name)); err != nil {
 			return err
 		}
@@ -374,6 +401,50 @@ func startBridge() error {
 	return nil
 }
 
+// Where the agent finds the session CA (sandbox/creds.go).
+const (
+	caCertInside   = "/run/airbag/ca.pem"
+	caBundleInside = "/run/airbag/ca-bundle.pem"
+)
+
+func forwardSockInside(i int) string { return fmt.Sprintf("/run/airbag/fwd-%d.sock", i) }
+
+// startForwards listens on 127.0.0.1:PORT in the sandbox for each
+// tcp:// forward and relays to airbag outside, which connects on.
+func startForwards(s *session.Session) error {
+	for i, f := range s.Forwards {
+		if strconv.Itoa(f.Port) == strings.TrimPrefix(ProxyAddr, "127.0.0.1:") {
+			return fmt.Errorf("%s: port %d is airbag's proxy inside the sandbox", f, f.Port)
+		}
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", f.Port))
+		if err != nil {
+			return fmt.Errorf("%s: %w", f, err)
+		}
+		sock := forwardSockInside(i)
+		go func() {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				go func() {
+					defer c.Close()
+					up, err := net.Dial("unix", sock)
+					if err != nil {
+						return
+					}
+					defer up.Close()
+					done := make(chan struct{}, 2)
+					go func() { _, _ = io.Copy(up, c); done <- struct{}{} }()
+					go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
+					<-done
+				}()
+			}
+		}()
+	}
+	return nil
+}
+
 // runAgent starts the agent in a nested user namespace with the real
 // uid, so tools that refuse to run as root (Claude Code's bypass mode)
 // work, and the mounts above are locked against the agent.
@@ -475,116 +546,9 @@ func runAgent(s *session.Session, ctl *os.File) int {
 }
 
 func agentEnv(s *session.Session) []string {
-	drop := map[string]bool{
-		"SSH_AUTH_SOCK": true, "SSH_AGENT_PID": true, "GPG_AGENT_INFO": true,
-		"DBUS_SESSION_BUS_ADDRESS": true, "DISPLAY": true, "WAYLAND_DISPLAY": true,
-		"XAUTHORITY": true, "DOCKER_HOST": true, "KRB5CCNAME": true,
-		"ALL_PROXY": true, "all_proxy": true,
+	bundle := ""
+	if _, err := os.Stat(caBundleInside); err == nil {
+		bundle = caBundleInside
 	}
-	set := map[string]string{
-		"HTTPS_PROXY": "http://" + ProxyAddr, "https_proxy": "http://" + ProxyAddr,
-		"HTTP_PROXY": "http://" + ProxyAddr, "http_proxy": "http://" + ProxyAddr,
-		"NO_PROXY": "localhost,127.0.0.1,::1", "no_proxy": "localhost,127.0.0.1,::1",
-		"XDG_RUNTIME_DIR":  fmt.Sprintf(runtimeDirFormat, s.UID),
-		"AIRBAG_SESSION":   s.ID,
-		"AIRBAG_WORKSPACE": s.Workspace,
-		// Claude Code runs its Bash tool through this shell.
-		"CLAUDE_CODE_SHELL": shim.BinDir + "/bash",
-	}
-	var env []string
-	for _, kv := range os.Environ() {
-		k, v, _ := strings.Cut(kv, "=")
-		if drop[k] || (Credential(k, v) && !contains(s.PassEnv, k)) {
-			continue
-		}
-		if _, ok := set[k]; ok {
-			continue
-		}
-		if k == "PATH" {
-			v = shim.BinDir + ":" + v
-		}
-		env = append(env, k+"="+proxyVar(k, v))
-	}
-	for k, v := range set {
-		env = append(env, k+"="+v)
-	}
-	// Package managers go through the mirror unless the user chose a
-	// registry of their own.
-	for k, v := range mirror.Env {
-		if os.Getenv(k) == "" {
-			env = append(env, k+"="+v)
-		}
-	}
-	return env
-}
-
-// agentAuth: credentials the agents themselves need to reach their API.
-var agentAuth = map[string]bool{
-	"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true, "CLAUDE_CODE_OAUTH_TOKEN": true,
-	"OPENAI_API_KEY": true, "CODEX_API_KEY": true,
-}
-
-// Credential reports whether an environment variable looks like a
-// secret the agent should not get (unless passed with --pass-env).
-func Credential(name, value string) bool {
-	if agentAuth[name] || len(value) < 8 || strings.Trim(value, "0123456789") == "" {
-		return false // agent keys, short values and numbers (MAX_*_TOKENS)
-	}
-	if strings.HasSuffix(name, "_FILE") || strings.HasPrefix(value, "/") {
-		return false // a path; the file itself is what matters
-	}
-	u := strings.ToUpper(name)
-	if strings.Contains(u, "PROXY") {
-		return false
-	}
-	for _, w := range []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "APIKEY", "PRIVATE_KEY", "CREDENTIAL", "ACCESS_KEY"} {
-		if strings.Contains(u, w) {
-			return true
-		}
-	}
-	return false
-}
-
-// proxyVar points tool-specific proxy settings (npm_config_proxy,
-// CLOUDSDK_PROXY_PORT, ...) at airbag's proxy: the host's proxy is not
-// reachable from the sandbox's network.
-func proxyVar(name, v string) string {
-	u := strings.ToUpper(name)
-	if !strings.Contains(u, "PROXY") || strings.Contains(u, "NO_PROXY") || strings.Contains(u, "NOPROXY") {
-		return v
-	}
-	switch {
-	case strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://"):
-		return "http://" + ProxyAddr
-	case strings.HasSuffix(u, "PROXY_PORT"):
-		_, port, _ := strings.Cut(ProxyAddr, ":")
-		return port
-	case strings.HasSuffix(u, "PROXY_ADDRESS") || strings.HasSuffix(u, "PROXY_HOST"):
-		host, _, _ := strings.Cut(ProxyAddr, ":")
-		return host
-	}
-	return v
-}
-
-func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
-}
-
-func lookPath(name string, env []string) (string, error) {
-	for _, kv := range env {
-		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
-			for _, dir := range filepath.SplitList(v) {
-				p := filepath.Join(dir, name)
-				if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
-					return p, nil
-				}
-			}
-		}
-	}
-	return "", os.ErrNotExist
+	return agentEnvFor(s, ProxyAddr, shim.BinDir, fmt.Sprintf(runtimeDirFormat, s.UID), credEnv(s, caCertInside, bundle))
 }

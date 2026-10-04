@@ -20,6 +20,7 @@ const (
 	NetFetch  = "net.fetch"  // read-only download
 	NetEgress = "net.egress" // anything that sends data out
 	GitPush   = "intent.git_push"
+	DeferCmd  = "intent.cmd" // a call a `defer:` entry holds in the outbox
 	Persist   = "persist"
 	Opaque    = "opaque"
 )
