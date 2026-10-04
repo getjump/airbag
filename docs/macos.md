@@ -60,20 +60,48 @@ Differences to accept:
 
 ### To check on a real Mac first
 
-- [ ] `mount_nfs` from a localhost server works without root on current macOS
-  (AgentFS's documentation does not mention sudo).
-- [ ] NFS speed on a large `node_modules` tree.
-- [ ] Claude Code and Codex run normally with the workspace at the mount path.
-- [ ] The violation log can be read without admin rights.
-- [ ] Go tools (`gh`, `terraform`) work through the proxy without opening
-  `trustd`.
+`cmd/airbag-macprobe` checks these on your Mac. It needs no root. It writes
+inside a temporary directory and removes it, plus one dot file in `~` that it
+removes at once, and mounts the NFS export under that directory for the run;
+if the export will not unmount, it says so, leaves the directory and exits 1
+(130 when interrupted). Its NFS server, on a localhost port, grants one mount,
+on a random path, to the probe's own `mount_nfs`, refuses every other mount
+request, and takes no new connection once that mount is up. The path is
+visible in the process list while `mount_nfs` runs: a local process that reads
+it and mounts first gets the export and, through the resolve-then-use race in
+go-billy's BoundOS, possibly files outside it, for the few moments until the
+probe's own mount fails and the server drops that process's connection. When
+the probe's mount does not come up, for that or any other reason, N1 fails and
+the server closes, with every connection it took. N3 runs `claude --version`
+and `codex --version` if they are installed, which may write their own files:
+
+```console
+$ go run ./cmd/airbag-macprobe            # one line per check
+$ go run ./cmd/airbag-macprobe -json      # the same, to paste into an issue
+```
+
+Or build it elsewhere: `GOOS=darwin GOARCH=arm64 go build ./cmd/airbag-macprobe`.
+`-no-net` skips what reaches the internet (S1's control on 1.1.1.1, and T1),
+`-files N` sizes the speed checks (5000 by default), `-v` prints command output
+under passing checks. The JSON report replaces the temporary directory, `~` and
+your user name; read it before pasting.
+
+| Check | What it answers |
+|---|---|
+| S1 | A deny-first Seatbelt profile around a shell: writes only in the workspace (refused in another directory and in `~`), a credentials directory unreadable, outbound traffic only to the proxy's localhost port (shown on a second local port that is reachable outside the profile, and on the internet when it is reachable from the Mac) |
+| S2 | The denials from S1 can be read from the unified log without admin rights, so review can list blocked operations: a log entry that is a `deny` and names S1's file (not one where the path is `<private>`) |
+| N1 | `mount_nfs` mounts an NFSv3 export served from a localhost port by a regular user; read, write, rename, mkdir and delete reach the export |
+| N2 | How much slower creating and walking a `node_modules`-sized tree is through the mount |
+| N3 | git works in a repository at the mount path (without your git config or `GIT_*` variables); the agents' versions there, if installed |
+| C1 | An APFS clone (`clonefile`, which fails where cloning is not supported, unlike `cp -c`, which falls back to a copy) of the same tree: if it is independent, a first prototype can branch the workspace by cloning it, with no NFS server, and review and apply by comparing the clone with the original. The speed is reported for `cp -c -R`, which the prototype runs and which clones file by file, and for one `clonefile` of the tree, each against `cp -R` |
+| T1 | A Go program inside the profile verifies TLS through the proxy without `com.apple.trustd.agent` (and with it, to compare); skipped when the same request outside the profile does not get through |
 
 ### Order
 
 1. Seatbelt profile and proxy, with an APFS clone as the workspace branch.
    This is the prototype below.
 2. NFS overlay branch of the workspace instead of the clone, if the probe
-   (`cmd/airbag-macprobe`, see the macos-probe PR) shows it works without root
+   (`cmd/airbag-macprobe`) shows it works without root
    and fast enough: the agent then works at a path of its own without a copy.
 3. Secret tracking through the same server.
 
