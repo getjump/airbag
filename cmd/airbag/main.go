@@ -248,6 +248,9 @@ func cmdApply(args []string) error {
 	force := fs.Bool("force", false, "overwrite files changed on the host during the session")
 	_ = fs.Parse(reorder(args))
 	s, err := findSession(fs.Arg(0))
+	if err != nil && fs.Arg(0) == "" {
+		s, err = withPendingIntents()
+	}
 	if err != nil {
 		return err
 	}
@@ -282,6 +285,29 @@ func cmdDiscard(args []string) error {
 	}
 	fmt.Printf("Discarded %s. Nothing happened.\n", s.ID)
 	return nil
+}
+
+// withPendingIntents finds an applied session of this workspace whose
+// outbox still has intents waiting for confirmation.
+func withPendingIntents() (*session.Session, error) {
+	cwd, _ := os.Getwd()
+	ws := workspace(cwd)
+	all, err := session.List()
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range all {
+		if s.Workspace != ws || s.Status != session.StatusApplied {
+			continue
+		}
+		intents, _ := outbox.Open(s.OutboxPath()).List()
+		for _, in := range intents {
+			if in.Status == outbox.Pending {
+				return s, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no open session for %s", ws)
 }
 
 // reorder lets flags follow the positional ID: `airbag apply s-1 --yes`.

@@ -88,7 +88,7 @@ func changedInside(dir string, t time.Time) string {
 
 func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) error {
 	if s.Status == session.StatusApplied {
-		return fmt.Errorf("session %s is already applied", s.ID)
+		return runIntents(s, box, false, bufio.NewReader(o.In), o)
 	}
 	if s.Status == session.StatusRunning {
 		return fmt.Errorf("session %s is still running", s.ID)
@@ -119,6 +119,25 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		fmt.Fprintf(o.Out, "Applied %d changes.\n", len(cs))
 	}
 
+	s.Status = session.StatusApplied
+	if err := s.Save(); err != nil {
+		return err
+	}
+	return runIntents(s, box, gitTouched(cs), in, o)
+}
+
+// gitTouched reports whether the branch changed git config or hooks:
+// those can redirect a push or run code on the host during it.
+func gitTouched(cs []review.Change) bool {
+	for _, c := range cs {
+		if c.Layer == "ws" && (c.Rel == ".git/config" || strings.HasPrefix(c.Rel, ".git/hooks/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reader, o Options) error {
 	intents, err := box.List()
 	if err != nil {
 		return err
@@ -127,12 +146,29 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		if it.Status != outbox.Pending {
 			continue
 		}
-		if !confirm(in, o, fmt.Sprintf("Run intent %s: `%s` in %s?", it.ID, strings.Join(it.Argv, " "), it.Cwd)) {
+		args, err := outbox.GitPush(it.Argv)
+		if err != nil || !within(it.Cwd, s.Workspace) {
+			it.Status, it.Output = outbox.Rejected, fmt.Sprintf("invalid intent: %v (cwd %s)", err, it.Cwd)
+			fmt.Fprintf(o.Out, "intent %s rejected: %s\n", it.ID, it.Output)
+			_ = box.Update(it)
+			continue
+		}
+		if risky {
+			// The agent's hooks never run on the host.
+			args = append([]string{"-c", "core.hooksPath=/dev/null"}, args...)
+		}
+		where := pushTarget(it.Cwd, args)
+		if risky && o.Yes {
+			fmt.Fprintf(o.Out, "intent %s left pending: the session changed .git/config or git hooks; "+
+				"check the push target (%s) and run `airbag apply %s` without --yes\n", it.ID, where, s.ID)
+			continue
+		}
+		if !confirm(in, o, fmt.Sprintf("Run intent %s: `git %s` → %s?", it.ID, strings.Join(args, " "), where)) {
 			it.Status = outbox.Rejected
 			_ = box.Update(it)
 			continue
 		}
-		cmd := exec.Command(it.Argv[0], it.Argv[1:]...)
+		cmd := exec.Command("git", args...)
 		cmd.Dir = it.Cwd
 		outb, err := cmd.CombinedOutput()
 		_, _ = o.Out.Write(outb)
@@ -144,8 +180,29 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 		_ = box.Update(it)
 	}
-	s.Status = session.StatusApplied
-	return s.Save()
+	return nil
+}
+
+// pushTarget resolves where a push really goes, after the branch's
+// .git/config has been applied.
+func pushTarget(cwd string, args []string) string {
+	remote := "origin"
+	for _, a := range args[1:] {
+		if !strings.HasPrefix(a, "-") && a != "core.hooksPath=/dev/null" && a != "push" {
+			remote = a
+			break
+		}
+	}
+	out, err := exec.Command("git", "-C", cwd, "remote", "get-url", "--push", remote).Output()
+	if err != nil {
+		return remote
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func within(p, dir string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
 func confirm(in *bufio.Reader, o Options, q string) bool {

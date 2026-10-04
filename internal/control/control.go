@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/getjump/airbag/internal/effects"
@@ -36,6 +38,15 @@ func (s *Server) intent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if in.Kind != "git.push" {
+		http.Error(w, "unsupported intent kind "+in.Kind, http.StatusBadRequest)
+		return
+	}
+	if _, err := outbox.GitPush(in.Argv); err != nil {
+		s.Log.Add(effects.Effect{Kind: "intent." + in.Kind, Target: fmt.Sprint(in.Argv), Verdict: "deny", Reason: err.Error()})
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	in, err := s.Box.Push(in)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -60,7 +71,8 @@ func Submit(in outbox.Intent) (outbox.Intent, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return in, fmt.Errorf("control: %s", resp.Status)
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return in, fmt.Errorf("%s", strings.TrimSpace(string(msg)))
 	}
 	return in, json.NewDecoder(resp.Body).Decode(&in)
 }
