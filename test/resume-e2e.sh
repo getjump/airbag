@@ -21,6 +21,7 @@ fuse=no
 "$AIRBAG" run --allow example.com -- sh -c 'echo run1 >> notes.txt; cat .env >/dev/null; git commit -qam run1; git push origin main 2>/dev/null; true' >/dev/null 2>&1
 id=$("$AIRBAG" ls | awk 'NR==1{print $1}')
 
+# shellcheck disable=SC2016 # the script runs in the sandbox
 out=$("$AIRBAG" run --session last -- sh -c 'echo "saw: $(tail -1 notes.txt)"; echo run2 >> notes.txt
 	curl -s -o /dev/null -w "curl=%{http_connect}\n" --max-time 10 https://example.com/ || true' 2>&1)
 echo "$out" | grep -q "resuming session $id (run 2)" || fail "not resumed: $out"
