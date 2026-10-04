@@ -143,7 +143,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 		},
 	})
 	_ = tconn.SetDeadline(time.Now().Add(15 * time.Second))
-	if err := tconn.Handshake(); err != nil {
+	if err := tconn.HandshakeContext(context.Background()); err != nil {
 		conn.Close()
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "TLS to airbag's proxy failed (does the tool trust airbag's CA?): " + err.Error()})
 		return

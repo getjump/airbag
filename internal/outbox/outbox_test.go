@@ -54,7 +54,7 @@ func TestBox(t *testing.T) {
 	db, _ := sql.Open("sqlite", path)
 	defer func() { _ = db.Close() }()
 	var hist int
-	_ = db.QueryRow(`SELECT count(*) FROM intent_status WHERE intent = 'i-1'`).Scan(&hist)
+	_ = db.QueryRowContext(t.Context(), `SELECT count(*) FROM intent_status WHERE intent = 'i-1'`).Scan(&hist)
 	if hist != 2 {
 		t.Errorf("i-1 history has %d rows, want pending and done", hist)
 	}
@@ -64,7 +64,7 @@ func TestBox(t *testing.T) {
 		`UPDATE intent_status SET status = 'done'`,
 		`DELETE FROM intent_status`,
 	} {
-		if _, err := db.Exec(q); err == nil {
+		if _, err := db.ExecContext(t.Context(), q); err == nil {
 			t.Errorf("%s succeeded", q)
 		}
 	}
@@ -81,7 +81,7 @@ func TestFilesAndOldDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE intents (id TEXT PRIMARY KEY, kind TEXT NOT NULL, argv TEXT NOT NULL, cwd TEXT NOT NULL, created TEXT NOT NULL);
+	if _, err := db.ExecContext(t.Context(), `CREATE TABLE intents (id TEXT PRIMARY KEY, kind TEXT NOT NULL, argv TEXT NOT NULL, cwd TEXT NOT NULL, created TEXT NOT NULL);
 		CREATE TABLE intent_status (seq INTEGER PRIMARY KEY AUTOINCREMENT, intent TEXT NOT NULL, t TEXT NOT NULL, status TEXT NOT NULL, output TEXT NOT NULL DEFAULT '');
 		INSERT INTO intents VALUES ('i-1', 'git.push', '["git","push"]', '/w', '2026-10-04T00:00:00Z');
 		INSERT INTO intent_status (intent, t, status) VALUES ('i-1', '2026-10-04T00:00:00Z', 'pending');`); err != nil {

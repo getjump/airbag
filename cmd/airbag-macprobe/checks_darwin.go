@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -103,7 +104,7 @@ func checkSeatbelt(p *probe) Result {
 	// A second local listener on a port the profile does not allow. It is
 	// reachable from here, so a refusal inside the profile is Seatbelt's
 	// and not a network that happens to be down.
-	other, err := net.Listen("tcp", "127.0.0.1:0")
+	other, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		return fail(r, err)
 	}
@@ -117,7 +118,7 @@ func checkSeatbelt(p *probe) Result {
 			c.Close()
 		}
 	}()
-	if c, err := net.DialTimeout("tcp", other.Addr().String(), 3*time.Second); err != nil {
+	if c, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(context.Background(), "tcp", other.Addr().String()); err != nil {
 		return fail(r, fmt.Errorf("the control listener is not reachable outside the profile: %w", err))
 	} else {
 		c.Close()
@@ -127,7 +128,7 @@ func checkSeatbelt(p *probe) Result {
 	// or behind a proxy, "no" inside the profile would prove nothing.
 	internet := false
 	if !p.opts.noNet {
-		if c, err := net.DialTimeout("tcp", "1.1.1.1:443", 3*time.Second); err == nil {
+		if c, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(context.Background(), "tcp", "1.1.1.1:443"); err == nil {
 			c.Close()
 			internet = true
 		}
@@ -477,7 +478,7 @@ func checkTLS(p *probe) Result {
 		if prof != nil {
 			args = append([]string{"/usr/bin/sandbox-exec", "-p", prof.String()}, args...)
 		}
-		cmd := exec.Command(args[0], args[1:]...) //nolint:gosec // the probe's own commands
+		cmd := exec.CommandContext(context.Background(), args[0], args[1:]...) //nolint:gosec // the probe's own commands
 		cmd.Env = env
 		out, _ := cmd.CombinedOutput()
 		return tlsTry{ok: strings.Contains(string(out), "tls=ok"), out: strings.TrimSpace(string(out))}

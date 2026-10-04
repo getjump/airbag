@@ -21,6 +21,7 @@ package sandbox
 // effect log, policies, review and apply.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -65,7 +66,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		return 1, err
 	}
 
-	pl, err := net.Listen("tcp", "127.0.0.1:0")
+	pl, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		return 1, err
 	}
@@ -91,7 +92,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		return 1, err
 	}
 	_ = os.Remove(s.ControlSock())
-	cl, err := net.Listen("unix", s.ControlSock())
+	cl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ControlSock())
 	if err != nil {
 		return 1, err
 	}
@@ -151,7 +152,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil || strings.HasPrefix(rel, "..") {
 		rel = "."
 	}
-	cmd := exec.Command("/usr/bin/sandbox-exec", append([]string{"-p", prof.String(), path}, s.Argv[1:]...)...) //nolint:gosec // the command the user asked to run, inside the profile
+	cmd := exec.CommandContext(context.Background(), "/usr/bin/sandbox-exec", append([]string{"-p", prof.String(), path}, s.Argv[1:]...)...) //nolint:gosec // the command the user asked to run, inside the profile
 	cmd.Dir = filepath.Join(s.CloneDir(), rel)
 	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -185,11 +186,11 @@ func cloneWorkspace(s *session.Session) error {
 	if err := os.MkdirAll(filepath.Dir(s.CloneDir()), 0o700); err != nil {
 		return err
 	}
-	out, err := exec.Command("/bin/cp", "-c", "-R", s.Workspace, s.CloneDir()).CombinedOutput() //nolint:gosec // absolute paths of the session's own workspace and clone
+	out, err := exec.CommandContext(context.Background(), "/bin/cp", "-c", "-R", s.Workspace, s.CloneDir()).CombinedOutput() //nolint:gosec // absolute paths of the session's own workspace and clone
 	if err != nil {
 		_ = os.RemoveAll(s.CloneDir())
 		fmt.Fprintf(os.Stderr, "airbag: APFS clone failed (%s); copying instead\n", strings.TrimSpace(string(out)))
-		if out, err := exec.Command("/bin/cp", "-R", s.Workspace, s.CloneDir()).CombinedOutput(); err != nil { //nolint:gosec // absolute paths of the session's own workspace and clone
+		if out, err := exec.CommandContext(context.Background(), "/bin/cp", "-R", s.Workspace, s.CloneDir()).CombinedOutput(); err != nil { //nolint:gosec // absolute paths of the session's own workspace and clone
 			return fmt.Errorf("copy the workspace: %w: %s", err, out)
 		}
 	}

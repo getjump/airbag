@@ -20,7 +20,7 @@ func TestAppendOnly(t *testing.T) {
 		t.Fatalf("got %+v %v", got, err)
 	}
 	for _, q := range []string{`UPDATE events SET verdict = 'deny'`, `DELETE FROM events`} {
-		if _, err := l.db.Exec(q); err == nil {
+		if _, err := l.db.ExecContext(t.Context(), q); err == nil {
 			t.Errorf("%s succeeded on an append-only log", q)
 		}
 	}
@@ -31,7 +31,7 @@ func TestAppendOnly(t *testing.T) {
 	db, _ := sql.Open("sqlite", path)
 	defer func() { _ = db.Close() }()
 	var n int
-	_ = db.QueryRow(`SELECT count(*) FROM events`).Scan(&n)
+	_ = db.QueryRowContext(t.Context(), `SELECT count(*) FROM events`).Scan(&n)
 	if n != 2 {
 		t.Fatalf("rows = %d", n)
 	}

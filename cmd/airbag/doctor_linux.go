@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,7 +51,7 @@ func cmdDoctor() error {
 			"sudo apparmor_parser -r /etc/apparmor.d/airbag", self))
 
 	if !restricted {
-		err := exec.Command("unshare", "--user", "--map-root-user", "--mount", "true").Run()
+		err := exec.CommandContext(context.Background(), "unshare", "--user", "--map-root-user", "--mount", "true").Run()
 		check("can create a user + mount namespace", err == nil, "check kernel.unprivileged_userns_clone and user.max_user_namespaces")
 	}
 	// FUSE is optional: without it secret files are hidden rather than

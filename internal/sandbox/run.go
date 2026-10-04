@@ -9,6 +9,7 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -42,7 +43,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	}
 	defer func() { _ = log.Close() }()
 
-	pl, err := net.Listen("unix", s.ProxySock())
+	pl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ProxySock())
 	if err != nil {
 		return 1, err
 	}
@@ -67,7 +68,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	}()
 	for i, f := range s.Forwards {
 		_ = os.Remove(s.ForwardSock(i))
-		fl, err := net.Listen("unix", s.ForwardSock(i))
+		fl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ForwardSock(i))
 		if err != nil {
 			return 1, err
 		}
@@ -88,7 +89,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	})
 	go func() { _ = px.Serve(pl) }()
 
-	cl, err := net.Listen("unix", s.ControlSock())
+	cl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ControlSock())
 	if err != nil {
 		return 1, err
 	}
@@ -117,7 +118,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, fmt.Errorf("pseudo-terminal: %w", err)
 	}
-	cmd := exec.Command(self, InitArg, s.Dir) //nolint:gosec // airbag itself, as the sandbox's PID 1
+	cmd := exec.CommandContext(context.Background(), self, InitArg, s.Dir) //nolint:gosec // airbag itself, as the sandbox's PID 1
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The sandbox gets a session of its own, so the user's terminal is
 	// never its controlling terminal (tty.go).

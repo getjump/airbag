@@ -11,6 +11,7 @@
 package outbox
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -91,7 +92,7 @@ func Open(path string) (*Box, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.ExecContext(context.Background(), schema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -105,10 +106,10 @@ func Open(path string) (*Box, error) {
 // addFiles brings a database from before deferred commands up to date.
 func addFiles(db *sql.DB) error {
 	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('intents') WHERE name = 'files'`).Scan(&n); err != nil || n > 0 {
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM pragma_table_info('intents') WHERE name = 'files'`).Scan(&n); err != nil || n > 0 {
 		return err
 	}
-	_, err := db.Exec(`ALTER TABLE intents ADD COLUMN files TEXT NOT NULL DEFAULT ''`)
+	_, err := db.ExecContext(context.Background(), `ALTER TABLE intents ADD COLUMN files TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -117,7 +118,7 @@ func (b *Box) Close() error { return b.db.Close() }
 // List returns all intents in the order they were queued, each with its
 // current status.
 func (b *Box) List() ([]Intent, error) {
-	rows, err := b.db.Query(`
+	rows, err := b.db.QueryContext(context.Background(), `
 		SELECT i.id, i.kind, i.argv, i.cwd, i.created, i.files, s.status, s.output
 		FROM intents i
 		JOIN intent_status s ON s.seq = (SELECT max(seq) FROM intent_status WHERE intent = i.id)
@@ -145,13 +146,13 @@ func (b *Box) List() ([]Intent, error) {
 
 // Push queues an intent as pending and returns it with its ID.
 func (b *Box) Push(in Intent) (Intent, error) {
-	tx, err := b.db.Begin()
+	tx, err := b.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return in, err
 	}
 	defer func() { _ = tx.Rollback() }() // after Commit, a no-op that returns ErrTxDone
 	var n int
-	if err := tx.QueryRow(`SELECT count(*) FROM intents`).Scan(&n); err != nil {
+	if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM intents`).Scan(&n); err != nil {
 		return in, err
 	}
 	in.ID = fmt.Sprintf("i-%d", n+1)
@@ -170,11 +171,11 @@ func (b *Box) Push(in Intent) (Intent, error) {
 		files = string(b)
 	}
 	now := in.Created.UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`INSERT INTO intents (id, kind, argv, cwd, created, files) VALUES (?, ?, ?, ?, ?, ?)`,
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO intents (id, kind, argv, cwd, created, files) VALUES (?, ?, ?, ?, ?, ?)`,
 		in.ID, in.Kind, string(argv), in.Cwd, now, files); err != nil {
 		return in, err
 	}
-	if _, err := tx.Exec(`INSERT INTO intent_status (intent, t, status) VALUES (?, ?, ?)`, in.ID, now, Pending); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO intent_status (intent, t, status) VALUES (?, ?, ?)`, in.ID, now, Pending); err != nil {
 		return in, err
 	}
 	return in, tx.Commit()
@@ -183,7 +184,7 @@ func (b *Box) Push(in Intent) (Intent, error) {
 // Update records a new status, and the command's output, for an intent.
 // The intent itself does not change.
 func (b *Box) Update(in Intent) error {
-	res, err := b.db.Exec(`INSERT INTO intent_status (intent, t, status, output)
+	res, err := b.db.ExecContext(context.Background(), `INSERT INTO intent_status (intent, t, status, output)
 		SELECT id, ?, ?, ? FROM intents WHERE id = ?`,
 		time.Now().UTC().Format(time.RFC3339Nano), in.Status, in.Output, in.ID)
 	if err != nil {

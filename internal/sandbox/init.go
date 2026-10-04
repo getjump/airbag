@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -376,7 +377,7 @@ func loopbackUp() error {
 // startBridge forwards 127.0.0.1:3128 inside the sandbox to the host
 // proxy's unix socket.
 func startBridge() error {
-	l, err := net.Listen("tcp", ProxyAddr)
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", ProxyAddr)
 	if err != nil {
 		return err
 	}
@@ -388,7 +389,7 @@ func startBridge() error {
 			}
 			go func() {
 				defer c.Close()
-				up, err := net.Dial("unix", proxySockInside)
+				up, err := (&net.Dialer{}).DialContext(context.Background(), "unix", proxySockInside)
 				if err != nil {
 					return
 				}
@@ -418,7 +419,7 @@ func startForwards(s *session.Session) error {
 		if strconv.Itoa(f.Port) == strings.TrimPrefix(ProxyAddr, "127.0.0.1:") {
 			return fmt.Errorf("%s: port %d is airbag's proxy inside the sandbox", f, f.Port)
 		}
-		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", f.Port))
+		l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", f.Port))
 		if err != nil {
 			return fmt.Errorf("%s: %w", f, err)
 		}
@@ -431,7 +432,7 @@ func startForwards(s *session.Session) error {
 				}
 				go func() {
 					defer c.Close()
-					up, err := net.Dial("unix", sock)
+					up, err := (&net.Dialer{}).DialContext(context.Background(), "unix", sock)
 					if err != nil {
 						return
 					}
@@ -475,7 +476,7 @@ func runAgent(s *session.Session, ctl *os.File) int {
 		}
 		path = p
 	}
-	cmd := exec.Command(path, s.Argv[1:]...) //nolint:gosec // the command the user asked to run in the sandbox
+	cmd := exec.CommandContext(context.Background(), path, s.Argv[1:]...) //nolint:gosec // the command the user asked to run in the sandbox
 	cmd.Args[0] = s.Argv[0]
 	cmd.Env = env
 	cmd.Dir = s.Cwd

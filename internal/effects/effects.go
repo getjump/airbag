@@ -6,6 +6,7 @@
 package effects
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -55,7 +56,7 @@ func Open(path string) (*Log, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.ExecContext(context.Background(), schema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -74,7 +75,7 @@ func (l *Log) Add(e Effect) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, _ = l.db.Exec(`INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
+	_, _ = l.db.ExecContext(context.Background(), `INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
 		e.Time.UTC().Format(time.RFC3339Nano), e.Kind, e.Target, e.Verdict, e.Reason, string(pred))
 }
 
@@ -91,7 +92,7 @@ func Read(path string) ([]Effect, error) {
 		return nil, err
 	}
 	defer func() { _ = db.Close() }()
-	rows, err := db.Query(`SELECT t, kind, target, verdict, reason, predict FROM events ORDER BY id`)
+	rows, err := db.QueryContext(context.Background(), `SELECT t, kind, target, verdict, reason, predict FROM events ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}

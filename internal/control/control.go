@@ -262,7 +262,7 @@ func ReportTaint(t Taint) error {
 	if err != nil {
 		return err
 	}
-	resp, err := client(5*time.Second).Post("http://airbag/taint", "application/json", bytes.NewReader(body))
+	resp, err := post(5*time.Second, "http://airbag/taint", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -349,7 +349,7 @@ func ReportExec(e Exec) Verdict {
 	if err != nil {
 		return v
 	}
-	resp, err := client(3*time.Second).Post("http://airbag/exec", "application/json", bytes.NewReader(body))
+	resp, err := post(3*time.Second, "http://airbag/exec", bytes.NewReader(body))
 	if err != nil {
 		return v
 	}
@@ -360,12 +360,22 @@ func ReportExec(e Exec) Verdict {
 
 // Hook forwards a hook event from inside the sandbox.
 func Hook(agent, event string, payload []byte) ([]byte, error) {
-	resp, err := client(5*time.Second).Post("http://airbag/hook/"+agent+"/"+event, "application/json", bytes.NewReader(payload))
+	resp, err := post(5*time.Second, "http://airbag/hook/"+agent+"/"+event, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+}
+
+// post sends a JSON body to the host side of airbag.
+func post(timeout time.Duration, url string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return client(timeout).Do(req)
 }
 
 func client(timeout time.Duration) *http.Client {
@@ -385,7 +395,7 @@ func Defer(in outbox.Intent) (DeferReply, error) {
 	if err != nil {
 		return d, err
 	}
-	resp, err := client(10*time.Second).Post("http://airbag/defer", "application/json", bytes.NewReader(body))
+	resp, err := post(10*time.Second, "http://airbag/defer", bytes.NewReader(body))
 	if err != nil {
 		return d, err
 	}
@@ -400,12 +410,11 @@ func Defer(in outbox.Intent) (DeferReply, error) {
 
 // Submit is called from inside the sandbox.
 func Submit(in outbox.Intent) (outbox.Intent, error) {
-	c := client(10 * time.Second)
 	body, err := json.Marshal(in)
 	if err != nil {
 		return in, err
 	}
-	resp, err := c.Post("http://airbag/intent", "application/json", bytes.NewReader(body))
+	resp, err := post(10*time.Second, "http://airbag/intent", bytes.NewReader(body))
 	if err != nil {
 		return in, err
 	}

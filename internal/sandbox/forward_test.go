@@ -27,7 +27,7 @@ func TestForwarderTaint(t *testing.T) {
 	gate := policy.NewGate(pol, t.TempDir())
 	gate.Mark(taint.Secret, ".env")
 
-	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	echo, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

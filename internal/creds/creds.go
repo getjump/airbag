@@ -80,7 +80,7 @@ func (b Binding) Validate() error {
 			return fmt.Errorf("%s: source %q", b.Name, b.Source)
 		}
 	default:
-		return fmt.Errorf("%s: source %q: want env:, file: or command:", b.Name, b.Source)
+		return fmt.Errorf("%s: source %q: want env:NAME, file:PATH or command:PROGRAM ARGS", b.Name, b.Source)
 	}
 	for _, e := range b.Env {
 		if !envRe.MatchString(e) {

@@ -4,6 +4,7 @@ package apply
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -396,7 +397,7 @@ func runPush(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, 
 		}
 		return outbox.Rejected, nil
 	}
-	cmd := exec.Command("git", args...) //nolint:gosec // a push outbox.GitPush checked and the user confirmed
+	cmd := exec.CommandContext(context.Background(), "git", args...) //nolint:gosec // a push outbox.GitPush checked and the user confirmed
 	cmd.Dir = cwd
 	return run(box, it, cmd, o)
 }
@@ -469,7 +470,7 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, i
 		}
 		return outbox.Rejected, nil
 	}
-	cmd := exec.Command(prog, it.Argv[1:]...) //nolint:gosec // a deferred command: a program from this machine's PATH, its files checked, confirmed by the user
+	cmd := exec.CommandContext(context.Background(), prog, it.Argv[1:]...) //nolint:gosec // a deferred command: a program from this machine's PATH, its files checked, confirmed by the user
 	cmd.Args[0] = it.Argv[0]
 	cmd.Dir, cmd.Env = cwd, env
 	return run(box, it, cmd, o)
@@ -517,7 +518,7 @@ func pushTarget(cwd string, args []string) string {
 			break
 		}
 	}
-	out, err := exec.Command("git", "-C", cwd, "remote", "get-url", "--push", remote).Output() //nolint:gosec // remote is an argument that does not start with "-"
+	out, err := exec.CommandContext(context.Background(), "git", "-C", cwd, "remote", "get-url", "--push", remote).Output() //nolint:gosec // remote is an argument that does not start with "-"
 	if err != nil {
 		return remote
 	}

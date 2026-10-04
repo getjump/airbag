@@ -3,6 +3,7 @@ package control
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ func ask(t *testing.T, s *Server, in outbox.Intent) DeferReply {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
-	s.deferCmd(w, httptest.NewRequest("POST", "/defer", bytes.NewReader(body)))
+	s.deferCmd(w, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/defer", bytes.NewReader(body)))
 	var d DeferReply
 	if err := json.NewDecoder(w.Body).Decode(&d); err != nil {
 		t.Fatalf("%d %s", w.Code, w.Body.String())

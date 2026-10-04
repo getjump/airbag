@@ -11,6 +11,7 @@ package mirror
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -256,7 +257,12 @@ func (m *Mirror) cached(w http.ResponseWriter, r *http.Request, registry, url, w
 			pinned = lock
 		}
 		hit = false
-		resp, err := m.Client.Get(url) //nolint:gosec // fromRegistry checked the host above
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil) //nolint:gosec // fromRegistry checked the host above
+		if err != nil {
+			http.Error(w, "airbag mirror: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		resp, err := m.Client.Do(req) //nolint:gosec // fromRegistry checked the host above
 		if err != nil {
 			http.Error(w, "airbag mirror: "+err.Error(), http.StatusBadGateway)
 			return

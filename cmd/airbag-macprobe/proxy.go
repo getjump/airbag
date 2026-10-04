@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -18,7 +19,7 @@ type connectProxy struct {
 }
 
 func startProxy() (*connectProxy, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +58,7 @@ func (p *connectProxy) handle(c net.Conn) {
 	p.mu.Lock()
 	p.seen = append(p.seen, req.Host)
 	p.mu.Unlock()
-	up, err := net.DialTimeout("tcp", req.Host, 15*time.Second)
+	up, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(context.Background(), "tcp", req.Host)
 	if err != nil {
 		_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return

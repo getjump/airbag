@@ -97,7 +97,12 @@ const tlsClientArg = "__tls_client"
 // runs inside the sandbox in the TLS check.
 func tlsClient(url string) int {
 	c := &http.Client{Timeout: 20 * time.Second}
-	resp, err := c.Get(url) //nolint:gosec // the URL the probe passes itself for its TLS check
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil) //nolint:gosec // the URL the probe passes itself for its TLS check
+	if err != nil {
+		fmt.Println("tls=error", err)
+		return 1
+	}
+	resp, err := c.Do(req) //nolint:gosec // the URL the probe passes itself for its TLS check
 	if err != nil {
 		fmt.Println("tls=error", err)
 		return 1

@@ -66,7 +66,7 @@ func TestMalformedHostRefusedByServer(t *testing.T) {
 	log, path := newLog(t)
 	p := New(Allowlist{"127.0.0.1:*", "h:*", "1.2.3.4:*"}, log)
 	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestMalformedHostRefusedByServer(t *testing.T) {
 		"GET http://h:80:80/ HTTP/1.1\r\nHost: h:80:80",
 		"GET http://[1.2.3.4]/ HTTP/1.1\r\nHost: [1.2.3.4]",
 	} {
-		c, err := net.Dial("tcp", l.Addr().String())
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", l.Addr().String())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,7 +100,7 @@ func TestMalformedHostRefusedByServer(t *testing.T) {
 
 // A CONNECT to an allowed host is tunnelled byte for byte.
 func TestConnectTunnel(t *testing.T) {
-	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	echo, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,14 +116,14 @@ func TestConnectTunnel(t *testing.T) {
 	log, _ := newLog(t)
 	p := New(Allowlist{"127.0.0.1:*"}, log)
 	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
 	go func() { _ = p.Serve(l) }()
 
-	c, err := net.Dial("tcp", l.Addr().String())
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", l.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,9 +132,10 @@ func TestConnectTunnel(t *testing.T) {
 	_, _ = c.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
 	br := bufio.NewReader(c)
 	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("CONNECT: %v %v", resp, err)
 	}
+	resp.Body.Close() // empty: the tunnel follows the header
 	_, _ = c.Write([]byte("ping\n"))
 	line, _ := br.ReadString('\n')
 	if line != "ping\n" {
@@ -143,7 +144,7 @@ func TestConnectTunnel(t *testing.T) {
 }
 
 func TestCutOnTaint(t *testing.T) {
-	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	echo, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +162,7 @@ func TestCutOnTaint(t *testing.T) {
 	p := New(Allowlist{"127.0.0.1:*", "localhost:*"}, log)
 	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
 	p.forbid = func(netip.Addr) string { return "" } // localhost stands in for a remote host
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +170,7 @@ func TestCutOnTaint(t *testing.T) {
 	go func() { _ = p.Serve(l) }()
 
 	open := func(host string) (*bufio.Reader, net.Conn) {
-		c, err := net.Dial("tcp", l.Addr().String())
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", l.Addr().String())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -177,9 +178,11 @@ func TestCutOnTaint(t *testing.T) {
 		target := host + ":" + port
 		_, _ = c.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
 		br := bufio.NewReader(c)
-		if resp, err := http.ReadResponse(br, nil); err != nil || resp.StatusCode != 200 {
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil || resp.StatusCode != http.StatusOK {
 			t.Fatalf("CONNECT %s: %v %v", host, resp, err)
 		}
+		resp.Body.Close() // empty: the tunnel follows the header
 		return br, c
 	}
 	// A tunnel to a host the session may no longer reach once tainted,
@@ -251,7 +254,7 @@ func TestAllowsPort(t *testing.T) {
 // refused at connect time, and a port beyond 80 and 443 needs an entry
 // that names it.
 func TestGuard(t *testing.T) {
-	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	echo, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +271,7 @@ func TestGuard(t *testing.T) {
 	log, path := newLog(t)
 	p := New(Allowlist{"localhost:*", "example.test"}, log)
 	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +279,7 @@ func TestGuard(t *testing.T) {
 	go func() { _ = p.Serve(l) }()
 
 	connect := func(target string) (int, string) {
-		c, err := net.Dial("tcp", l.Addr().String())
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", l.Addr().String())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -286,6 +289,7 @@ func TestGuard(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(body)
 	}
@@ -374,7 +378,7 @@ func TestPlainHTTPHostSpelledOneWay(t *testing.T) {
 	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
 	u, _ := url.Parse("http://127.0.0.1.:" + port + "/x")
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, &http.Request{Method: "GET", Host: u.Host, URL: u, Header: http.Header{}})
+	p.ServeHTTP(rec, &http.Request{Method: http.MethodGet, Host: u.Host, URL: u, Header: http.Header{}})
 	if rec.Code != http.StatusOK || seen != "127.0.0.1:"+port {
 		t.Fatalf("%d %q, upstream saw Host %q", rec.Code, rec.Body.String(), seen)
 	}
@@ -427,7 +431,7 @@ rules:
 	for _, raw := range []string{"http://api.example/x", "http://api.example:/x", "http://api.example:080/x"} {
 		u, _ := url.Parse(raw)
 		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, &http.Request{Method: "GET", Host: u.Host, URL: u, Header: http.Header{}})
+		p.ServeHTTP(rec, &http.Request{Method: http.MethodGet, Host: u.Host, URL: u, Header: http.Header{}})
 		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "no plain http") {
 			t.Errorf("GET %s: %d %q", raw, rec.Code, rec.Body.String())
 		}

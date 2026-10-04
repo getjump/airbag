@@ -3,6 +3,7 @@ package apply
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -231,7 +232,8 @@ func commitLeftovers(s *session.Session, cs []review.Change, base string) (strin
 	}
 	var info bytes.Buffer
 	for _, c := range keep {
-		mode, sha := "100644", ""
+		mode := "100644"
+		var sha string
 		var err error
 		switch {
 		case c.Type == fs.ModeSymlink:
@@ -337,7 +339,7 @@ func git(dir string, env []string, args ...string) (string, error) {
 }
 
 func gitIn(dir string, env []string, stdin io.Reader, args ...string) (string, error) {
-	cmd := exec.Command("git", args...) //nolint:gosec // callers pass their own subcommands; paths from the sandbox follow "--" or an option that takes them
+	cmd := exec.CommandContext(context.Background(), "git", args...) //nolint:gosec // callers pass their own subcommands; paths from the sandbox follow "--" or an option that takes them
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
 	if stdin != nil {

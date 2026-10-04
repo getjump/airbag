@@ -516,7 +516,7 @@ func giveBack(e genEntry, clone bool) error {
 	case e.Kind == review.Deleted:
 		// overlayfs's whiteout: a 0:0 character device (unprivileged
 		// since Linux 5.8).
-		return unix.Mknod(e.Upper, syscall.S_IFCHR|0o000, 0)
+		return unix.Mknod(e.Upper, syscall.S_IFCHR, 0)
 	case e.Type == fs.ModeDir:
 		if err := os.MkdirAll(e.Upper, 0o755); err != nil { //nolint:gosec // a directory of the session's upper layer, inside the 0700 session dir
 			return err

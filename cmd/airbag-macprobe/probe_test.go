@@ -91,7 +91,7 @@ func TestTree(t *testing.T) {
 }
 
 func TestProxy(t *testing.T) {
-	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	echo, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = px.Close() }()
-	c, err := net.Dial("tcp", px.l.Addr().String())
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", px.l.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,9 +117,10 @@ func TestProxy(t *testing.T) {
 	_, _ = io.WriteString(c, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n\r\n")
 	br := bufio.NewReader(c)
 	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("CONNECT %v %v", resp, err)
 	}
+	resp.Body.Close() // empty: the tunnel follows the header
 	_, _ = io.WriteString(c, "ping\n")
 	if l, _ := br.ReadString('\n'); l != "ping\n" {
 		t.Fatalf("echo %q", l)
@@ -420,7 +421,7 @@ func TestNFSSeal(t *testing.T) {
 	if b := readNFS(t, target, "/hello.txt"); b != "hi\n" {
 		t.Fatalf("the open client lost the export: read %q", b)
 	}
-	if c2, err := net.DialTimeout("tcp", srv.l.Addr().String(), 2*time.Second); err == nil {
+	if c2, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(t.Context(), "tcp", srv.l.Addr().String()); err == nil {
 		c2.Close()
 		t.Fatal("a new client connected after Seal")
 	}
@@ -440,7 +441,7 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 	}
 	defer func() { _ = srv.Close() }()
 	addr := srv.l.Addr().String()
-	idle, err := net.Dial("tcp", addr)
+	idle, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +482,7 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 	}
-	if c, err := net.DialTimeout("tcp", addr, 2*time.Second); err == nil {
+	if c, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(t.Context(), "tcp", addr); err == nil {
 		c.Close()
 		t.Error("a new client connected after Close")
 	}

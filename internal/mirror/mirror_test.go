@@ -20,7 +20,7 @@ func (f *fakeRegistry) RoundTrip(r *http.Request) (*http.Response, error) {
 	if strings.HasSuffix(r.URL.Path, ".tgz") {
 		body, ct = "TARBALL", "application/octet-stream"
 	}
-	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {ct}},
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {ct}},
 		Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 }
 
@@ -32,7 +32,7 @@ func TestTaintedServesOnlyCache(t *testing.T) {
 	m.Tainted = func() string { return tainted }
 	get := func(path string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
-		m.ServeHTTP(w, httptest.NewRequest("GET", Base+path, nil))
+		m.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, Base+path, nil))
 		return w
 	}
 
@@ -128,10 +128,10 @@ func TestFetchesOnlyFromRegistries(t *testing.T) {
 		"/go/sumdb/sum.golang.org/lookup/x@v1.0.0",
 		"/npm/left-pad",
 	} {
-		m.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", Base+p, nil))
+		m.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodGet, Base+p, nil))
 	}
 	w := httptest.NewRecorder()
-	m.ServeHTTP(w, httptest.NewRequest("GET", Base+"/go/sumdb/sum.golang.org/supported", nil))
+	m.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, Base+"/go/sumdb/sum.golang.org/supported", nil))
 	if w.Code != http.StatusOK {
 		t.Errorf("supported: %d", w.Code)
 	}

@@ -1,6 +1,7 @@
 package review
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -445,7 +446,7 @@ func Diff(w io.Writer, c Change) {
 	case Deleted:
 		b = "/dev/null"
 	}
-	cmd := exec.Command("diff", "-u", "--label", "a/"+display(c), "--label", "b/"+display(c), a, b) //nolint:gosec // each label follows --label, and a and b are absolute paths
+	cmd := exec.CommandContext(context.Background(), "diff", "-u", "--label", "a/"+display(c), "--label", "b/"+display(c), a, b) //nolint:gosec // each label follows --label, and a and b are absolute paths
 	cmd.Stdout, cmd.Stderr = w, w
 	_ = cmd.Run() // diff exits 1 when files differ
 }
