@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -257,6 +258,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		// Whatever is still left was added while the rollback ran, and
 		// is not ours to remove.
 		if e.Type == fs.ModeDir && e.Saved != "" {
+			removeTemps(e.Path, g.wroteTo())
 			var still []string
 			dirs, still = removeInside(dirs, e.Path)
 			if !emptyOrAbsent(e.Path) {
@@ -321,7 +323,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 // moved into saved/, that hold anything the apply did not put there.
 func (g *generation) leftWhole() map[string]bool {
 	entries := map[string]genEntry{}
-	made := map[string]bool{}
+	made, wrote := map[string]bool{}, g.wroteTo()
 	for _, d := range g.Dirs {
 		made[d] = true
 	}
@@ -336,7 +338,7 @@ func (g *generation) leftWhole() map[string]bool {
 		if e.Kind != review.Replaced || e.Saved == "" || fingerprint(e.Path) != "dir" {
 			continue
 		}
-		if _, err := os.Lstat(e.Saved); err == nil && !onlyApplied(e.Path, entries, made) {
+		if _, err := os.Lstat(e.Saved); err == nil && !onlyApplied(e.Path, entries, made, wrote) {
 			whole[e.Path] = true
 		}
 	}
@@ -344,8 +346,9 @@ func (g *generation) leftWhole() map[string]bool {
 }
 
 // onlyApplied reports whether all there is under dir is what the apply
-// put there: its entries as it left them, and directories it made.
-func onlyApplied(dir string, entries map[string]genEntry, made map[string]bool) bool {
+// put there: its entries as it left them, directories it made, and temp
+// files it left when it was stopped.
+func onlyApplied(dir string, entries map[string]genEntry, made, wrote map[string]bool) bool {
 	clean := true
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && p == dir {
@@ -355,7 +358,7 @@ func onlyApplied(dir string, entries map[string]genEntry, made map[string]bool) 
 			if e, ok := entries[p]; ok && ours(e) {
 				return nil // a directory of the apply's is walked too
 			}
-			if d.IsDir() && made[p] {
+			if d.IsDir() && made[p] || applyTemp(p, d, wrote) {
 				return nil
 			}
 		}
@@ -363,6 +366,44 @@ func onlyApplied(dir string, entries map[string]genEntry, made map[string]bool) 
 		return filepath.SkipAll
 	})
 	return clean
+}
+
+// wroteTo returns the directories the apply copied a file into.
+func (g *generation) wroteTo() map[string]bool {
+	wrote := map[string]bool{}
+	for _, e := range g.Entries {
+		if e.Type == 0 && e.Kind != review.Deleted {
+			wrote[filepath.Dir(e.Path)] = true
+		}
+	}
+	return wrote
+}
+
+// applyTemp: p is a temp file copyFile was writing when the apply was
+// stopped: a file named as os.CreateTemp names ".airbag-*", in a
+// directory the apply copied a file into.
+func applyTemp(p string, d fs.DirEntry, wrote map[string]bool) bool {
+	n, ok := strings.CutPrefix(d.Name(), ".airbag-")
+	if !ok || n == "" || !d.Type().IsRegular() || !wrote[filepath.Dir(p)] {
+		return false
+	}
+	for _, c := range n {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// removeTemps removes the temp files under dir that an apply which was
+// stopped left there.
+func removeTemps(dir string, wrote map[string]bool) {
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && applyTemp(p, d, wrote) {
+			_ = os.Remove(p)
+		}
+		return nil
+	})
 }
 
 // ours: the real path of e is as the apply left it.

@@ -628,3 +628,79 @@ func TestRollbackLeavesReplacedDirWhole(t *testing.T) {
 		t.Fatalf("second rollback not complete: generations %v (%v)\n%s", gs, err, out.String())
 	}
 }
+
+// crashAt turns the last generation of s into one that stopped while
+// copying path: the step is unfinished, path is not there, and the
+// temp file copyFile was writing is left next to it.
+func crashAt(t *testing.T, s *session.Session, path string) string {
+	t.Helper()
+	gs, err := listGenerations(s)
+	if err != nil || len(gs) == 0 {
+		t.Fatal("no generation", err)
+	}
+	g, err := loadGeneration(gs[len(gs)-1].dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Complete = false
+	for i := range g.Entries {
+		if g.Entries[i].Path == path {
+			g.Entries[i].After = ""
+		}
+	}
+	if err := g.save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(filepath.Dir(path), ".airbag-2918374650")
+	if err := os.WriteFile(tmp, []byte("half of the agent's"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return tmp
+}
+
+// A temp file an apply that was stopped left inside a replaced
+// directory is the apply's, not the user's: rollback removes it and
+// restores the user's version.
+func TestRollbackRemovesApplyTempInReplacedDir(t *testing.T) {
+	s, d := appliedReplacedDir(t, filepath.Join("sub", "inner.txt"))
+	crashAt(t, s, filepath.Join(d, "sub", "inner.txt"))
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, d); got != "user file\n" {
+		t.Fatalf("%s not restored: %q\n%s", d, got, out.String())
+	}
+	if gs, err := listGenerations(s); err != nil || len(gs) != 0 {
+		t.Fatalf("rollback not complete: generations %v (%v)\n%s", gs, err, out.String())
+	}
+}
+
+// Only a temp file named as copyFile names them, in a directory the
+// apply copied a file into, counts as the apply's; a user's file with a
+// similar name keeps the directory as it is.
+func TestRollbackKeepsUserFileNamedLikeTemp(t *testing.T) {
+	for _, name := range []string{".airbag-notes", filepath.Join("own", ".airbag-123")} {
+		s, d := appliedReplacedDir(t, "inner.txt")
+		p := filepath.Join(d, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("mine\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := Rollback(s, nil, &out); err != nil {
+			t.Fatal(err, out.String())
+		}
+		if got := read(t, p); got != "mine\n" {
+			t.Fatalf("rollback removed the user's %s: %q\n%s", name, got, out.String())
+		}
+		if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+			t.Fatalf("version of %s from before the apply = %q", d, prev)
+		}
+	}
+}
