@@ -2,12 +2,16 @@ package review
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/getjump/airbag/internal/session"
 )
@@ -86,24 +90,24 @@ func WriteBackConfigs(s *session.Session) []string {
 	for i := range jsonConfigs {
 		cf := &jsonConfigs[i]
 		branchPath := filepath.Join(s.HomeUpper(), cf.path)
-		branchRaw, err := os.ReadFile(branchPath)
+		branchRaw, err := readRegular(branchPath)
 		if err != nil {
-			continue // the agent did not change this file
+			continue // not changed, or not a regular file the agent could point elsewhere
 		}
 		branch, err := topLevel(branchRaw)
 		if err != nil {
 			continue // malformed in the branch: leave it there for review
 		}
 		realPath := filepath.Join(s.Home, cf.path)
-		if fi, err := os.Lstat(realPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			continue // never follow a symlink out of $HOME
-		}
-		realRaw, rerr := os.ReadFile(realPath)
+		realRaw, rerr := readRegular(realPath)
 		real := map[string]json.RawMessage{}
-		if rerr == nil {
+		switch {
+		case rerr == nil:
 			if real, err = topLevel(realRaw); err != nil {
 				continue // malformed real file: never corrupt it
 			}
+		case !errors.Is(rerr, fs.ErrNotExist):
+			continue // a symlink or other non-regular file: leave it alone
 		}
 		var wrote []string
 		for _, k := range cf.writeBack {
@@ -126,7 +130,7 @@ func WriteBackConfigs(s *session.Session) []string {
 		}
 		// If the branch copy now matches the real file, only benign keys
 		// differed, so drop it: review shows nothing for this file.
-		if after, err := os.ReadFile(realPath); err == nil {
+		if after, err := readRegular(realPath); err == nil {
 			if afterTop, err := topLevel(after); err == nil && sameTopLevel(branch, afterTop) {
 				_ = os.Remove(branchPath)
 			}
@@ -171,11 +175,39 @@ func topLevel(b []byte) (map[string]json.RawMessage, error) {
 }
 
 func topLevelFile(path string) (map[string]json.RawMessage, error) {
-	b, err := os.ReadFile(path)
+	b, err := readRegular(path)
 	if err != nil {
 		return nil, err
 	}
 	return topLevel(b)
+}
+
+// errNotRegular: the path is a symlink, a whiteout or another
+// non-regular file.
+var errNotRegular = errors.New("not a regular file")
+
+// readRegular reads a file only if it is a regular file, without
+// following a symlink. The branch is written by the agent, so a symlink
+// there could point host-side airbag at any file the agent chose; it
+// opens with O_NOFOLLOW and checks the opened file, so a swap between
+// the check and the read does not help either.
+func readRegular(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, errNotRegular
+		}
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, errNotRegular
+	}
+	return io.ReadAll(io.LimitReader(f, 16<<20))
 }
 
 // changedKeys is the sorted set of top-level keys whose value differs

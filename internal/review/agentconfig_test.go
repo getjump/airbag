@@ -2,9 +2,11 @@ package review
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/getjump/airbag/internal/session"
@@ -165,5 +167,57 @@ func TestAgentMemory(t *testing.T) {
 		if got := agentMemory(rel); got != want {
 			t.Errorf("agentMemory(%q) = %v, want %v", rel, got, want)
 		}
+	}
+}
+
+func TestWriteBackRefusesBranchSymlink(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1}`)
+	// The agent replaces its copy with a symlink to some other JSON file
+	// on the host that happens to hold an allowlisted key.
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	writeCfg(t, target, `{"numStartups":99,"userID":"from-elsewhere"}`)
+	if err := os.MkdirAll(filepath.Dir(branchPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, branchPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if msgs := WriteBackConfigs(s); len(msgs) != 0 {
+		t.Errorf("wrote back through a symlink: %v", msgs)
+	}
+	real := readCfg(t, realPath)
+	if real["numStartups"] != float64(1) || real["userID"] != nil {
+		t.Errorf("real file took values through the symlink: %v", real)
+	}
+	if _, err := os.Lstat(branchPath); err != nil {
+		t.Errorf("branch symlink removed: %v", err)
+	}
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath, Type: fs.ModeSymlink}
+	if keys, _, ok := configKeyChange(c); !ok || len(keys) != 0 {
+		t.Errorf("review read through the symlink: keys=%v ok=%v", keys, ok)
+	}
+	var b strings.Builder
+	Diff(&b, c)
+	if strings.Contains(b.String(), "from-elsewhere") || !strings.Contains(b.String(), "symlink -> "+target) {
+		t.Errorf("diff of a symlink: %q", b.String())
+	}
+}
+
+func TestWriteBackRefusesRealSymlink(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	target := filepath.Join(t.TempDir(), "dotfiles.json")
+	writeCfg(t, target, `{"numStartups":1}`)
+	if err := os.Symlink(target, realPath); err != nil {
+		t.Fatal(err)
+	}
+	writeCfg(t, branchPath, `{"numStartups":2}`)
+	WriteBackConfigs(s)
+	if got := readCfg(t, target)["numStartups"]; got != float64(1) {
+		t.Errorf("wrote through the real file's symlink: %v", got)
+	}
+	if fi, err := os.Lstat(realPath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("real symlink replaced: %v", err)
 	}
 }

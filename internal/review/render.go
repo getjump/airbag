@@ -3,7 +3,9 @@ package review
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -448,6 +450,25 @@ func Diff(w io.Writer, c Change) {
 		fmt.Fprintf(w, "%s %s/ (directory %s)\n", map[string]string{Added: "+", Deleted: "-", Replaced: "!"}[c.Kind], display(c), c.Kind)
 		return
 	}
+	// A symlink is shown by its target. diff would follow it, and print
+	// whatever host file the agent pointed it at.
+	if c.Type == fs.ModeSymlink {
+		old, cur := "", ""
+		if c.Kind != Added {
+			old, _ = os.Readlink(c.Path)
+		}
+		if c.Kind != Deleted {
+			cur, _ = os.Readlink(c.Upper)
+		}
+		fmt.Fprintf(w, "--- a/%s\n+++ b/%s\n", display(c), display(c))
+		if old != "" {
+			fmt.Fprintf(w, "-symlink -> %s\n", old)
+		}
+		if cur != "" {
+			fmt.Fprintf(w, "+symlink -> %s\n", cur)
+		}
+		return
+	}
 	// A config file is shown by the names of the top-level keys that
 	// changed, never their values, which may carry tokens.
 	if keys, persist, ok := configKeyChange(c); ok {
@@ -456,7 +477,7 @@ func Diff(w io.Writer, c Change) {
 			note = " (persist)"
 		}
 		if len(keys) == 0 {
-			fmt.Fprintf(w, "~ %s: changed (unreadable JSON)%s\n", display(c), note)
+			fmt.Fprintf(w, "~ %s: changed (not a readable regular JSON file)%s\n", display(c), note)
 			return
 		}
 		fmt.Fprintf(w, "~ %s: top-level keys changed%s: %s\n", display(c), note, strings.Join(keys, ", "))
