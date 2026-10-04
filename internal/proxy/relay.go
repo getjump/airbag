@@ -95,7 +95,10 @@ func (f *flow) limit() time.Duration {
 }
 
 // check runs when the timer fires: it stops a flow that has been quiet
-// for its limit, or sets the timer again for when it would be.
+// for its limit, or sets the timer again for when it would be. The
+// quiet is measured and the flow marked stopped under one lock, so
+// nothing else stops or holds in between; a byte that moves after that
+// moved after the limit ran out.
 func (f *flow) check() {
 	f.mu.Lock()
 	lim := f.limit()
@@ -108,8 +111,9 @@ func (f *flow) check() {
 		f.mu.Unlock()
 		return
 	}
+	cs := f.stopLocked()
 	f.mu.Unlock()
-	f.stop()
+	closeAll(cs)
 }
 
 // halfClose records that one side has finished sending: from now on
@@ -160,17 +164,28 @@ func (f *flow) stop() bool {
 		f.mu.Unlock()
 		return false
 	}
+	cs := f.stopLocked()
+	f.mu.Unlock()
+	closeAll(cs)
+	return true
+}
+
+// stopLocked marks the flow stopped and hands back its connections for
+// closing once f.mu is released. f.mu is held.
+func (f *flow) stopLocked() map[io.Closer]bool {
 	f.stopped = true
 	if f.timer != nil {
 		f.timer.Stop()
 	}
 	cs := f.conns
 	f.conns = nil
-	f.mu.Unlock()
+	return cs
+}
+
+func closeAll(cs map[io.Closer]bool) {
 	for c := range cs {
 		_ = c.Close()
 	}
-	return true
 }
 
 // closer closes by calling its func: a flow holds it to cancel a
