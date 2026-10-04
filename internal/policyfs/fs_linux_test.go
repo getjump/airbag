@@ -103,3 +103,39 @@ func TestBackingSymlinkSubstitutionCannotEscape(t *testing.T) {
 		t.Fatal("server followed leaf symlink")
 	}
 }
+
+func TestLookupIdentityStableAndRenameKeepsIdentity(t *testing.T) {
+	dir := t.TempDir()
+	os.Mkdir(filepath.Join(dir, "workspace"), 0700)
+	os.WriteFile(filepath.Join(dir, "workspace", "file"), []byte("data"), 0600)
+	root := testRoot(t, dir, func(runtimepolicy.Request) error { return nil })
+	ctx := context.Background()
+	var entry fuse.EntryOut
+	a, e := root.Lookup(ctx, "workspace", &entry)
+	if e != 0 {
+		t.Fatal(e)
+	}
+	root.AddChild("workspace", a, true)
+	b, e := root.Lookup(ctx, "workspace", &entry)
+	if e != 0 || a.StableAttr().Ino != b.StableAttr().Ino {
+		t.Fatal("mountpoint identity changed on revalidation")
+	}
+	file, e := a.Operations().(*node).Lookup(ctx, "file", &entry)
+	if e != 0 {
+		t.Fatal(e)
+	}
+	a.AddChild("file", file, true)
+	if e := root.Rename(ctx, "workspace", root, "moved", 0); e != 0 {
+		t.Fatal(e)
+	}
+	moved, e := root.Lookup(ctx, "moved", &entry)
+	if e != 0 || moved.StableAttr().Ino != a.StableAttr().Ino {
+		t.Fatal("renamed directory lost identity")
+	}
+	root.RmChild("workspace")
+	root.AddChild("moved", moved, true)
+	f, e := moved.Operations().(*node).Lookup(ctx, "file", &entry)
+	if e != 0 || f.StableAttr().Ino != file.StableAttr().Ino {
+		t.Fatal("renamed descendant lost identity")
+	}
+}

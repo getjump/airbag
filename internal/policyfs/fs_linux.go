@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,7 +24,15 @@ import (
 type Check func(runtimepolicy.Request) error
 type BeforeRead func(path string, pid uint32, fd int) error
 
+type inodeKey struct {
+	rel      string
+	dev, ino uint64
+}
+
 type View struct {
+	mu         sync.Mutex
+	inodes     map[inodeKey]uint64
+	nextInode  uint64
 	fd         int
 	path       string
 	check      Check
@@ -37,7 +46,44 @@ func Capture(path string, check Check, beforeRead BeforeRead) (*View, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &View{fd: fd, path: filepath.Clean(path), check: check, beforeRead: beforeRead}, nil
+	return &View{fd: fd, path: filepath.Clean(path), check: check, beforeRead: beforeRead, inodes: map[inodeKey]uint64{}, nextInode: 1 << 40}, nil
+}
+
+// Stable identities are essential: dentry revalidation must not detach the
+// workspace mount nested inside the HOME filesystem. Keep hardlink aliases
+// distinct without changing an unchanged path's inode on every lookup.
+func (v *View) inode(rel string, dev, ino uint64) uint64 {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	key := inodeKey{rel, dev, ino}
+	if id := v.inodes[key]; id != 0 {
+		return id
+	}
+	v.nextInode++
+	v.inodes[key] = v.nextInode
+	return v.nextInode
+}
+func under(path, dir string) bool { return path == dir || strings.HasPrefix(path, dir+"/") }
+func (v *View) renamed(src, dst string, exchange bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	moved := map[inodeKey]uint64{}
+	for key, id := range v.inodes {
+		if under(key.rel, src) {
+			delete(v.inodes, key)
+			key.rel = dst + strings.TrimPrefix(key.rel, src)
+			moved[key] = id
+		} else if under(key.rel, dst) {
+			delete(v.inodes, key)
+			if exchange {
+				key.rel = src + strings.TrimPrefix(key.rel, dst)
+				moved[key] = id
+			}
+		}
+	}
+	for key, id := range moved {
+		v.inodes[key] = id
+	}
 }
 
 func (v *View) Close() error { return unix.Close(v.fd) }
@@ -119,13 +165,12 @@ func (n *node) stat(rel string, st *syscall.Stat_t) syscall.Errno {
 func (n *node) newChild(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	var st syscall.Stat_t
 	if errno := n.stat(n.child(name), &st); errno != 0 {
-		fmt.Fprintf(os.Stderr, "airbag: backing lookup %s: %v\n", n.absolute(n.child(name)), errno)
 		return nil, errno
 	}
 	out.Attr.FromStat(&st)
 	// Give aliases distinct nodes: a path policy must not inherit the first
 	// hardlink's pathname through inode deduplication. See documented limits.
-	ch := n.NewInode(ctx, &node{view: n.view}, fs.StableAttr{Mode: st.Mode})
+	ch := n.NewInode(ctx, &node{view: n.view}, fs.StableAttr{Mode: st.Mode, Ino: n.view.inode(n.child(name), uint64(st.Dev), st.Ino)})
 	return ch, 0
 }
 func (n *node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -166,7 +211,7 @@ func (n *node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		if err := unix.Fstatat(fd, entry.Name(), &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			continue
 		}
-		out = append(out, fuse.DirEntry{Name: entry.Name(), Mode: st.Mode, Ino: st.Ino})
+		out = append(out, fuse.DirEntry{Name: entry.Name(), Mode: st.Mode, Ino: n.view.inode(n.child(entry.Name()), uint64(st.Dev), st.Ino)})
 	}
 	return fs.NewListDirStream(out), 0
 }
@@ -342,7 +387,11 @@ func (n *node) Rename(ctx context.Context, name string, newparent fs.InodeEmbedd
 		return fs.ToErrno(err)
 	}
 	defer unix.Close(b)
-	return fs.ToErrno(unix.Renameat2(a, name, b, newname, uint(flags)))
+	if err := unix.Renameat2(a, name, b, newname, uint(flags)); err != nil {
+		return fs.ToErrno(err)
+	}
+	n.view.renamed(src, dst, flags&unix.RENAME_EXCHANGE != 0)
+	return 0
 }
 func (n *node) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	if !validName(name) {
