@@ -153,6 +153,10 @@ the command runs; Codex gets the same through its hooks. The repository's file i
 agent cannot loosen its own rules, and a change to it shows up in review as
 `persist`.
 
+Which tools an agent may call is the agent's own setting (Claude Code's
+permissions, Codex's configuration), and airbag does not duplicate it. airbag
+governs the effects any tool has: files, network, processes and secrets.
+
 ## Install
 
 ```console
@@ -162,7 +166,9 @@ $ airbag doctor
 
 One static binary, no daemon, no Docker. Needs Linux 5.12+ with unprivileged user
 namespaces. On Ubuntu 23.10+ AppArmor restricts them; `airbag doctor` prints the
-one-time profile to install. macOS is not supported yet (use a Linux VM).
+one-time profile to install. On macOS, run airbag in a Linux VM for now; see
+[docs/macos.md](docs/macos.md) for the setup, what to check, and the plan for
+running natively.
 
 ## Status
 

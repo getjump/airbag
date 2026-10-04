@@ -42,9 +42,10 @@ language, and let users add models without rebuilding airbag. Starlark is the
 leading candidate. A first step: port three existing models and keep their
 tests passing.
 
-**macOS.** There are no Linux namespaces there. Options: `sandbox-exec` with
-APFS clones for the branch, or a thin Linux VM driver. Either needs a design
-note first.
+**macOS.** There are no Linux namespaces there. [docs/macos.md](docs/macos.md)
+covers running in a Linux VM today, what still needs checking there, and a
+native design: Seatbelt for the network and credentials, APFS clones for the
+workspace branch, FUSE-T or FSKit for secret tracking.
 
 **Syscall-level control.** The shell shim sees `bash -c` scripts, not what a
 Python program does inside. A seccomp user-notification supervisor
