@@ -39,8 +39,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "airbag-macprobe: runs on macOS only")
 		os.Exit(2)
 	}
-	host, _ := os.Hostname()
-	_ = host
 	rep := &Report{
 		Probe:  "airbag-macprobe",
 		Time:   time.Now().UTC().Format(time.RFC3339),
