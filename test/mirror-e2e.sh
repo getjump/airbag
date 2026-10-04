@@ -1,7 +1,8 @@
 #!/bin/sh
 # Package managers inside the sandbox go through http://airbag.mirror:
 # every package and version lands in the effect log, artifacts are
-# cached across sessions. Parts whose tool is missing are skipped.
+# cached across sessions, and a session that read a secret gets only
+# what is cached. Parts whose tool is missing are skipped.
 set -eu
 AIRBAG=${AIRBAG:-airbag}
 T=$(mktemp -d "$HOME/.airbag-mirror-e2e.XXXXXX")
@@ -38,8 +39,21 @@ done
 "$AIRBAG" log | grep -q 'net.egress.*proxy.golang.org\|net.egress.*registry.npmjs.org' && fail "a package manager bypassed the mirror"
 "$AIRBAG" discard --yes >/dev/null
 
-# Second session: the same artifacts come from the cache.
-"$AIRBAG" run -- sh -c "$script" >/dev/null 2>&1
-"$AIRBAG" log | grep 'pkg.fetch' | grep -qv cached && fail "artifacts fetched again: $("$AIRBAG" log | grep pkg.fetch)"
+# Second session: the same artifacts come from the cache, also after
+# the session read a secret; anything new is refused then, and the
+# registries themselves are reachable only through the mirror.
+printf 'API_TOKEN=sk-mirror-0123456789\n' > .env
+out=$("$AIRBAG" run -- sh -c "cat .env >/dev/null; $script
+	curl -s -o /dev/null --max-time 5 https://registry.npmjs.org/left-pad; true" 2>&1)
+echo "$out" | grep -q LEAK && fail "cached packages not served after taint: $out"
+log=$("$AIRBAG" log)
+echo "$log" | grep 'pkg.fetch' | grep -v 'cached' | grep -qv 'secret-taint' && fail "artifacts fetched again: $(echo "$log" | grep pkg.fetch)"
+echo "$log" | grep -q 'registry.npmjs.org:443.*registry: use the mirror' || fail "direct registry access not refused: $log"
 "$AIRBAG" discard --yes >/dev/null
+if command -v npm >/dev/null; then
+	"$AIRBAG" run -- sh -c "cat .env >/dev/null; npm pack --silent is-number@7.0.0 >/dev/null 2>&1 && echo LEAK; true" >"$T/out" 2>&1
+	grep -q LEAK "$T/out" && fail "a tainted session fetched a new package"
+	"$AIRBAG" log | grep 'pkg.fetch' | grep -q 'deny.*secret-taint' || fail "refused fetch not logged: $("$AIRBAG" log)"
+	"$AIRBAG" discard --yes >/dev/null
+fi
 echo PASS

@@ -115,7 +115,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		}
 	}
 	if len(reads) > 0 {
-		fmt.Fprintf(w, "\nSecrets    read: %s\n           egress was limited to model APIs and registries from then on\n", strings.Join(reads, ", "))
+		fmt.Fprintf(w, "\nSecrets    read: %s\n           egress was limited to model APIs and cached packages from then on\n", strings.Join(reads, ", "))
 	}
 	var pkgs []string
 	seenPkg := map[string]bool{}

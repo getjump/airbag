@@ -24,8 +24,9 @@ each, in `demo/`: `sandbox`, `codex`, `ask`, `apply`, `mirror` (`demo/scenes.sh 
   rest of the host is read-only. Nothing the agent writes reaches your files before
   `airbag apply`.
 - **One way out.** The sandbox has no network interface besides loopback and no
-  DNS. Traffic leaves only through airbag's proxy, which allows model APIs and
-  package registries (`--allow HOST` adds more) and logs every host.
+  DNS. Traffic leaves only through airbag's proxy, which allows model APIs
+  (`--allow HOST` adds more) and logs every host. Package registries are reached
+  only through the mirror.
 - **A package mirror.** Go, npm, pip, uv and yarn go through
   `http://airbag.mirror`, a read-only caching mirror of proxy.golang.org, npm and
   PyPI. Review lists every package and version the agent pulled; artifacts are
@@ -39,8 +40,8 @@ each, in `demo/`: `sandbox`, `codex`, `ask`, `apply`, `mirror` (`demo/scenes.sh 
   reach: `/run`, `/tmp` and `/dev/shm` are private.
 - **Watched secrets.** The workspace's `.env` files are served read-only through
   FUSE. The first read by anything but airbag taints the session: commands that
-  send data out are refused, and only model APIs and package registries stay
-  reachable. The read returns only after airbag has recorded the taint and closed
+  send data out are refused, only model APIs stay reachable, and the mirror
+  serves only what it has cached. The read returns only after airbag has recorded the taint and closed
   connections opened earlier to other hosts. Output going back to the agent has
   known secret values masked.
 - **Its own state.** Transcripts and logins (`~/.claude/projects`, `~/.codex/sessions`,
@@ -128,8 +129,9 @@ append-only, so `sqlite3` answers questions the review does not.
 
 Not yet: secret handles (the agent sees a placeholder, airbag substitutes the
 value at an allowed boundary), passing Codex's SQLite state through (transcripts
-in `~/.codex/sessions` survive a discard, its thread index and memories do not). Registry hosts stay on the allowlist for tools that ignore the mirror
-settings.
+in `~/.codex/sessions` survive a discard, its thread index and memories do not). Tools that ignore the mirror settings cannot reach registries; `--allow HOST`
+opens one directly. After a secret read the mirror serves only its cache, not
+what a lockfile pins but nobody fetched yet.
 
 ## Threat model
 

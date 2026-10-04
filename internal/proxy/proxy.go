@@ -20,10 +20,15 @@ import (
 	"github.com/getjump/airbag/internal/policy"
 )
 
-// DefaultAllow covers model APIs and package registries.
+// DefaultAllow covers model APIs.
 var DefaultAllow = []string{
 	"api.anthropic.com", "*.anthropic.com", "claude.ai", "*.claude.ai", "*.claude.com",
 	"api.openai.com", "auth.openai.com", "chatgpt.com", "*.chatgpt.com",
+}
+
+// Registries are reached only by airbag's mirror, which fetches from the
+// host side; the agent's package managers point at the mirror.
+var Registries = Allowlist{
 	"proxy.golang.org", "sum.golang.org",
 	"registry.npmjs.org", "pypi.org", "files.pythonhosted.org",
 }
@@ -118,6 +123,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !p.Allow.Allows(host) && (p.Gate == nil || !p.Gate.AllowsHost(host)) {
+		if Registries.Allows(host) {
+			p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "registry: use the mirror"})
+			http.Error(w, "airbag: "+host+" is reached through http://airbag.mirror; point the package manager at the mirror (airbag sets GOPROXY, npm_config_registry, PIP_INDEX_URL)", http.StatusForbidden)
+			return
+		}
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "host not in allowlist"})
 		http.Error(w, "airbag: egress to "+host+" denied by policy (host not in allowlist)", http.StatusForbidden)
 		return
@@ -125,7 +135,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "secret-taint"})
 		http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted()+
-			"; only model APIs and package registries stay reachable", http.StatusForbidden)
+			"; only model APIs and cached packages stay reachable", http.StatusForbidden)
 		return
 	}
 	if p.Gate != nil {

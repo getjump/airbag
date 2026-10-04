@@ -44,6 +44,25 @@ type Mirror struct {
 	Cache  string
 	Log    *effects.Log
 	Client *http.Client
+	// Tainted reports what secret the session read, if any. A tainted
+	// session gets only what is already cached: no request it shapes
+	// leaves the machine.
+	Tainted func() string
+}
+
+func (m *Mirror) tainted() bool { return m.Tainted != nil && m.Tainted() != "" }
+
+// refuse answers a request a tainted session may not send upstream.
+func (m *Mirror) refuse(w http.ResponseWriter, url string) {
+	if m.Log != nil {
+		m.Log.Add(effects.Effect{Kind: "pkg.fetch", Target: url, Verdict: "deny", Reason: "secret-taint"})
+	}
+	http.Error(w, "airbag mirror: this session read a secret; only cached packages are served", http.StatusForbidden)
+}
+
+func (m *Mirror) cachePath(kind, url string) string {
+	sum := sha256.Sum256([]byte(url))
+	return filepath.Join(m.Cache, kind, hex.EncodeToString(sum[:]))
 }
 
 func New(cache string, log *effects.Log) *Mirror {
@@ -132,10 +151,27 @@ func (m *Mirror) pypi(w http.ResponseWriter, r *http.Request, p string) {
 
 // pass forwards a request whose answer may change, optionally rewriting
 // the body.
+// The last good answer is kept, so a tainted session can still install
+// what earlier sessions resolved.
 func (m *Mirror) pass(w http.ResponseWriter, r *http.Request, url string, rewrite func([]byte) []byte) {
+	meta := m.cachePath("meta", url)
+	if m.tainted() {
+		body, err := os.ReadFile(meta)
+		if err != nil {
+			m.refuse(w, url)
+			return
+		}
+		if ct, err := os.ReadFile(meta + ".type"); err == nil {
+			w.Header().Set("Content-Type", string(ct))
+		}
+		_, _ = w.Write(body)
+		return
+	}
 	req, _ := http.NewRequestWithContext(r.Context(), r.Method, url, nil)
-	for _, h := range []string{"Accept", "Accept-Encoding", "User-Agent", "If-None-Match", "If-Modified-Since"} {
-		if v := r.Header.Get(h); v != "" && !(h == "Accept-Encoding" && rewrite != nil) {
+	// Accept-Encoding is left to the transport, so bodies arrive plain
+	// and can be rewritten and kept.
+	for _, h := range []string{"Accept", "User-Agent", "If-None-Match", "If-Modified-Since"} {
+		if v := r.Header.Get(h); v != "" {
 			req.Header.Set(h, v)
 		}
 	}
@@ -155,6 +191,11 @@ func (m *Mirror) pass(w http.ResponseWriter, r *http.Request, url string, rewrit
 		resp.Header.Del("Content-Length")
 		resp.Header.Del("Content-Encoding")
 	}
+	if resp.StatusCode == http.StatusOK && r.Method == http.MethodGet && resp.Header.Get("Content-Encoding") == "" {
+		if writeAtomic(meta, body) == nil {
+			_ = writeAtomic(meta+".type", []byte(resp.Header.Get("Content-Type")))
+		}
+	}
 	for _, h := range []string{"Content-Type", "Content-Encoding", "ETag", "Last-Modified", "Cache-Control"} {
 		if v := resp.Header.Get(h); v != "" {
 			w.Header().Set(h, v)
@@ -166,10 +207,13 @@ func (m *Mirror) pass(w http.ResponseWriter, r *http.Request, url string, rewrit
 
 // cached serves an immutable artifact from the cache, fetching it once.
 func (m *Mirror) cached(w http.ResponseWriter, r *http.Request, registry, url, what string) {
-	sum := sha256.Sum256([]byte(url))
-	path := filepath.Join(m.Cache, registry, hex.EncodeToString(sum[:]))
+	path := m.cachePath(registry, url)
 	hit := true
 	if _, err := os.Stat(path); err != nil {
+		if m.tainted() {
+			m.refuse(w, url)
+			return
+		}
 		hit = false
 		resp, err := m.Client.Get(url)
 		if err != nil {
@@ -211,4 +255,21 @@ func (m *Mirror) cached(w http.ResponseWriter, r *http.Request, registry, url, w
 		m.Log.Add(effects.Effect{Kind: "pkg.fetch", Target: what, Verdict: "allow", Reason: reason})
 	}
 	http.ServeFile(w, r, path)
+}
+
+func writeAtomic(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".dl-*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	tmp.Close()
+	return os.Rename(tmp.Name(), path)
 }
