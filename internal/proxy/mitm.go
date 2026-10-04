@@ -151,21 +151,18 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 	_ = tconn.SetDeadline(time.Time{})
 
 	check := !p.Allow.explicitIP(host)
-	// The Host the upstream sees is always the one the tunnel was opened
-	// to, spelled one way: a virtual-host router that tells
-	// "api.github.com." from "api.github.com" must not be handed the
+	// The upstream sees the bound host spelled one way, in SNI and Host,
+	// whatever spelling the agent used in CONNECT or Host: a router that
+	// tells "API.github.com." from "api.github.com" must not be handed the
 	// agent's spelling along with the real value.
-	canonical := host
-	if _, port, _ := net.SplitHostPort(target); port != "443" {
-		canonical = target
-	}
+	name, canonical := upstreamHost(target)
 	tr := &http.Transport{
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			c, err := p.dial(target, check)
 			if err != nil {
 				return nil, err
 			}
-			tc := tls.Client(c, &tls.Config{ServerName: host, RootCAs: p.UpstreamRoots, NextProtos: []string{"http/1.1"}, MinVersion: tls.VersionTLS12})
+			tc := tls.Client(c, &tls.Config{ServerName: name, RootCAs: p.UpstreamRoots, NextProtos: []string{"http/1.1"}, MinVersion: tls.VersionTLS12})
 			if err := tc.HandshakeContext(ctx); err != nil {
 				c.Close()
 				return nil, err
@@ -320,6 +317,21 @@ func (l *oneConn) Close() error {
 }
 
 func (l *oneConn) Addr() net.Addr { return l.c.LocalAddr() }
+
+// upstreamHost spells the CONNECT target one way: the name in lower
+// case without a trailing dot, and the Host header, which adds brackets
+// for IPv6 and the port when it is not 443.
+func upstreamHost(target string) (name, hostHeader string) {
+	h, port := creds.SplitHost(target)
+	name = strings.ToLower(strings.TrimSuffix(h, "."))
+	if port == "443" {
+		if strings.Contains(name, ":") {
+			return name, "[" + name + "]"
+		}
+		return name, name
+	}
+	return name, net.JoinHostPort(name, port)
+}
 
 // sameHost reports whether a request's Host header names the CONNECT
 // target: the same name, case and a trailing dot aside, and the same

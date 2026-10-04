@@ -251,3 +251,17 @@ func TestInterceptSendsCanonicalHost(t *testing.T) {
 		t.Fatalf("status %d, upstream saw Host %q, want %q", resp.StatusCode, seen, target)
 	}
 }
+
+func TestUpstreamHost(t *testing.T) {
+	for _, c := range []struct{ target, name, host string }{
+		{"API.GitHub.com.:443", "api.github.com", "api.github.com"},
+		{"api.github.com:443", "api.github.com", "api.github.com"},
+		{"Example.COM:8443", "example.com", "example.com:8443"},
+		{"[::1]:443", "::1", "[::1]"},
+		{"[::1]:8443", "::1", "[::1]:8443"},
+	} {
+		if name, host := upstreamHost(c.target); name != c.name || host != c.host {
+			t.Errorf("upstreamHost(%q) = %q, %q; want %q, %q", c.target, name, host, c.name, c.host)
+		}
+	}
+}
