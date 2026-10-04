@@ -92,7 +92,7 @@ your user name; read it before pasting.
 | N2 | How much slower creating and walking a `node_modules`-sized tree is through the mount |
 | N3 | git works in a repository at the mount path (without your git config or `GIT_*` variables); the agents' versions there, if installed |
 | C1 | An APFS clone (`clonefile`, which fails where cloning is not supported, unlike `cp -c`, which falls back to a copy) of the same tree: if it is independent, a first prototype can branch the workspace by cloning it, with no NFS server, and review and apply by comparing the clone with the original. The speed is reported for `cp -c -R`, which the prototype runs and which clones file by file, and for one `clonefile` of the tree, each against `cp -R` |
-| T1 | A Go program inside the profile verifies TLS through the proxy without `com.apple.trustd.agent` (and with it, to compare) |
+| T1 | A Go program inside the profile verifies TLS through the proxy without `com.apple.trustd.agent` (and with it, to compare); skipped when the same request outside the profile does not get through |
 
 ### Order
 

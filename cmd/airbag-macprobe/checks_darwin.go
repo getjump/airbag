@@ -444,7 +444,10 @@ func checkClone(p *probe) Result {
 }
 
 // T1: a Go program inside the profile verifies TLS through the proxy
-// without the trustd service; with it as the comparison.
+// without the trustd service; with it as the comparison. The same
+// request outside the profile goes first, as the control: when it does
+// not get through (offline, the endpoint down, a proxy needed), the
+// profile would not be what decides, and T1 is skipped.
 func checkTLS(p *probe) Result {
 	r := Result{ID: "T1", Name: "Go TLS through the proxy without trustd"}
 	if p.opts.noNet {
@@ -460,24 +463,28 @@ func checkTLS(p *probe) Result {
 		return fail(r, err)
 	}
 	defer px.Close()
-	attempt := func(trustd bool) (bool, string) {
-		prof := Profile{Write: []string{p.dir}, Ports: []int{px.Port()}, Trustd: trustd}
-		cmd := exec.Command("/usr/bin/sandbox-exec", "-p", prof.String(), exe, tlsClientArg, "https://proxy.golang.org/")
+	// attempt runs the TLS client through the proxy, inside prof, or
+	// outside any profile when prof is nil.
+	attempt := func(prof *Profile) tlsTry {
+		args := []string{exe, tlsClientArg, "https://proxy.golang.org/"}
+		if prof != nil {
+			args = append([]string{"/usr/bin/sandbox-exec", "-p", prof.String()}, args...)
+		}
+		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Env = append(viaProxy(os.Environ(), px.Port()), "TMPDIR="+p.dir)
 		out, _ := cmd.CombinedOutput()
-		return strings.Contains(string(out), "tls=ok"), strings.TrimSpace(string(out))
+		return tlsTry{ok: strings.Contains(string(out), "tls=ok"), out: strings.TrimSpace(string(out))}
 	}
-	okWithout, outWithout := attempt(false)
-	okWith, outWith := attempt(true)
-	r.Detail = "without trustd: " + outWithout + "\nwith trustd: " + outWith + "\nproxy saw: " + strings.Join(px.Seen(), ", ")
-	switch {
-	case okWithout:
-		r.Status, r.Reason = Pass, "certificate verified without trustd"
-	case okWith:
-		r.Status, r.Reason = Fail, "works only with trustd allowed (as sandbox-runtime reports)"
-	default:
-		r.Status, r.Reason = Fail, "fails with and without trustd: "+firstLine(outWith)
+	control := attempt(nil)
+	r.Detail = "control, outside the profile: " + control.out
+	var without, with tlsTry
+	if control.ok {
+		without = attempt(&Profile{Write: []string{p.dir}, Ports: []int{px.Port()}})
+		with = attempt(&Profile{Write: []string{p.dir}, Ports: []int{px.Port()}, Trustd: true})
+		r.Detail += "\nwithout trustd: " + without.out + "\nwith trustd: " + with.out
 	}
+	r.Detail += "\nproxy saw: " + strings.Join(px.Seen(), ", ")
+	r.Status, r.Reason = tlsVerdict(control, without, with)
 	return r
 }
 

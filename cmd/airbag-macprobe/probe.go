@@ -107,6 +107,30 @@ func tlsClient(url string) int {
 	return 0
 }
 
+// tlsTry is one run of the TLS client: whether it printed tls=ok, and
+// what it printed.
+type tlsTry struct {
+	ok  bool
+	out string
+}
+
+// tlsVerdict is T1's status and reason from its control outside the
+// profile and its requests inside it without and with trustd. Only a
+// control that got through makes the other two say something about the
+// profile; without one, T1 is skipped.
+func tlsVerdict(control, without, with tlsTry) (Status, string) {
+	switch {
+	case !control.ok:
+		return Info, "skipped: the control request did not get through: " + orNone(firstLine(control.out))
+	case without.ok:
+		return Pass, "certificate verified without trustd"
+	case with.ok:
+		return Fail, "works only with trustd allowed (as sandbox-runtime reports)"
+	default:
+		return Fail, "fails with and without trustd: " + firstLine(with.out)
+	}
+}
+
 // homeDir is $HOME, or the account's home when HOME is unset or not a
 // usable path (some launchd and CI jobs): S1 writes a file there, and
 // the report shortens it to "~", which an empty or "/" home would put

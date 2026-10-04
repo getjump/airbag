@@ -430,3 +430,30 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 		t.Error("a new client connected after Close")
 	}
 }
+
+// T1 judges the profile only when the control outside it got through;
+// otherwise it is skipped, whatever the two requests inside said.
+func TestTLSVerdict(t *testing.T) {
+	ok := tlsTry{ok: true, out: "tls=ok 200 OK"}
+	no := tlsTry{out: "tls=error x509: certificate signed by unknown authority"}
+	down := tlsTry{out: "tls=error Get \"https://proxy.golang.org/\": Forbidden\nmore"}
+	for _, c := range []struct {
+		control, without, with tlsTry
+		status                 Status
+		reason                 string
+	}{
+		{ok, ok, ok, Pass, "certificate verified without trustd"},
+		{ok, ok, no, Pass, "certificate verified without trustd"},
+		{ok, no, ok, Fail, "works only with trustd allowed (as sandbox-runtime reports)"},
+		{ok, no, no, Fail, "fails with and without trustd: " + no.out},
+		{down, no, no, Info, "skipped: the control request did not get through: tls=error Get \"https://proxy.golang.org/\": Forbidden"},
+		{down, tlsTry{}, tlsTry{}, Info, "skipped: the control request did not get through: tls=error Get \"https://proxy.golang.org/\": Forbidden"},
+		{down, ok, ok, Info, "skipped: the control request did not get through: tls=error Get \"https://proxy.golang.org/\": Forbidden"},
+		{tlsTry{}, tlsTry{}, tlsTry{}, Info, "skipped: the control request did not get through: none"},
+	} {
+		s, r := tlsVerdict(c.control, c.without, c.with)
+		if s != c.status || r != c.reason {
+			t.Errorf("tlsVerdict(%v, %v, %v) = %s %q, want %s %q", c.control.ok, c.without.ok, c.with.ok, s, r, c.status, c.reason)
+		}
+	}
+}
