@@ -704,3 +704,55 @@ func TestRollbackKeepsUserFileNamedLikeTemp(t *testing.T) {
 		}
 	}
 }
+
+// A replaced directory with no previous version (what it replaced was
+// gone by the time of the apply) is removed by rollback only once it is
+// empty: a file the user adds to it afterwards survives.
+func TestRollbackKeepsFileInReplacedDirWithoutPrevious(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	d := filepath.Join(ws, "d")
+	for p, data := range map[string]string{d: "user file\n", filepath.Join(s.CloneDir(), "d", "inner.txt"): "agent\n"} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+	cs := mustScan(t, s)
+	if err := os.Remove(d); err != nil { // gone before the apply
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, cs, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	g, _ := loadGeneration(filepath.Join(s.Dir, "undo", "1"))
+	if len(g.Entries) == 0 || g.Entries[0].Path != d || g.Entries[0].Kind != review.Replaced || g.Entries[0].Saved != "" {
+		t.Fatalf("setup: want a replaced %s with no previous version: %+v", d, g.Entries)
+	}
+	added := filepath.Join(d, "user.txt")
+	if err := os.WriteFile(added, []byte("added after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, added); got != "added after\n" {
+		t.Fatalf("rollback lost a file added after the apply: %s = %q\n%s", added, got, out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(d, "inner.txt")); err == nil {
+		t.Errorf("the agent's inner.txt was not rolled back")
+	}
+}

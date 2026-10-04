@@ -280,7 +280,10 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 				return left, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err)
 			}
 		}
-		if e.Kind == review.Added && e.Type == fs.ModeDir && e.Saved == "" {
+		// A directory with nothing before it, added or replacing what was
+		// gone by the time of the apply, is one the apply made: it goes
+		// with them, only once it is empty.
+		if e.Type == fs.ModeDir && e.Saved == "" {
 			dirs = append(dirs, e.Path)
 			continue
 		}
