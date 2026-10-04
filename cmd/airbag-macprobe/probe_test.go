@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -139,24 +140,15 @@ func TestNFSServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer srv.Close()
-	c, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
+	path, err := srv.Arm()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
-	m := nfsc.Mount{Client: c}
-	target, err := m.Mount("/", rpc.AuthNull)
+	target, err := nfsMount(t, srv, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = m.Unmount() }()
-	f, err := target.Open("/hello.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := io.ReadAll(f)
-	f.Close()
-	if string(b) != "hi\n" {
+	if b := readNFS(t, target, "/hello.txt"); b != "hi\n" {
 		t.Fatalf("read %q", b)
 	}
 	w, err := target.OpenFile("/new.txt", 0o644)
@@ -226,7 +218,8 @@ func TestGitEnv(t *testing.T) {
 }
 
 // The export holds every path inside its directory: through "..", an
-// absolute path or a symlink the agent (or any local NFS client) made,
+// absolute path or a symlink that a client of the export made (the
+// probe's mount, or a process that mounted the armed path first),
 // nothing outside can be read, written or changed.
 func TestExportStaysInside(t *testing.T) {
 	base := t.TempDir()
@@ -266,5 +259,174 @@ func TestExportStaysInside(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(secret); string(b) != "s3cret" || st.Mode().Perm() != 0o600 || st.ModTime().Unix() == 0 {
 		t.Fatalf("the file outside changed: %q %v %v", b, st.Mode(), st.ModTime())
+	}
+}
+
+// nfsMount sends srv a MOUNT for path, on a connection of its own,
+// through an NFS client library.
+func nfsMount(t *testing.T, srv *nfsServer, path string) (*nfsc.Target, error) {
+	t.Helper()
+	c, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
+	m := nfsc.Mount{Client: c}
+	return m.Mount(path, rpc.AuthNull)
+}
+
+func readNFS(t *testing.T, target *nfsc.Target, name string) string {
+	t.Helper()
+	f, err := target.Open(name)
+	if err != nil {
+		t.Fatalf("open %s: %v", name, err)
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(f)
+	return string(b)
+}
+
+// refused fails t unless err is the server's access error for a MOUNT.
+func refused(t *testing.T, what string, err error) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "MNT3ERR_ACCES") {
+		t.Errorf("%s: want MNT3ERR_ACCES, got %v", what, err)
+	}
+}
+
+// The server grants one MOUNT: the first for the armed path. It refuses
+// one before Arm, one for any other path, a second one for the armed
+// path, and one from a connection opened before Arm; and it does not
+// arm again after the grant.
+func TestNFSGrantsOneMount(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := startNFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	_, err = nfsMount(t, srv, "/")
+	refused(t, "Mount(/) before Arm", err)
+	early, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer early.Close()
+	path, err := srv.Arm()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/wrong", "/", path + "/", path[:len(path)-1], strings.ToLower(path)} {
+		_, err := nfsMount(t, srv, p)
+		refused(t, "Mount("+p+")", err)
+	}
+	target, err := nfsMount(t, srv, path)
+	if err != nil {
+		t.Fatalf("the armed path was refused: %v", err)
+	}
+	if b := readNFS(t, target, "/hello.txt"); b != "hi\n" {
+		t.Fatalf("read %q", b)
+	}
+	_, err = nfsMount(t, srv, path)
+	refused(t, "a second Mount of the armed path", err)
+	m := nfsc.Mount{Client: early}
+	_, err = m.Mount(path, rpc.AuthNull)
+	refused(t, "Mount of the armed path on a connection opened before Arm", err)
+	if p, err := srv.Arm(); err == nil {
+		t.Errorf("Arm after the grant gave %q", p)
+	}
+}
+
+// After Seal the client that is already connected (the probe's mount)
+// still works, and no new one gets in.
+func TestNFSSeal(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := startNFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	path, err := srv.Arm()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := nfsMount(t, srv, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Seal()
+	if b := readNFS(t, target, "/hello.txt"); b != "hi\n" {
+		t.Fatalf("the open client lost the export: read %q", b)
+	}
+	if c2, err := net.DialTimeout("tcp", srv.l.Addr().String(), 2*time.Second); err == nil {
+		c2.Close()
+		t.Fatal("a new client connected after Seal")
+	}
+}
+
+// When the probe's mount does not come up, Close ends every connection
+// the server took: an idle one is cut off, the client that was granted
+// the export reads nothing more, and no new client connects.
+func TestNFSCloseDropsConnections(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := startNFS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	addr := srv.l.Addr().String()
+	idle, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idle.Close()
+	path, err := srv.Arm()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The server accepts in order, so the idle connection, dialled
+	// first, is taken by the time this mount is answered.
+	target, err := nfsMount(t, srv, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := readNFS(t, target, "/hello.txt"); b != "hi\n" {
+		t.Fatalf("read %q", b)
+	}
+	_ = srv.Close()
+	_ = idle.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := idle.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("an idle connection stayed open after Close (read: %v)", err)
+	}
+	// The client library reconnects and retries for about 10 s before it
+	// gives up, so a read that has not come back within 2 s counts as one
+	// that got nothing.
+	got := make(chan error, 1)
+	go func() {
+		f, err := target.Open("/hello.txt")
+		if err == nil {
+			f.Close()
+		}
+		got <- err
+	}()
+	select {
+	case err := <-got:
+		if err == nil {
+			t.Error("the client granted the export still reads it after Close")
+		}
+	case <-time.After(2 * time.Second):
+	}
+	if c, err := net.DialTimeout("tcp", addr, 2*time.Second); err == nil {
+		c.Close()
+		t.Error("a new client connected after Close")
 	}
 }

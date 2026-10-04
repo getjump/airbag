@@ -235,13 +235,26 @@ func checkNFSMount(p *probe) Result {
 	p.srv = srv
 	var tried []string
 	for _, o := range []string{"nolocks", "locallocks"} {
+		// Each attempt gets a new random path, granted once. Once a grant
+		// has gone to an attempt that did not mount, Arm refuses: whoever
+		// had it would keep it on this server, so there is no next try.
+		path, err := srv.Arm()
+		if err != nil {
+			tried = append(tried, "not tried with "+o+": "+err.Error())
+			break
+		}
 		opts := fmt.Sprintf("%s,vers=3,tcp,port=%d,mountport=%d,noresvport,soft,timeo=50,retrans=2", o, srv.Port(), srv.Port())
-		out, err := run(45*time.Second, "", "/sbin/mount_nfs", "-o", opts, "127.0.0.1:/", p.mnt)
+		out, err := run(45*time.Second, "", "/sbin/mount_nfs", "-o", opts, "127.0.0.1:"+path, p.mnt)
 		tried = append(tried, fmt.Sprintf("mount_nfs -o %s: %s", opts, orNone(strings.TrimSpace(out+" "+errString(err)))))
 		if err == nil || isMount(p.mnt) {
 			p.mounted = true
 			break
 		}
+	}
+	if p.mounted {
+		srv.Seal() // the mount has the one grant and its connection; no new connection gets in
+	} else {
+		_ = srv.Close() // and every connection it took: no session outlives a mount that did not come up
 	}
 	r.Detail = strings.Join(tried, "\n")
 	if !p.mounted {
@@ -291,6 +304,15 @@ func checkNFSSpeed(p *probe) Result {
 	}
 	direct := filepath.Join(p.dir, "direct")
 	viaNFS := filepath.Join(p.mnt, "tree")
+	// Mkdir, not MkdirAll: a tree, or a symlink, already in its place is
+	// not the probe's, and N2 stops rather than write into it. Both roots
+	// are made before the timing, so it compares the same work.
+	if err := os.Mkdir(direct, 0o755); err != nil {
+		return fail(r, err)
+	}
+	if err := os.Mkdir(viaNFS, 0o755); err != nil {
+		return fail(r, fmt.Errorf("creating through the mount: %w", err))
+	}
 	cd, err := timed(func() error { return makeTree(direct, p.opts.files) })
 	if err != nil {
 		return fail(r, err)
@@ -324,7 +346,9 @@ func checkGitAtMount(p *probe) Result {
 		return r
 	}
 	repo := filepath.Join(p.mnt, "repo")
-	if err := os.MkdirAll(repo, 0o755); err != nil {
+	// Mkdir, not MkdirAll: a repo, or a symlink, already there is not the
+	// probe's, and git does not run in it.
+	if err := os.Mkdir(repo, 0o755); err != nil {
 		return fail(r, err)
 	}
 	var log []string

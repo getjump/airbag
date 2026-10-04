@@ -64,9 +64,14 @@ Differences to accept:
 inside a temporary directory and removes it, plus one dot file in `~` that it
 removes at once, and mounts the NFS export under that directory for the run;
 if the export will not unmount, it says so, leaves the directory and exits 1
-(130 when interrupted). While it runs, its NFS server answers any local client,
-for the temporary export only. N3 runs `claude --version` and `codex --version`
-if they are installed, which may write their own files:
+(130 when interrupted). Its NFS server, on a localhost port, grants one mount,
+on a random path, to the probe's own `mount_nfs`, refuses every other mount
+request, and takes no new connection once that mount is up. The path is
+visible in the process list while `mount_nfs` runs: a local process that reads
+it and mounts first gets the export until the probe's own mount fails. When
+the probe's mount does not come up, for that or any other reason, N1 fails and
+the server closes, with every connection it took. N3 runs `claude --version`
+and `codex --version` if they are installed, which may write their own files:
 
 ```console
 $ go run ./cmd/airbag-macprobe            # one line per check
