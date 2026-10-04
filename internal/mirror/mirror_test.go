@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,5 +112,45 @@ github.com/BurntSushi/toml v1.4.0/go.mod h1:bbb=
 	}
 	if _, ok := p.Has("https://registry.npmjs.org/z/-/z-9.tgz"); ok {
 		t.Error("a lock file inside node_modules counted")
+	}
+}
+
+// A path from the sandbox never changes the host the mirror fetches
+// from: "@host" or ".host" right after a registry's name would.
+func TestFetchesOnlyFromRegistries(t *testing.T) {
+	reg := &fakeRegistry{}
+	m := New(t.TempDir(), nil)
+	m.Client = &http.Client{Transport: reg}
+	for _, p := range []string{
+		"/go/sumdb/sum.golang.org@example.com/lookup/x",
+		"/go/sumdb/sum.golang.org.example.com/lookup/x",
+		"/go/sumdb/sum.golang.org:8443/lookup/x",
+		"/go/sumdb/sum.golang.org/lookup/x@v1.0.0",
+		"/npm/left-pad",
+	} {
+		m.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", Base+p, nil))
+	}
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest("GET", Base+"/go/sumdb/sum.golang.org/supported", nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("supported: %d", w.Code)
+	}
+	var sumdb int
+	for _, c := range reg.calls {
+		u, err := url.Parse(c)
+		if err != nil || u.User != nil || !registries[u.Host] {
+			t.Errorf("fetched from %s", c)
+		}
+		if u.Host == "sum.golang.org" {
+			sumdb++
+		}
+	}
+	if sumdb != 1 || len(reg.calls) != 5 {
+		t.Errorf("upstream calls: %v", reg.calls)
+	}
+	for _, raw := range []string{"https://sum.golang.org@example.com/x", "https://sum.golang.org.example.com/x", "http://pypi.org/simple/", "https://pypi.org:8443/simple/"} {
+		if fromRegistry(raw) {
+			t.Errorf("fromRegistry(%q) = true", raw)
+		}
 	}
 }

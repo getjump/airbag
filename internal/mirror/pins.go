@@ -165,7 +165,7 @@ func eachLine(path string, f func(string)) {
 	if err != nil {
 		return
 	}
-	defer fh.Close()
+	defer func() { _ = fh.Close() }() // read only
 	sc := bufio.NewScanner(fh)
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	for sc.Scan() {
