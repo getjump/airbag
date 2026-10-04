@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"os/user"
 	"runtime"
 	"strings"
 	"time"
@@ -12,12 +13,15 @@ import (
 
 // Usage: airbag-macprobe [-json] [-v] [-keep] [-files N] [-no-net]
 //
-// The probe needs no root and writes only inside a temporary directory,
-// which it removes at the end (unless -keep, or when the export under it
-// would not unmount: then it says so and exits 1). It mounts an NFS export
-// from a server inside this process under that directory and unmounts
-// it. With -no-net it skips the one check that reaches the internet
-// (Go TLS through a local proxy to proxy.golang.org).
+// The probe needs no root. It writes inside a temporary directory, which
+// it removes at the end (unless -keep, or when the export under it would
+// not unmount: then it says so and exits 1), and one dot file in the home
+// directory that S1 removes at once. It mounts an NFS export from a
+// server inside this process under that directory and unmounts it. N3
+// runs git with no user config, and claude and codex --version if they
+// are installed. With -no-net it skips what reaches the internet (S1's
+// control on 1.1.1.1, and T1: Go TLS through a local proxy to
+// proxy.golang.org).
 type options struct {
 	json, verbose, keep, noNet bool
 	files                      int
@@ -36,6 +40,10 @@ func main() {
 	flag.IntVar(&o.files, "files", 5000, "files in the tree the speed checks create")
 	flag.Parse()
 
+	if o.files < 1 {
+		fmt.Fprintln(os.Stderr, "airbag-macprobe: -files must be at least 1")
+		os.Exit(2)
+	}
 	if runtime.GOOS != "darwin" {
 		fmt.Fprintln(os.Stderr, "airbag-macprobe: runs on macOS only")
 		os.Exit(2)
@@ -63,7 +71,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "airbag-macprobe:", err)
 		os.Exit(1)
 	}
-	rp := strings.NewReplacer(dir, "$TMP", resolve(dir), "$TMP", home, "~")
+	pairs := []string{dir, "$TMP", resolve(dir), "$TMP", home, "~"}
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		pairs = append(pairs, "mounted by "+u.Username, "mounted by $USER") // mount(8) names the user
+	}
+	rp := strings.NewReplacer(pairs...)
 
 	p := &probe{opts: o, dir: resolve(dir), home: home}
 	interrupted := make(chan os.Signal, 2)
@@ -84,6 +96,13 @@ func main() {
 			default:
 			}
 			r := redact(c(p), rp)
+			// Ctrl-C reaches the check's commands too, so its result is
+			// the interruption's, not the Mac's.
+			select {
+			case <-stop:
+				r.Status, r.Reason = Info, "interrupted: "+r.Reason
+			default:
+			}
 			rep.Add(r)
 			if !o.json {
 				writeResult(os.Stdout, r, o.verbose)

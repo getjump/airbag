@@ -198,3 +198,27 @@ func TestHomeDir(t *testing.T) {
 		t.Errorf("HOME=/Users/me: homeDir() = %q, %v", got, err)
 	}
 }
+
+func TestViolationLines(t *testing.T) {
+	const f = ".airbag-macprobe-1"
+	out := `Filtering the log data using "eventMessage CONTAINS \".airbag-macprobe-1\""
+{"eventMessage":"Sandbox: sh(42) deny(1) file-write-create /Users/me/.airbag-macprobe-1","subsystem":""}
+{"eventMessage":"Sandbox: sh(42) deny(1) file-write-create <private>"}
+{"eventMessage":"opened /Users/me/.airbag-macprobe-1"}
+{"count":3,"finished":1}`
+	hits := violationLines(out, f)
+	if len(hits) != 1 || !strings.Contains(hits[0], "deny(1) file-write-create /Users/me/"+f) {
+		t.Fatalf("hits = %q", hits)
+	}
+	if hits := violationLines(`Filtering the log data using "eventMessage CONTAINS \".airbag-macprobe-1\""`, f); len(hits) != 0 {
+		t.Fatalf("the header counted: %q", hits)
+	}
+}
+
+func TestGitEnv(t *testing.T) {
+	env := gitEnv([]string{"HOME=/h", "GIT_DIR=/real/.git", "GIT_WORK_TREE=/real", "PATH=/bin"})
+	want := []string{"HOME=/h", "PATH=/bin", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+	if strings.Join(env, " ") != strings.Join(want, " ") {
+		t.Fatalf("got %q, want %q", env, want)
+	}
+}

@@ -31,22 +31,37 @@ func systemVersion() string {
 	return "macOS " + strings.TrimSpace(v) + " " + strings.TrimSpace(m)
 }
 
-// cleanup unmounts the export and stops its server. When neither umount
-// nor diskutil can unmount it, the mount and the server stay and the
-// failure is returned.
+// cleanup unmounts the export and stops its server. It asks the kernel
+// whether the mount point is still one rather than trusting p.mounted: a
+// mount_nfs killed by Ctrl-C or its timeout can have mounted anyway, and
+// two attempts can stack. When neither umount nor diskutil can unmount
+// it, the mount and the server stay and the failure is returned.
 func (p *probe) cleanup() error {
-	if p.mounted {
+	for i := 0; p.mnt != "" && isMount(p.mnt); i++ {
+		if i == 3 {
+			return fmt.Errorf("%s is still mounted after three unmounts", p.mnt)
+		}
 		if _, err := run(20*time.Second, "", "/sbin/umount", p.mnt); err != nil {
 			if out, err := run(20*time.Second, "", "/usr/sbin/diskutil", "unmount", "force", p.mnt); err != nil {
 				return fmt.Errorf("cannot unmount %s: %v: %s", p.mnt, err, firstLine(out))
 			}
 		}
-		p.mounted = false
 	}
+	p.mounted = false
 	if p.srv != nil {
 		_ = p.srv.Close()
 	}
 	return nil
+}
+
+// isMount reports whether p is a mount point: statfs names it as the
+// directory its filesystem is mounted on.
+func isMount(p string) bool {
+	var st unix.Statfs_t
+	if err := unix.Statfs(p, &st); err != nil {
+		return false
+	}
+	return unix.ByteSliceToString(st.Mntonname[:]) == p
 }
 
 // S1: a deny-first profile around a shell: writes only where allowed,
@@ -101,6 +116,10 @@ func checkSeatbelt(p *probe) Result {
 	}
 	p.tag = fmt.Sprintf("airbag-macprobe-%d", time.Now().UnixNano())
 	homeFile := filepath.Join(p.home, "."+p.tag)
+	// The home directory must be writable outside the profile, or "no"
+	// inside it would say nothing about Seatbelt.
+	homeWritable := writeFile(homeFile, "x\n") == nil
+	_ = os.Remove(homeFile)
 	prof := Profile{Tag: p.tag, Write: []string{ws}, NoRead: []string{secret}, Ports: []int{px.Port()}}
 	script := fmt.Sprintf(`try() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
 echo "write-workspace=$(try sh -c 'echo x > %[1]s/f')"
@@ -130,6 +149,9 @@ echo "connect-proxy=$(try /usr/bin/nc -z -G 3 127.0.0.1 %[4]d)"
 	if internet {
 		want["connect-internet"] = "no"
 	}
+	if !homeWritable {
+		delete(want, "write-home")
+	}
 	bad := mismatches(markers(out), want)
 	if len(bad) > 0 {
 		r.Status, r.Reason = Fail, strings.Join(bad, ", ")
@@ -151,19 +173,15 @@ func checkViolationLog(p *probe) Result {
 		return r
 	}
 	time.Sleep(2 * time.Second) // the log is written asynchronously
-	pred := fmt.Sprintf(`eventMessage CONTAINS %q`, "."+p.tag)
-	out, err := run(90*time.Second, "", "/usr/bin/log", "show", "--last", "5m", "--style", "compact", "--predicate", pred)
+	file := "." + p.tag         // S1's denied write in the home directory
+	pred := fmt.Sprintf(`eventMessage CONTAINS %q`, file)
+	out, err := run(90*time.Second, "", "/usr/bin/log", "show", "--last", "5m", "--style", "ndjson", "--predicate", pred)
 	r.Detail = clip(out, 4000)
 	if err != nil {
 		r.Status, r.Reason = Fail, "log show failed: "+firstLine(out+" "+err.Error())
 		return r
 	}
-	var hits []string
-	for _, l := range strings.Split(out, "\n") {
-		if strings.Contains(l, p.tag) {
-			hits = append(hits, l)
-		}
-	}
+	hits := violationLines(out, file)
 	if len(hits) == 0 {
 		r.Status, r.Reason = Fail, "no log line names the denied path (redacted as <private>, or not logged)"
 		return r
@@ -197,7 +215,7 @@ func checkNFSMount(p *probe) Result {
 		opts := fmt.Sprintf("%s,vers=3,tcp,port=%d,mountport=%d,noresvport,soft,timeo=50,retrans=2", o, srv.Port(), srv.Port())
 		out, err := run(45*time.Second, "", "/sbin/mount_nfs", "-o", opts, "127.0.0.1:/", p.mnt)
 		tried = append(tried, fmt.Sprintf("mount_nfs -o %s: %s", opts, orNone(strings.TrimSpace(out+" "+errString(err)))))
-		if err == nil {
+		if err == nil || isMount(p.mnt) {
 			p.mounted = true
 			break
 		}
@@ -224,8 +242,11 @@ func checkNFSMount(p *probe) Result {
 			return r
 		}
 	}
-	if _, err := os.Stat(filepath.Join(export, "renamed.txt")); err != nil {
-		r.Status, r.Reason = Fail, "a write through the mount did not reach the export"
+	b, err = os.ReadFile(filepath.Join(export, "renamed.txt"))
+	st, derr := os.Stat(filepath.Join(export, "a", "b"))
+	_, gerr := os.Lstat(filepath.Join(export, "hello.txt"))
+	if err != nil || string(b) != "new\n" || derr != nil || !st.IsDir() || !errors.Is(gerr, os.ErrNotExist) {
+		r.Status, r.Reason = Fail, "a change through the mount did not reach the export as made"
 		return r
 	}
 	mnt, _ := run(10*time.Second, "", "/sbin/mount")
@@ -284,14 +305,18 @@ func checkGitAtMount(p *probe) Result {
 		return fail(r, err)
 	}
 	var log []string
+	env := gitEnv(os.Environ())
+	git := func(args ...string) (string, error) {
+		return runEnv(60*time.Second, repo, env, "git", append(append([]string{}, gitArgs...), args...)...)
+	}
 	for _, args := range [][]string{
 		{"init", "-q"},
-		{"-c", "user.email=probe@example.com", "-c", "user.name=probe", "commit", "-q", "--allow-empty", "-m", "empty"},
+		{"commit", "-q", "--allow-empty", "-m", "empty"},
 	} {
-		out, err := run(60*time.Second, repo, "git", args...)
+		out, err := git(args...)
 		log = append(log, "git "+strings.Join(args, " ")+": "+orNone(strings.TrimSpace(out+" "+errString(err))))
 		if err != nil {
-			r.Status, r.Reason, r.Detail = Fail, "git "+args[len(args)-1]+" failed", strings.Join(log, "\n")
+			r.Status, r.Reason, r.Detail = Fail, "git "+args[0]+" failed", strings.Join(log, "\n")
 			return r
 		}
 	}
@@ -300,11 +325,11 @@ func checkGitAtMount(p *probe) Result {
 	}
 	for _, args := range [][]string{
 		{"add", "-A"},
-		{"-c", "user.email=probe@example.com", "-c", "user.name=probe", "commit", "-qm", "a"},
+		{"commit", "-qm", "a"},
 		{"status", "--porcelain"},
 		{"log", "--oneline"},
 	} {
-		out, err := run(60*time.Second, repo, "git", args...)
+		out, err := git(args...)
 		log = append(log, "git "+strings.Join(args, " ")+": "+orNone(strings.TrimSpace(out+" "+errString(err))))
 		if err != nil {
 			r.Status, r.Reason, r.Detail = Fail, "git "+args[0]+" failed", strings.Join(log, "\n")
@@ -347,6 +372,15 @@ func checkClone(p *probe) Result {
 	if err != nil {
 		return fail(r, err)
 	}
+	// What the prototype runs: cp clones file by file, so it pays per
+	// file where one clonefile call pays once for the tree.
+	tcc, err := timed(func() error {
+		_, err := run(5*time.Minute, "", "/bin/cp", "-c", "-R", src, filepath.Join(p.dir, "clone-cp"))
+		return err
+	})
+	if err != nil {
+		return fail(r, fmt.Errorf("cp -c -R: %w", err))
+	}
 	f := filepath.Join("node_modules", "pkg-000", "v0", "lib", "f00.js")
 	if err := writeFile(filepath.Join(cl, f), "changed\n"); err != nil {
 		return fail(r, err)
@@ -356,8 +390,9 @@ func checkClone(p *probe) Result {
 		return r
 	}
 	r.Status = Pass
-	r.Reason = fmt.Sprintf("clone is independent of the source; %.1fx faster than a plain copy", tp.Seconds()/tc.Seconds())
-	r.Numbers = []Number{{"clone", seconds(tc), "s"}, {"copy", seconds(tp), "s"}}
+	r.Reason = fmt.Sprintf("clone is independent of the source; cp -c -R (as the prototype) %.1fx and one clonefile %.1fx faster than cp -R",
+		tp.Seconds()/tcc.Seconds(), tp.Seconds()/tc.Seconds())
+	r.Numbers = []Number{{"clonefile", seconds(tc), "s"}, {"cp_c", seconds(tcc), "s"}, {"copy", seconds(tp), "s"}}
 	return r
 }
 

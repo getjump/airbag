@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -26,10 +27,16 @@ type probe struct {
 
 // run runs a command with a timeout and returns its combined output.
 func run(timeout time.Duration, dir string, name string, args ...string) (string, error) {
+	return runEnv(timeout, dir, nil, name, args...)
+}
+
+// runEnv is run with the environment env (nil: this process's).
+func runEnv(timeout time.Duration, dir string, env []string, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		err = fmt.Errorf("timed out after %s", timeout)
@@ -113,6 +120,43 @@ func homeDir() (string, error) {
 		return u.HomeDir, nil
 	}
 	return "", errors.New("no home directory: set HOME to your home")
+}
+
+// gitEnv is env for git in the probe's own repository: no GIT_* from
+// the caller (GIT_DIR would point git at the user's real repository), and
+// no system or global config (hooks, signing, templates).
+func gitEnv(env []string) []string {
+	var out []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+}
+
+// gitArgs are prepended to every git command the probe runs.
+var gitArgs = []string{"-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.email=probe@example.com", "-c", "user.name=probe"}
+
+// violationLines picks the Seatbelt denials that name file from the
+// output of `log show --style ndjson`: entries whose message is a
+// "deny" and contains file. Other lines, such as the "Filtering the log
+// data using ..." header that repeats the predicate, are not entries.
+func violationLines(out, file string) []string {
+	var hits []string
+	for _, l := range strings.Split(out, "\n") {
+		var e struct {
+			EventMessage string `json:"eventMessage"`
+		}
+		if json.Unmarshal([]byte(l), &e) != nil {
+			continue
+		}
+		if strings.Contains(e.EventMessage, "deny") && strings.Contains(e.EventMessage, file) {
+			hits = append(hits, e.EventMessage)
+		}
+	}
+	return hits
 }
 
 // viaProxy is env with every proxy setting Go reads replaced by one
