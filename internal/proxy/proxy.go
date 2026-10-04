@@ -128,6 +128,15 @@ func New(allow Allowlist, log *effects.Log) *Proxy {
 	}}
 }
 
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *Proxy) Serve(l net.Listener) error {
 	srv := &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second}
 	return srv.Serve(l)
@@ -137,6 +146,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Hostname()
 	if r.Method == http.MethodConnect {
 		host, _, _ = net.SplitHostPort(r.Host)
+	}
+	// From here on the host has one spelling, for the allowlist, the
+	// rules, the log and the dial: a rule on api.github.com must see
+	// "API.GITHUB.COM." as that host. Names must be ASCII (an IDN in its
+	// xn-- form): Go turns a Unicode name into an xn-- host of its own
+	// after checks that lower-cased it to an allowed one.
+	if !isASCII(host) {
+		p.Log.Add(effects.Effect{Kind: "net.egress", Target: clipTarget(r.Host), Verdict: "deny", Reason: "host name is not ASCII"})
+		http.Error(w, "airbag: host names must be ASCII; write an international name in its xn-- form", http.StatusBadRequest)
+		return
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if r.Method == http.MethodConnect {
+		_, port, _ := net.SplitHostPort(r.Host)
+		r.Host = net.JoinHostPort(host, port)
+	} else if port := r.URL.Port(); port != "" {
+		r.URL.Host = net.JoinHostPort(host, port)
+	} else if r.URL.Host != "" {
+		r.URL.Host = host
+		if strings.Contains(host, ":") {
+			r.URL.Host = "[" + host + "]"
+		}
 	}
 	target := r.Host
 	if p.Mirror != nil && host == "airbag.mirror" && r.Method != http.MethodConnect {

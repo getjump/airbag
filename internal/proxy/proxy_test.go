@@ -8,11 +8,13 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/policy"
 )
 
 func TestAllowlist(t *testing.T) {
@@ -262,5 +264,47 @@ func TestGuard(t *testing.T) {
 	}
 	if strings.Join(reasons, ",") != "address: loopback,port not allowed" {
 		t.Errorf("deny reasons = %v", reasons)
+	}
+}
+
+// Rules, the allowlist and the log see one spelling of the host: a rule
+// on api.example also stops "API.EXAMPLE.", and a name that is not
+// ASCII is refused before any check.
+func TestHostSpelledOneWay(t *testing.T) {
+	ws, dir := t.TempDir(), t.TempDir()
+	_ = os.WriteFile(filepath.Join(ws, "airbag.yaml"), []byte(`
+rules:
+  - name: no-api
+    when: effect.kind == "net.connect" && effect.target == "api.example"
+    verdict: deny
+    message: not this host
+`), 0o644)
+	pol, err := policy.Load(ws, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, path := newLog(t)
+	p := New(Allowlist{"api.example"}, log)
+	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	p.Gate = policy.NewGate(pol, dir)
+	for _, c := range []struct {
+		hostport string
+		code     int
+		body     string
+	}{
+		{"API.EXAMPLE.:443", http.StatusForbidden, "not this host"},
+		{"Api.Example:443", http.StatusForbidden, "not this host"},
+		{"ap\u0130.example:443", http.StatusBadRequest, "ASCII"},
+		{"\u212Aite.example:443", http.StatusBadRequest, "ASCII"},
+	} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, &http.Request{Method: http.MethodConnect, Host: c.hostport, URL: &url.URL{Host: c.hostport}})
+		if rec.Code != c.code || !strings.Contains(rec.Body.String(), c.body) {
+			t.Errorf("CONNECT %q: %d %q, want %d %q", c.hostport, rec.Code, rec.Body.String(), c.code, c.body)
+		}
+	}
+	effs, _ := effects.Read(path)
+	if len(effs) == 0 || effs[0].Target != "api.example:443" {
+		t.Fatalf("effects = %+v, want the first logged as api.example:443", effs)
 	}
 }

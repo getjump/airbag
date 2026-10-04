@@ -220,7 +220,8 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 		// several sites (a CDN) routes by the Host header: a request
 		// naming another site there would carry the real value to it
 		// (domain fronting). The value goes only to the host it is bound to.
-		if !sameHost(req.Host, target) {
+		// An HTTP/1.0 request may name no host; it goes to the bound one.
+		if req.Host != "" && !sameHost(req.Host, target) {
 			p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "Host " + clipTarget(req.Host) + " is not the bound host"})
 			http.Error(w, "airbag: Host "+req.Host+" is not "+host+", the host this credential is bound to; the credential goes only to that host", http.StatusForbidden)
 			return

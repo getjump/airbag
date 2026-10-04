@@ -406,8 +406,9 @@ not its use: through the bound hosts the agent can do what the token allows.
 For hosts without a credential the proxy decides from the name the client asks for
 and does not see inside TLS. So a broad allowlist entry (`github.com`) is a way for
 data to leave, and domain fronting can reach a site behind the same CDN that the
-allowlist does not name. Allow narrow names, and keep an `ask` rule on
-`net.egress` where that matters.
+allowlist does not name. Allow narrow names, and where that matters put an `ask`
+rule on `net.connect` for the broad ones: every connection passes it, while
+`net.egress` is predicted from known command lines only.
 
 ## License
 
