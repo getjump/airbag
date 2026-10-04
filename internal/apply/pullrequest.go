@@ -133,6 +133,9 @@ func trustedTool(s *session.Session, name string) (string, error) {
 }
 
 func selectedCommit(s *session.Session, p operation.PullRequest) error {
+	if s.Branch == "" && s.Status != session.StatusApplied {
+		return fmt.Errorf("the session has not been fully applied; finish apply or explicitly import its commit with --branch before publication")
+	}
 	branch := p.Head
 	if s.Branch != "" {
 		branch = s.Branch

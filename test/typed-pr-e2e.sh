@@ -70,11 +70,17 @@ assert p['request']['pull_request']['body'] == 'reviewed body\n'
 assert p['request_digest'].startswith('sha256:')
 PY
 [ ! -e "$L/calls" ] || fail "preview contacted GitHub"
+echo work > "$L/branch"
+echo ok > "$L/mode"
+# Import git metadata and one file while another file remains in the session.
+# The full commit ref exists now, but that partial selection cannot publish it.
+"$AIRBAG" apply "$s1" --only .git --yes > "$L/partial-git"
+printf 'y\ny\n' | "$AIRBAG" apply "$s1" --only code.txt > "$L/partial-code"
+grep -q 'has not been fully applied' "$L/partial-code" || fail "partial import authorized the complete commit"
+[ ! -e "$L/calls" ] || fail "partial import contacted GitHub"
 "$AIRBAG" apply "$s1" --yes > "$L/apply"
 [ ! -e "$L/calls" ] || fail "--yes published the request"
 grep -q 'changed after capture' notes.md || fail "files not imported"
-echo work > "$L/branch"
-echo ok > "$L/mode"
 printf 'y\n' | "$AIRBAG" apply "$s1" > "$L/publish"
 "$AIRBAG" review "$s1" --json > "$L/review"
 python3 - "$L/payload" "$L/review" <<'PY'

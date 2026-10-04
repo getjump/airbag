@@ -59,6 +59,10 @@ outbox without reimporting files.
 The imported branch's commit must equal the captured commit. If branch import
 adds a commit for uncommitted leftovers, that is a different result and this
 request stays pending. Commit the complete intended result before capture.
+A normal file apply must finish the session before publication: a partial
+`--only`/interactive import cannot authorize the entire captured commit merely
+because its git ref already exists. Explicit branch import selects that
+branch's whole commit even when HOME changes remain pending.
 Edits to a source body file after capture do not change the PR body; the handler
 publishes the displayed frozen bytes, without rereading that file on the host.
 

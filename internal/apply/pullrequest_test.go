@@ -29,6 +29,7 @@ func commitForPR(t *testing.T, ws string, args ...string) string {
 func prFixture(t *testing.T) (*session.Session, *outbox.Box, outbox.Intent) {
 	t.Helper()
 	s, b := testBox(t)
+	s.Status = session.StatusApplied // fixture represents the imported workspace
 	commitForPR(t, s.Workspace, "init", "-q", "-b", "work")
 	commitForPR(t, s.Workspace, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "reviewed", "--allow-empty")
 	sha := commitForPR(t, s.Workspace, "rev-parse", "HEAD")
@@ -243,5 +244,17 @@ func TestAbsentDraftFlagDoesNotAttestPublishedRequest(t *testing.T) {
 	}
 	if _, valid := exactPR(data, p); !valid {
 		t.Fatal("explicit matching flag was not attested")
+	}
+}
+
+func TestPartialApplyDoesNotSelectAnEntireCommitForPublication(t *testing.T) {
+	s, b, it := prFixture(t)
+	log, _ := mockPR(t, *it.Request.PullRequest, "ok")
+	// The ref already names the full commit, but a partial file import is not
+	// permission to publish every change contained in that commit.
+	s.Status = session.StatusStopped
+	_ = runPRFixture(t, s, b, false, "y\n")
+	if status(t, b, it.ID) != outbox.Pending || ran(log) != "" {
+		t.Fatal("partial file selection authorized the full commit")
 	}
 }
