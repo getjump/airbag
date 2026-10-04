@@ -81,6 +81,9 @@ Its `--disable-userns` idea is in airbag as `--strict`.
 tool call changed what. Gemini CLI, Aider, OpenCode and others run in the
 sandbox but without that attribution.
 
+[docs/roadmap.md](docs/roadmap.md) lists what is deferred and what would bring
+it back; please read it before starting on one of those.
+
 Smaller, self-contained tasks are labeled
 [good first issue](https://github.com/getjump/airbag/labels/good%20first%20issue).
 

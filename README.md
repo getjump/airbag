@@ -302,6 +302,10 @@ opens one directly. After a secret read the mirror serves its cache and what the
 lock files pin; pnpm-lock.yaml, poetry.lock and hashed requirements files are not
 read yet.
 
+What is next and what is deliberately left for later, with reasons:
+[docs/roadmap.md](docs/roadmap.md). How to tell whether airbag is worth using,
+against the alternatives: [docs/evaluation.md](docs/evaluation.md).
+
 ## Threat model
 
 airbag protects against accidents and casual exfiltration by an agent you let run
