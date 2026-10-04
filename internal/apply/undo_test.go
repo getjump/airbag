@@ -372,6 +372,34 @@ func TestRollbackRestoresReplacedDirWithSubdir(t *testing.T) {
 	}
 }
 
+// A file the user puts after the apply where the apply had made a
+// directory, inside a replaced directory, survives the rollback; the
+// replaced directory stays, with the user's file from before the apply
+// kept.
+func TestRollbackKeepsFileInPlaceOfMadeDir(t *testing.T) {
+	s, d := appliedReplacedDir(t, filepath.Join("sub", "inner.txt"))
+	sub := filepath.Join(d, "sub")
+	if err := os.RemoveAll(sub); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sub, []byte("user's own\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, sub); got != "user's own\n" {
+		t.Fatalf("rollback lost a file the user put in place of a directory it made: %s = %q\n%s", sub, got, out.String())
+	}
+	if want := "left as is (holds files added or changed after the apply): " + d; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q: %s", want, out.String())
+	}
+	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+		t.Fatalf("version of %s from before the apply = %q", d, prev)
+	}
+}
+
 // A partial rollback keeps the version from before the apply of each
 // path it left, and a second rollback neither fails nor loses it.
 func TestPartialRollbackKeepsPreviousVersion(t *testing.T) {

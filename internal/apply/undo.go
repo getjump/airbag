@@ -243,7 +243,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	}
 	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
 	for _, d := range dirs {
-		_ = os.Remove(d) // only if empty: a file the user added keeps it
+		removeEmptyDir(d)
 	}
 	if len(kept) == 0 {
 		return left, os.RemoveAll(g.dir)
@@ -264,12 +264,20 @@ func removeInside(dirs []string, dir string) []string {
 	rest := dirs[:0]
 	for _, d := range dirs {
 		if d != dir && within(d, dir) {
-			_ = os.Remove(d) // only if empty: a file the user added keeps it
+			removeEmptyDir(d)
 			continue
 		}
 		rest = append(rest, d)
 	}
 	return rest
+}
+
+// removeEmptyDir removes d only if it is an empty directory. Unlike
+// os.Remove, rmdir never unlinks a file: d is left as it is when it
+// holds something (ENOTEMPTY), when it is a file the user put in its
+// place (ENOTDIR), when it is gone (ENOENT), and on any other failure.
+func removeEmptyDir(d string) {
+	_ = unix.Rmdir(d)
 }
 
 // emptyOrAbsent: nothing at p, or an empty directory.
