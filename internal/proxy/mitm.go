@@ -151,6 +151,14 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 	_ = tconn.SetDeadline(time.Time{})
 
 	check := !p.Allow.explicitIP(host)
+	// The Host the upstream sees is always the one the tunnel was opened
+	// to, spelled one way: a virtual-host router that tells
+	// "api.github.com." from "api.github.com" must not be handed the
+	// agent's spelling along with the real value.
+	canonical := host
+	if _, port, _ := net.SplitHostPort(target); port != "443" {
+		canonical = target
+	}
 	tr := &http.Transport{
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			c, err := p.dial(target, check)
@@ -173,7 +181,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme, pr.Out.URL.Host = "https", target
-			pr.Out.Host = pr.In.Host
+			pr.Out.Host = canonical
 			// Without the client's Accept-Encoding the transport asks for
 			// gzip itself and unpacks it, so the body can be masked.
 			pr.Out.Header.Del("Accept-Encoding")
