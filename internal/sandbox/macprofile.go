@@ -58,7 +58,9 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 		}
 	}
 	for _, d := range stateDirs {
-		_ = os.MkdirAll(filepath.Join(s.Home, d), 0o700)
+		if noSymlinkSoFar(s.Home, d) == nil {
+			_ = os.MkdirAll(filepath.Join(s.Home, d), 0o700)
+		}
 		p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(d, "/")))
 	}
 	for _, f := range s.Passthrough {
@@ -93,7 +95,9 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 		"^"+q+`/\.(claude|codex)$`,
 		"^"+q+`/\.claude/projects(/[^/]+)?$`)
 	for _, h := range s.BranchHoles {
-		_ = os.MkdirAll(filepath.Join(s.Home, h), 0o700)
+		if noSymlinkSoFar(s.Home, h) == nil { // MkdirAll would follow a symlink out of $HOME
+			_ = os.MkdirAll(filepath.Join(s.Home, h), 0o700)
+		}
 	}
 	for _, h := range s.Hidden {
 		p.NoRead = append(p.NoRead, filepath.Join(home, h))

@@ -611,3 +611,37 @@ func TestWriteBackRebaseMovesTheBase(t *testing.T) {
 		t.Fatalf("branch = %v, want the host's latest counter", got)
 	}
 }
+
+// A benign key the host removed during the run, which the agent left
+// as it was, is removed from the branch copy too: it is not the
+// agent's addition.
+func TestWriteBackHostRemovedKeyLeavesTheBranch(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"userID":"u","numStartups":1,"mcpServers":{}}`) // the agent's change
+	writeCfg(t, realPath, `{"userID":"u"}`)                                   // a host process removed the counter
+	WriteBackConfigs(s)
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+	flags := strings.Join(configFlags(c), "; ")
+	if strings.Contains(flags, "numStartups") || !strings.Contains(flags, "mcpServers") {
+		t.Fatalf("flags = %q, want only the agent's mcpServers change", flags)
+	}
+	if got := readCfg(t, branchPath); got["numStartups"] != nil {
+		t.Fatalf("branch = %v, want the host's removal taken", got)
+	}
+	if got := readCfg(t, realPath); got["numStartups"] != nil {
+		t.Fatalf("real file = %v, want the counter still removed", got)
+	}
+}
+
+func TestDeletePathNested(t *testing.T) {
+	m, _ := topLevel([]byte(`{"projects":{"/a":{"x":1,"y":2}},"k":3}`))
+	deletePath(m, []string{"projects", "/a", "x"})
+	deletePath(m, []string{"projects", "/b", "x"}) // absent: no change
+	deletePath(m, []string{"k", "z"})              // through a non-object: no change
+	out, _ := marshalJSON(m, "")
+	if want := `{"k":3,"projects":{"/a":{"y":2}}}`; canon(out) != canon([]byte(want)) {
+		t.Fatalf("got %s, want %s", out, want)
+	}
+}

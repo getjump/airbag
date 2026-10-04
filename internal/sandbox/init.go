@@ -420,26 +420,6 @@ func noSymlink(root, rel string) error {
 	return nil
 }
 
-// noSymlinkSoFar is noSymlink for the components of rel that exist: a
-// path about to be created must not lead through a symlink.
-func noSymlinkSoFar(root, rel string) error {
-	p := root
-	for _, part := range strings.Split(filepath.Clean(rel), "/") {
-		p = filepath.Join(p, part)
-		st, err := os.Lstat(p)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if st.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("~/%s is a symlink", strings.TrimPrefix(p, root+"/"))
-		}
-	}
-	return nil
-}
-
 func setRO(path string, recursive, ro bool) error {
 	attr := &unix.MountAttr{}
 	if ro {

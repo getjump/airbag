@@ -378,10 +378,14 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 			}
 			if canon(v) == canon(bv) {
 				// The agent did not change it; the host did. The host's
-				// value stays, and the branch copy and the base take it,
-				// so review shows only what the agent changed, now and
-				// in a later run.
-				if rv, ok := getPath(real, ch.path); ok && setPath(branch, ch.path, rv) == nil {
+				// value, or its removal, stays, and the branch copy and
+				// the base take it, so review shows only what the agent
+				// changed, now and in a later run.
+				if rv, ok := getPath(real, ch.path); !ok {
+					deletePath(branch, ch.path)
+					deletePath(base, ch.path)
+					rebased = true
+				} else if setPath(branch, ch.path, rv) == nil {
 					_ = setPath(base, ch.path, rv)
 					rebased = true
 				}
@@ -693,6 +697,9 @@ func unionKeys(a, b map[string]json.RawMessage) []string {
 var errNotObject = errors.New("not an object")
 
 func getPath(m map[string]json.RawMessage, path []string) (json.RawMessage, bool) {
+	if len(path) == 0 {
+		return nil, false
+	}
 	v, ok := m[path[0]]
 	if !ok || len(path) == 1 {
 		return v, ok
@@ -707,6 +714,9 @@ func getPath(m map[string]json.RawMessage, path []string) (json.RawMessage, bool
 // setPath sets a value at path, creating objects on the way; it refuses
 // to replace a non-object on the way.
 func setPath(m map[string]json.RawMessage, path []string, v json.RawMessage) error {
+	if len(path) == 0 {
+		return errNotObject
+	}
 	if len(path) == 1 {
 		m[path[0]] = v
 		return nil
@@ -724,6 +734,28 @@ func setPath(m map[string]json.RawMessage, path []string, v json.RawMessage) err
 	}
 	m[path[0]] = b
 	return nil
+}
+
+// deletePath removes the value at path, if there is one.
+func deletePath(m map[string]json.RawMessage, path []string) {
+	if len(path) == 0 {
+		return
+	}
+	if len(path) == 1 {
+		delete(m, path[0])
+		return
+	}
+	child, ok := object(m[path[0]])
+	if !ok {
+		return
+	}
+	if _, has := getPath(child, path[1:]); !has {
+		return
+	}
+	deletePath(child, path[1:])
+	if b, err := marshalJSON(child, ""); err == nil {
+		m[path[0]] = b
+	}
 }
 
 // marshalJSON encodes without HTML escaping, so values carried through

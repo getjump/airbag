@@ -94,3 +94,25 @@ func TestMacHomesHidden(t *testing.T) {
 		t.Error("/Users/Shared is not a home")
 	}
 }
+
+// A ~/.claude that is a symlink: building the profile creates nothing
+// behind it (no project directory, no memory/ hole).
+func TestMacProfileNoMkdirThroughSymlink(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(home, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	proj, holes := ClaudeProjectState(ws, ws)
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true,
+		Passthrough: append(append([]string{}, DefaultPassthrough...), proj...), BranchHoles: holes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache")); err != nil {
+		t.Fatal(err)
+	}
+	if es, _ := os.ReadDir(outside); len(es) != 0 {
+		t.Fatalf("created behind the symlinked ~/.claude: %v", es)
+	}
+}
