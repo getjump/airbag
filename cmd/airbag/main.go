@@ -199,6 +199,8 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 		s.Argv, s.Cwd = argv, cwd
+		// This run's directory may have its own transcript directory.
+		sandbox.AddClaudeProjectState(s, cwd)
 		for _, h := range allow {
 			if !slices.Contains(s.Allow, h) {
 				s.Allow = append(s.Allow, h)

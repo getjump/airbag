@@ -60,6 +60,25 @@ func ClaudeProjectSlug(dir string) string {
 	return strings.ReplaceAll(dir, "/", "-")
 }
 
+// AddClaudeProjectState merges the transcript passthrough and memory
+// holes for cwd (and the workspace root) into the session's, without
+// duplicates. A resumed session may run from another directory of the
+// same repository, whose transcript directory must pass through too.
+func AddClaudeProjectState(s *session.Session, cwd string) {
+	pass, holes := ClaudeProjectState(cwd, s.Workspace)
+	s.Passthrough = appendNew(s.Passthrough, pass...)
+	s.BranchHoles = appendNew(s.BranchHoles, holes...)
+}
+
+func appendNew(list []string, add ...string) []string {
+	for _, a := range add {
+		if !slices.Contains(list, a) {
+			list = append(list, a)
+		}
+	}
+	return list
+}
+
 // ClaudeProjectState returns, for the current workspace, the transcript
 // directories that pass through to the real $HOME (so a resumed session
 // keeps the conversation across a discard) and the memory/ directories

@@ -81,6 +81,16 @@ $rev"
 "$AIRBAG" diff "$HOME/.claude.json" 2>/dev/null | grep -q "/bin/sh" && fail "diff printed a config value"
 "$AIRBAG" diff "$HOME/.claude.json" 2>/dev/null | grep -q "mcpServers" || fail "diff did not name the key"
 
+# Resumed from a subdirectory of the repository, the session writes a
+# transcript under that directory's own slug, which must pass through too.
+mkdir -p "$ws/sub"
+subproj="$HOME/.claude/projects/$(printf '%s' "$ws/sub" | sed 's#/#-#g')"
+(cd "$ws/sub" && "$AIRBAG" run --session last -- sh -c "echo '{\"type\":\"user\"}' > '$subproj/sess2.jsonl'" >"$T/run.out" 2>&1) ||
+	fail "resumed run failed:
+$(cat "$T/run.out")"
+grep -q "resuming session" "$T/run.out" || fail "not resumed: $(cat "$T/run.out")"
+[ -f "$subproj/sess2.jsonl" ] || fail "the resumed run's transcript (new cwd) did not pass through"
+
 # Discard drops the branch; the real files are as the write-back left them.
 "$AIRBAG" discard --yes >/dev/null
 grep -q evil "$HOME/.claude.json" && fail "mcpServers appeared after discard"
@@ -89,6 +99,7 @@ grep -Eq '"numStartups": *2' "$HOME/.claude.json" || fail "written-back counter 
 [ "$(cat "$proj/memory/OLD.md")" = "old memory" ] || fail "memory edit present after discard"
 [ -f "$proj/memory/GONE.md" ] || fail "memory deleted after discard"
 [ -f "$proj/sess.jsonl" ] || fail "transcript lost after discard"
+[ -f "$subproj/sess2.jsonl" ] || fail "the resumed run's transcript lost after discard"
 
 # A second session: the same memory edit and delete reach the real files
 # only with apply.
