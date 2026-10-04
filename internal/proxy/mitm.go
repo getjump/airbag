@@ -204,7 +204,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 	name, canonical := upstreamHost(target)
 	tr := &http.Transport{
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			c, err := p.dial(target, check)
+			c, err := p.dial(ctx, f, target, check)
 			if err != nil {
 				return nil, err
 			}

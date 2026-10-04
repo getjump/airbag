@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -108,9 +109,21 @@ func (s *ignoresEOF) close() {
 
 func boundedProxy(t *testing.T, lim Limits) (*Proxy, string, string) {
 	t.Helper()
+	return boundedProxyVia(t, lim, "")
+}
+
+// boundedProxyVia is boundedProxy behind the upstream proxy at
+// upstream ("": none).
+func boundedProxyVia(t *testing.T, lim Limits, upstream string) (*Proxy, string, string) {
+	t.Helper()
 	log, path := newLog(t)
 	p := New(Allowlist{"127.0.0.1:*"}, log)
-	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	p.Upstream = func(*url.URL) (*url.URL, error) {
+		if upstream == "" {
+			return nil, nil
+		}
+		return &url.URL{Scheme: "http", Host: upstream}, nil
+	}
 	p.Limits = lim
 	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
@@ -404,5 +417,109 @@ func TestMaxFlows(t *testing.T) {
 	}
 	if refused != 1 {
 		t.Fatalf("%d refusals logged, want 1: %+v", refused, effs)
+	}
+}
+
+// openFlows is how many flows p holds, once it is down to want or d
+// has passed.
+func openFlows(p *Proxy, want int, d time.Duration) int {
+	deadline := time.Now().Add(d)
+	for {
+		p.mu.Lock()
+		n := len(p.flows)
+		p.mu.Unlock()
+		if n <= want || time.Now().After(deadline) {
+			return n
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A forwarded response the client stops reading: the copy blocks in a
+// write to the client, and closing the upstream as idle does not end
+// it. The flow's write deadline does: the slot and the client's
+// connection are let go.
+func TestForwardClientStopsReading(t *testing.T) {
+	target := listenTCP(t, func(c net.Conn) {
+		defer c.Close()
+		_, _ = http.ReadRequest(bufio.NewReader(c))
+		_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 1099511627776\r\n\r\n")
+		chunk := bytes.Repeat([]byte("x"), 64<<10)
+		for {
+			if _, err := c.Write(chunk); err != nil {
+				return
+			}
+		}
+	})
+	lim := testLimits
+	lim.Idle = 300 * time.Millisecond
+	p, pa, _ := boundedProxy(t, lim)
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", pa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = io.WriteString(c, "GET http://"+target+"/x HTTP/1.1\r\nHost: "+target+"\r\n\r\n")
+	if _, err := io.ReadFull(c, make([]byte, 1024)); err != nil {
+		t.Fatal(err)
+	}
+	// The client reads no more.
+	if n := openFlows(p, 0, 5*time.Second); n != 0 {
+		t.Fatalf("%d flows open after the client stopped reading for 5s, want 0 (Idle %v)", n, lim.Idle)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err = io.Copy(io.Discard, c)
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatal("the proxy kept the client's connection open")
+	}
+}
+
+// An upstream proxy that takes the CONNECT and never answers it: the
+// tunnel's flow owns that connection from the dial on, so it is closed
+// as idle, or by a cut, and the agent is answered.
+func TestUpstreamProxyNeverAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		idle time.Duration
+		cut  bool
+	}{{"idle", 300 * time.Millisecond, false}, {"cut", time.Hour, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var accepted atomic.Int32
+			hung := listenTCP(t, func(c net.Conn) {
+				defer c.Close()
+				stop := context.AfterFunc(t.Context(), func() { c.Close() }) // a failing run ends too
+				defer stop()
+				accepted.Add(1)
+				_, _ = io.Copy(io.Discard, c) // reads the CONNECT, never answers
+			})
+			lim := testLimits
+			lim.Idle = tc.idle
+			p, pa, _ := boundedProxyVia(t, lim, hung)
+			c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", pa)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+			_, _ = io.WriteString(c, "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n")
+			if tc.cut {
+				for accepted.Load() == 0 {
+					time.Sleep(10 * time.Millisecond)
+				}
+				p.Cut(Allowlist{}, "test")
+			}
+			resp, err := http.ReadResponse(bufio.NewReader(c), &http.Request{Method: http.MethodConnect})
+			if err != nil {
+				t.Fatalf("no answer to CONNECT: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				t.Fatal("CONNECT succeeded through an upstream proxy that never answered")
+			}
+			if n := openFlows(p, 0, 2*time.Second); n != 0 {
+				t.Fatalf("%d flows open, want 0", n)
+			}
+		})
 	}
 }

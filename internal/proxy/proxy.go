@@ -303,7 +303,11 @@ func (p *Proxy) refuse(w http.ResponseWriter, target, host string, err error) bo
 // connect opens a tunnel. It is registered (f) before the dial, so a
 // cut while it dials closes it too.
 func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string, f *flow) {
-	up, err := p.dial(r.Host, !p.Allow.explicitIP(host))
+	up, err := p.dial(r.Context(), f, r.Host, !p.Allow.explicitIP(host))
+	if errors.Is(err, errStopped) {
+		http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
+		return
+	}
 	if err != nil {
 		if !p.refuse(w, r.Host, host, err) {
 			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway) //nolint:gocritic // the return follows the if
@@ -328,16 +332,18 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string, f *
 
 // dial opens a TCP stream to hostport, through the host's upstream
 // proxy when the host environment has one. The upstream proxy is the
-// user's own and is not checked; it resolves the target itself.
-func (p *Proxy) dial(hostport string, check bool) (net.Conn, error) {
+// user's own and is not checked; it resolves the target itself. The
+// stream belongs to f from the moment it connects: an upstream proxy
+// that never answers CONNECT is closed with the flow (idle or cut).
+func (p *Proxy) dial(ctx context.Context, f *flow, hostport string, check bool) (net.Conn, error) {
 	pu, err := p.Upstream(&url.URL{Scheme: "https", Host: hostport})
 	if err != nil {
 		return nil, err
 	}
 	if pu == nil {
-		return p.dialer(check).Dial("tcp", hostport)
+		return f.dialer(p.dialContext(check))(ctx, "tcp", hostport)
 	}
-	c, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(context.Background(), "tcp", pu.Host)
+	c, err := f.dialer((&net.Dialer{Timeout: 15 * time.Second}).DialContext)(ctx, "tcp", pu.Host)
 	if err != nil {
 		return nil, err
 	}
@@ -401,13 +407,23 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	for k, v := range resp.Header {
 		w.Header()[k] = v
 	}
+	// A client that stops reading blocks the copy in a write to it,
+	// which closing the upstream does not end: stopping the flow ends
+	// it with a write deadline in the past. Only while the body is
+	// copied: the response is still flushed after this returns.
+	stall := &closer{func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Now()) }}
+	if !f.hold(stall) {
+		panic(http.ErrAbortHandler)
+	}
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		// The body broke off (the upstream failed, or was closed as
-		// idle or cut): the client must see a broken response, not a
-		// complete one, which a chunked body would otherwise end as.
+		// idle or cut), or the client stopped reading: the client must
+		// see a broken response, not a complete one, which a chunked
+		// body would otherwise end as.
 		panic(http.ErrAbortHandler)
 	}
+	f.release(stall)
 }
 
 func closeWrite(c net.Conn) {
