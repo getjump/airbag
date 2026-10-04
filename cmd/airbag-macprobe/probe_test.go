@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -314,12 +315,25 @@ func TestPlatformTrust(t *testing.T) {
 
 // nfsMount sends srv a MOUNT for path, on a connection of its own,
 // through an NFS client library.
+// dialNFS connects an NFS client to srv. The client binds a random
+// local port of its own and, unprivileged, does not try another when
+// that one is taken, which a run of many connections can hit.
+func dialNFS(t *testing.T, srv *nfsServer) *rpc.Client {
+	t.Helper()
+	for i := 0; ; i++ {
+		c, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
+		if err == nil {
+			return c
+		}
+		if i == 10 || !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatal(err)
+		}
+	}
+}
+
 func nfsMount(t *testing.T, srv *nfsServer, path string) (*nfsc.Target, error) {
 	t.Helper()
-	c, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := dialNFS(t, srv)
 	t.Cleanup(c.Close)
 	m := nfsc.Mount{Client: c}
 	return m.Mount(path, rpc.AuthNull)
@@ -361,10 +375,7 @@ func TestNFSGrantsOneMount(t *testing.T) {
 	defer func() { _ = srv.Close() }()
 	_, err = nfsMount(t, srv, "/")
 	refused(t, "Mount(/) before Arm", err)
-	early, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	early := dialNFS(t, srv)
 	defer early.Close()
 	path, err := srv.Arm()
 	if err != nil {
