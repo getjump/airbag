@@ -330,6 +330,14 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		if err != nil {
 			return "", false // a symlink or other non-regular file: leave it alone
 		}
+		if !exists && haveBase {
+			// The base has keys, so the file was there when the run
+			// began: the host removed it since. That is a host edit;
+			// write nothing back, and the branch copy waits for review.
+			if b, _ := topLevel(baseRaw); len(b) > 0 {
+				return "", false
+			}
+		}
 		realRaw := []byte("{}")
 		real := map[string]json.RawMessage{}
 		if exists {

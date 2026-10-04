@@ -645,3 +645,26 @@ func TestDeletePathNested(t *testing.T) {
 		t.Fatalf("got %s, want %s", out, want)
 	}
 }
+
+// A config the host removed during the run is not recreated by the
+// write-back, even for a benign key the agent added: the removal is a
+// host edit, and the branch copy waits for review.
+func TestWriteBackHostRemovedFile(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"userID":"u","mcpServers":{"x":{}}}`)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"userID":"u","mcpServers":{"x":{}},"numStartups":1}`) // the agent adds a counter
+	if err := os.Remove(realPath); err != nil {                                     // the host removes the file
+		t.Fatal(err)
+	}
+	WriteBackConfigs(s)
+	if _, err := os.Lstat(realPath); !os.IsNotExist(err) {
+		t.Fatalf("the write-back recreated a config the host removed (err %v)", err)
+	}
+	if _, ok := s.WroteBack[realPath]; ok {
+		t.Fatal("a write-back was recorded as airbag's own")
+	}
+	if _, err := os.Stat(branchPath); err != nil {
+		t.Fatalf("the branch copy is gone: %v", err)
+	}
+}
