@@ -127,12 +127,19 @@ func (s *Server) taint(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("{}"))
 }
 
-// ReportTaint is called from the sandbox init process.
-func ReportTaint(t Taint) {
+// ReportTaint is called from the sandbox init process. It returns once
+// the host has recorded the taint.
+func ReportTaint(t Taint) error {
 	body, _ := json.Marshal(t)
-	if resp, err := client(3*time.Second).Post("http://airbag/taint", "application/json", bytes.NewReader(body)); err == nil {
-		resp.Body.Close()
+	resp, err := client(5*time.Second).Post("http://airbag/taint", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
 	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("taint not recorded: %s", resp.Status)
+	}
+	return nil
 }
 
 // Exec is what the shell shim reports before running a script.

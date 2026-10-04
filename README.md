@@ -40,7 +40,9 @@ each, in `demo/`: `sandbox`, `codex`, `ask`, `apply`, `mirror` (`demo/scenes.sh 
 - **Watched secrets.** The workspace's `.env` files are served read-only through
   FUSE. The first read by anything but airbag taints the session: commands that
   send data out are refused, and only model APIs and package registries stay
-  reachable. Output going back to the agent has known secret values masked.
+  reachable. The read returns only after airbag has recorded the taint and closed
+  connections opened earlier to other hosts. Output going back to the agent has
+  known secret values masked.
 - **Its own state.** Transcripts and logins (`~/.claude/projects`, `~/.codex/sessions`,
   tokens) pass through, so discarding a branch does not log you out.
 

@@ -18,14 +18,29 @@ type Gate struct {
 	mu      sync.Mutex
 	dir     string
 	tainted string // what secret the session read, if any
+	onTaint []func(source string)
+}
+
+// OnTaint registers f to run when the session is first tainted, before
+// Taint returns.
+func (g *Gate) OnTaint(f func(source string)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.onTaint = append(g.onTaint, f)
 }
 
 // Taint marks the session as having read a secret.
 func (g *Gate) Taint(source string) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.tainted == "" {
-		g.tainted = source
+	if g.tainted != "" {
+		g.mu.Unlock()
+		return
+	}
+	g.tainted = source
+	fs := g.onTaint
+	g.mu.Unlock()
+	for _, f := range fs {
+		f(source)
 	}
 }
 

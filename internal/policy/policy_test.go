@@ -62,3 +62,17 @@ func TestBadRule(t *testing.T) {
 		t.Fatal("non-boolean rule accepted")
 	}
 }
+
+func TestOnTaint(t *testing.T) {
+	g := NewGate(&Policy{}, t.TempDir())
+	var got []string
+	g.OnTaint(func(src string) { got = append(got, src) })
+	g.Taint(".env")
+	if len(got) != 1 || got[0] != ".env" {
+		t.Fatalf("OnTaint ran %v times before Taint returned", got)
+	}
+	g.Taint(".env.local")
+	if len(got) != 1 || g.Tainted() != ".env" {
+		t.Fatalf("second taint: callbacks %v, tainted %q", got, g.Tainted())
+	}
+}

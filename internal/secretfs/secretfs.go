@@ -23,8 +23,9 @@ type File struct {
 }
 
 // OnRead is called for every open, with the reader's pid as seen in the
-// sandbox's PID namespace.
-type OnRead func(name string, pid uint32)
+// sandbox's PID namespace, before any byte is served. An error refuses
+// the open, so a read whose taint was not recorded never happens.
+type OnRead func(name string, pid uint32) error
 
 // Open finds the workspace's .env files. Templates (.env.example,
 // .env.sample, .env.template) hold no secrets and are left alone.
@@ -79,7 +80,9 @@ func (s *secretFile) Open(ctx context.Context, flags uint32) (fs.FileHandle, uin
 		return nil, 0, syscall.EROFS
 	}
 	if caller, ok := fuse.FromContext(ctx); ok && s.onRead != nil {
-		s.onRead(s.name, caller.Pid)
+		if err := s.onRead(s.name, caller.Pid); err != nil {
+			return nil, 0, syscall.EACCES
+		}
 	}
 	return nil, fuse.FOPEN_DIRECT_IO, 0
 }

@@ -5,6 +5,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"io"
 	"net"
@@ -50,6 +51,49 @@ type Proxy struct {
 	// Upstream returns the host's own proxy for a target, if any, so
 	// airbag works behind a corporate or sandbox proxy.
 	Upstream func(*url.URL) (*url.URL, error)
+
+	mu    sync.Mutex
+	flows map[*flow]bool // open tunnels and forwarded requests
+}
+
+type flow struct {
+	host, target string
+	stop         func()
+}
+
+// track registers an open connection until the returned func is called.
+func (p *Proxy) track(host, target string, stop func()) (done func()) {
+	f := &flow{host: host, target: target, stop: stop}
+	p.mu.Lock()
+	if p.flows == nil {
+		p.flows = map[*flow]bool{}
+	}
+	p.flows[f] = true
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		delete(p.flows, f)
+		p.mu.Unlock()
+	}
+}
+
+// Cut closes open connections to hosts outside keep. A tunnel opened
+// before the session read a secret would otherwise carry it out:
+// policy is checked when a connection opens, not on every byte.
+func (p *Proxy) Cut(keep Allowlist, reason string) {
+	p.mu.Lock()
+	var cut []*flow
+	for f := range p.flows {
+		if !keep.Allows(f.host) {
+			cut = append(cut, f)
+			delete(p.flows, f)
+		}
+	}
+	p.mu.Unlock()
+	for _, f := range cut {
+		f.stop()
+		p.Log.Add(effects.Effect{Kind: "net.egress", Target: f.target, Verdict: "cut", Reason: reason})
+	}
 }
 
 func New(allow Allowlist, log *effects.Log) *Proxy {
@@ -94,13 +138,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "allow"})
 	if r.Method == http.MethodConnect {
-		p.connect(w, r)
+		p.connect(w, r, host)
 		return
 	}
-	p.forward(w, r)
+	p.forward(w, r, host)
 }
 
-func (p *Proxy) connect(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string) {
 	up, err := p.dial(r.Host)
 	if err != nil {
 		http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
@@ -116,6 +160,8 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request) {
 		up.Close()
 		return
 	}
+	done := p.track(host, r.Host, func() { conn.Close(); up.Close() })
+	defer done()
 	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	pipe(conn, buf.Reader, up)
 }
@@ -160,8 +206,12 @@ func (p *Proxy) dial(hostport string) (net.Conn, error) {
 
 var transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
-func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
-	out := r.Clone(r.Context())
+func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	done := p.track(host, r.Host, cancel)
+	defer done()
+	out := r.Clone(ctx)
 	out.RequestURI = ""
 	for _, h := range []string{"Proxy-Connection", "Proxy-Authorization", "Connection", "Keep-Alive", "Te", "Trailer", "Upgrade"} {
 		out.Header.Del(h)

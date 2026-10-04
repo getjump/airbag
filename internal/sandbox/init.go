@@ -201,20 +201,27 @@ func serveSecrets(s *session.Session, files []secretfs.File) error {
 		return err
 	}
 	self, _ := os.Stat("/proc/self/exe")
+	// The open waits until the host has recorded the taint and cut the
+	// connections a tainted session may not keep. Reads by one program
+	// are reported once; the lock keeps a second reader from slipping
+	// through while the first report is in flight.
 	var mu sync.Mutex
 	reported := map[string]bool{}
-	onRead := func(name string, pid uint32) {
+	onRead := func(name string, pid uint32) error {
 		exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
 		if st, err := os.Stat(fmt.Sprintf("/proc/%d/exe", pid)); err == nil && self != nil && os.SameFile(st, self) {
-			return // the shell shim reads values to mask them
+			return nil // the shell shim reads values to mask them
 		}
 		mu.Lock()
-		first := !reported[name+exe]
-		reported[name+exe] = true
-		mu.Unlock()
-		if first {
-			go control.ReportTaint(control.Taint{File: name, Exe: exe})
+		defer mu.Unlock()
+		if reported[name+exe] {
+			return nil
 		}
+		if err := control.ReportTaint(control.Taint{File: name, Exe: exe}); err != nil {
+			return err
+		}
+		reported[name+exe] = true
+		return nil
 	}
 	if _, err := secretfs.Mount(dir, files, onRead); err != nil {
 		return err

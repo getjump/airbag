@@ -66,6 +66,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	px := proxy.New(allow, log)
 	px.Gate = gate
 	px.Mirror = mirror.New(filepath.Join(session.Root(), "mirror"), log)
+	// Once the session reads a secret, connections it opened earlier to
+	// hosts outside the core set close before the read returns.
+	gate.OnTaint(func(string) { px.Cut(proxy.DefaultAllow, "secret-taint") })
 	go func() { _ = px.Serve(pl) }()
 
 	cl, err := net.Listen("unix", s.ControlSock())

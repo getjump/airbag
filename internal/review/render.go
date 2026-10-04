@@ -90,7 +90,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		}
 	}
 
-	allowed, denied := map[string]int{}, map[string]int{}
+	allowed, denied, cut := map[string]int{}, map[string]int{}, map[string]int{}
 	for _, e := range effs {
 		if e.Kind != "net.egress" {
 			continue
@@ -99,9 +99,12 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		if err != nil {
 			host = e.Target
 		}
-		if e.Verdict == "deny" {
+		switch e.Verdict {
+		case "deny":
 			denied[e.Target]++
-		} else {
+		case "cut":
+			cut[e.Target]++
+		default:
 			allowed[host]++
 		}
 	}
@@ -135,6 +138,9 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	fmt.Fprintf(w, "\nNetwork    %d allowed%s\n", total(allowed), hostList(allowed))
 	if len(denied) > 0 {
 		fmt.Fprintf(w, "           %d denied%s\n", total(denied), hostList(denied))
+	}
+	if len(cut) > 0 {
+		fmt.Fprintf(w, "           %d cut when a secret was read%s\n", total(cut), hostList(cut))
 	}
 
 	if len(sts) > 0 {
