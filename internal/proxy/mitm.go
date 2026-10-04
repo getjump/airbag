@@ -211,6 +211,15 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 		if _, port, _ := net.SplitHostPort(target); port != "443" {
 			what = target + req.URL.Path
 		}
+		// The connection goes to the bound host, but a server that hosts
+		// several sites (a CDN) routes by the Host header: a request
+		// naming another site there would carry the real value to it
+		// (domain fronting). The value goes only to the host it is bound to.
+		if !sameHost(req.Host, target) {
+			p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "Host " + clipTarget(req.Host) + " is not the bound host"})
+			http.Error(w, "airbag: Host "+req.Host+" is not "+host+", the host this credential is bound to; the credential goes only to that host", http.StatusForbidden)
+			return
+		}
 		if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
 			p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "secret-taint"})
 			http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted(), http.StatusForbidden)
@@ -303,3 +312,13 @@ func (l *oneConn) Close() error {
 }
 
 func (l *oneConn) Addr() net.Addr { return l.c.LocalAddr() }
+
+// sameHost reports whether a request's Host header names the CONNECT
+// target: the same name, case and a trailing dot aside, and the same
+// port, 443 when the header gives none.
+func sameHost(header, target string) bool {
+	hh, hp := creds.SplitHost(header)
+	th, tp := creds.SplitHost(target)
+	norm := func(h string) string { return strings.ToLower(strings.TrimSuffix(h, ".")) }
+	return hh != "" && norm(hh) == norm(th) && hp == tp
+}

@@ -305,7 +305,10 @@ airbag's memory, and it is constrained to those hosts, so it cannot vouch for
 any other site. airbag replaces the placeholder with the value in the request's
 headers (Basic credentials included) and query, checks the real host against this
 machine's roots, and replaces the value with the placeholder in the response, so a
-host that echoes the request does not hand the token to the agent. The value is
+host that echoes the request does not hand the token to the agent. A request whose
+`Host` names another site is refused, so a server that hosts several sites (a CDN)
+cannot be asked to route the token to one the binding does not name (domain
+fronting). The value is
 read when the session starts and is never written to disk. Tools in the sandbox
 trust the session's authority through `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and
 the like.
@@ -399,6 +402,12 @@ airbag protects against accidents and casual exfiltration by an agent you let ru
 without prompts. It is not a VM: the kernel is shared, and whatever the agent reads
 is still sent to the model API. A bound credential keeps its value from the agent,
 not its use: through the bound hosts the agent can do what the token allows.
+
+For hosts without a credential the proxy decides from the name the client asks for
+and does not see inside TLS. So a broad allowlist entry (`github.com`) is a way for
+data to leave, and domain fronting can reach a site behind the same CDN that the
+allowlist does not name. Allow narrow names, and keep an `ask` rule on
+`net.egress` where that matters.
 
 ## License
 

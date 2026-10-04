@@ -184,3 +184,41 @@ func TestCANameConstraints(t *testing.T) {
 		}
 	}
 }
+
+// Inside a tunnel to the bound host, a request whose Host names another
+// site is refused: a CDN would route it there, with the real value.
+func TestInterceptRefusesOtherHost(t *testing.T) {
+	up, got := echo(t)
+	c, live, _ := mitmProxy(t, up, "")
+	req, _ := http.NewRequest("GET", up.URL+"/repos/x", nil)
+	req.Host = "attacker.example"
+	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "bound to") || got() != "" {
+		t.Fatalf("a request for another Host got through: %d %q, upstream saw %q", resp.StatusCode, body, got())
+	}
+}
+
+func TestSameHost(t *testing.T) {
+	for _, c := range []struct {
+		header, target string
+		want           bool
+	}{
+		{"api.github.com", "api.github.com:443", true},
+		{"API.GitHub.com.", "api.github.com:443", true},
+		{"api.github.com:443", "api.github.com:443", true},
+		{"api.github.com:8443", "api.github.com:443", false},
+		{"evil.example", "api.github.com:443", false},
+		{"", "api.github.com:443", false},
+		{"127.0.0.1:9443", "127.0.0.1:9443", true},
+	} {
+		if got := sameHost(c.header, c.target); got != c.want {
+			t.Errorf("sameHost(%q, %q) = %v, want %v", c.header, c.target, got, c.want)
+		}
+	}
+}
