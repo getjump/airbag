@@ -43,7 +43,7 @@ func cmdDoctor() error {
 	if err == nil {
 		_ = src.Close()
 		dst := filepath.Join(root, filepath.Base(src.Name()))
-		out, cerr := exec.Command("/bin/cp", "-c", src.Name(), dst).CombinedOutput()
+		out, cerr := exec.Command("/bin/cp", "-c", src.Name(), dst).CombinedOutput() //nolint:gosec // copies doctor's own temporary file
 		check("APFS clone from this directory to "+root, cerr == nil,
 			"the branch is an APFS clone; without one airbag copies the workspace in full: "+strings.TrimSpace(string(out)))
 		_ = os.Remove(dst)

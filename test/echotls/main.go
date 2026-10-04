@@ -59,7 +59,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "you sent: %s\n", auth)
+		_, _ = fmt.Fprintf(w, "you sent: %s\n", auth) //nolint:gosec // plain text back to the test, which looks for the header in it
 	})
 	_, port, _ := net.SplitHostPort(l.Addr().String())
 	if err := os.WriteFile(filepath.Join(*dir, "port"), []byte(port), 0o600); err != nil {

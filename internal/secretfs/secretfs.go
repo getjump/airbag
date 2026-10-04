@@ -169,7 +169,7 @@ func (s *secretFile) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrO
 		return fs.ToErrno(err)
 	}
 	out.Mode = syscall.S_IFREG | uint32(st.Mode().Perm())&^0o222
-	out.Size = uint64(st.Size())
+	out.Size = uint64(st.Size()) //nolint:gosec // a regular file's size is never negative
 	t := st.ModTime()
 	out.SetTimes(&t, &t, &t)
 	return 0

@@ -299,7 +299,7 @@ func cmdHook(agent, event string) {
 
 // workspace is the git toplevel, or the current directory.
 func workspace(cwd string) string {
-	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output() //nolint:gosec // git in the user's own working directory
 	if err == nil {
 		if p := strings.TrimSpace(string(out)); p != "" {
 			return p

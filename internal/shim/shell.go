@@ -60,7 +60,7 @@ func Shell(name string, args []string) {
 }
 
 func execOrDie(path string, argv []string) {
-	err := syscall.Exec(path, argv, os.Environ())
+	err := syscall.Exec(path, argv, os.Environ()) //nolint:gosec // the shim becomes the shell it stands in for, inside the sandbox
 	fmt.Fprintf(os.Stderr, "airbag: exec %s: %v\n", path, err)
 	os.Exit(126)
 }
@@ -163,7 +163,7 @@ func knownSecrets() []secret {
 // the shell exits, output still in flight is drained for a moment; a
 // process that kept the pipe open does not keep the shim alive.
 func runMasked(path string, argv []string, secrets []secret) int {
-	cmd := exec.Command(path, argv[1:]...)
+	cmd := exec.Command(path, argv[1:]...) //nolint:gosec // the shell the shim stands in for, inside the sandbox
 	cmd.Args[0] = argv[0]
 	cmd.Stdin = os.Stdin
 	out, errw := newMasker(os.Stdout, secrets), newMasker(os.Stderr, secrets)

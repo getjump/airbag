@@ -179,7 +179,7 @@ func fetchAgent(s *session.Session, head string) error {
 		return err
 	}
 	alt := strings.TrimSpace(realObjects) + "\n" + filepath.Join(s.WSBranch(), ".git", "objects") + "\n"
-	if err := os.WriteFile(filepath.Join(tmp, "objects", "info", "alternates"), []byte(alt), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmp, "objects", "info", "alternates"), []byte(alt), 0o600); err != nil {
 		return err
 	}
 	if _, err := git("", nil, "--git-dir", tmp, "update-ref", "refs/heads/agent", head); err != nil {
@@ -337,7 +337,7 @@ func git(dir string, env []string, args ...string) (string, error) {
 }
 
 func gitIn(dir string, env []string, stdin io.Reader, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", args...) //nolint:gosec // callers pass their own subcommands; paths from the sandbox follow "--" or an option that takes them
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
 	if stdin != nil {

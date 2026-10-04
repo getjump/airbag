@@ -128,7 +128,7 @@ func Resolve(source, home string) (string, error) {
 		argv := strings.Fields(rest)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // a command: source from the user's own config (credentials are user-only)
 		cmd.Stdin = nil
 		out, err := cmd.Output()
 		if err != nil {

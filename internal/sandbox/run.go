@@ -117,7 +117,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, fmt.Errorf("pseudo-terminal: %w", err)
 	}
-	cmd := exec.Command(self, InitArg, s.Dir)
+	cmd := exec.Command(self, InitArg, s.Dir) //nolint:gosec // airbag itself, as the sandbox's PID 1
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The sandbox gets a session of its own, so the user's terminal is
 	// never its controlling terminal (tty.go).

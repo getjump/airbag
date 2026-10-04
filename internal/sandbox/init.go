@@ -190,10 +190,10 @@ func agentConfig(s *session.Session) error {
 		return fmt.Errorf("/etc overlay: %w", err)
 	}
 	dir := agents.ClaudeManagedSettingsDir
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // /etc in the sandbox: the agent reads its managed settings here
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "90-airbag.json"), agents.ClaudeManagedSettings(), 0o444); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "90-airbag.json"), agents.ClaudeManagedSettings(), 0o444); err != nil { //nolint:gosec // managed settings the agent must read and must not change
 		return err
 	}
 	top := filepath.Dir(dir)
@@ -210,10 +210,10 @@ func agentConfig(s *session.Session) error {
 		fmt.Fprintf(os.Stderr, "airbag: note: %s exists on this host; Codex hooks are not installed\n", req)
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(req), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(req), 0o755); err != nil { //nolint:gosec // /etc in the sandbox: the agent reads its requirements here
 		return err
 	}
-	if err := os.WriteFile(req, agents.CodexRequirements(), 0o444); err != nil {
+	if err := os.WriteFile(req, agents.CodexRequirements(), 0o444); err != nil { //nolint:gosec // requirements the agent must read and must not change
 		return err
 	}
 	cdir := filepath.Dir(req)
@@ -269,7 +269,7 @@ func privateRun(s *session.Session) error {
 	if err := unix.Mount("tmpfs", "/run", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755"); err != nil {
 		return fmt.Errorf("tmpfs /run: %w", err)
 	}
-	if err := os.MkdirAll(shim.BinDir, 0o755); err != nil {
+	if err := os.MkdirAll(shim.BinDir, 0o755); err != nil { //nolint:gosec // the shims' directory, which every program in the sandbox searches
 		return err
 	}
 	socks := map[string]string{
@@ -352,6 +352,8 @@ func hide(p string) error {
 
 // loopbackUp brings up lo in the new network namespace. There is no
 // other interface: the only way out is the proxy bridge.
+//
+//nolint:gosec // unsafe: SIOC[GS]IFFLAGS take a pointer to the ifreq, whose flags sit after the name
 func loopbackUp() error {
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
@@ -473,7 +475,7 @@ func runAgent(s *session.Session, ctl *os.File) int {
 		}
 		path = p
 	}
-	cmd := exec.Command(path, s.Argv[1:]...)
+	cmd := exec.Command(path, s.Argv[1:]...) //nolint:gosec // the command the user asked to run in the sandbox
 	cmd.Args[0] = s.Argv[0]
 	cmd.Env = env
 	cmd.Dir = s.Cwd

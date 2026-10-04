@@ -34,7 +34,7 @@ func run(timeout time.Duration, dir string, name string, args ...string) (string
 func runEnv(timeout time.Duration, dir string, env []string, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // the probe's own commands, with its own arguments
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
@@ -97,7 +97,7 @@ const tlsClientArg = "__tls_client"
 // runs inside the sandbox in the TLS check.
 func tlsClient(url string) int {
 	c := &http.Client{Timeout: 20 * time.Second}
-	resp, err := c.Get(url)
+	resp, err := c.Get(url) //nolint:gosec // the URL the probe passes itself for its TLS check
 	if err != nil {
 		fmt.Println("tls=error", err)
 		return 1

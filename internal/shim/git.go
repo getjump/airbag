@@ -43,7 +43,7 @@ func Git(args []string) {
 		fmt.Fprintln(os.Stderr, "airbag: git not found")
 		os.Exit(127)
 	}
-	err = syscall.Exec(real, append([]string{"git"}, args...), os.Environ())
+	err = syscall.Exec(real, append([]string{"git"}, args...), os.Environ()) //nolint:gosec // the shim becomes git, inside the sandbox
 	fmt.Fprintf(os.Stderr, "airbag: exec git: %v\n", err)
 	os.Exit(126)
 }
@@ -80,7 +80,7 @@ func lookPathSkipping(name, skip string) (string, error) {
 			continue
 		}
 		p := filepath.Join(dir, name)
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 { //nolint:gosec // a lookup in PATH, inside the sandbox
 			return p, nil
 		}
 	}

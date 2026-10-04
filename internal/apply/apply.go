@@ -396,7 +396,7 @@ func runPush(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, 
 		}
 		return outbox.Rejected, nil
 	}
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", args...) //nolint:gosec // a push outbox.GitPush checked and the user confirmed
 	cmd.Dir = cwd
 	return run(box, it, cmd, o)
 }
@@ -469,7 +469,7 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, i
 		}
 		return outbox.Rejected, nil
 	}
-	cmd := exec.Command(prog, it.Argv[1:]...)
+	cmd := exec.Command(prog, it.Argv[1:]...) //nolint:gosec // a deferred command: a program from this machine's PATH, its files checked, confirmed by the user
 	cmd.Args[0] = it.Argv[0]
 	cmd.Dir, cmd.Env = cwd, env
 	return run(box, it, cmd, o)
@@ -517,7 +517,7 @@ func pushTarget(cwd string, args []string) string {
 			break
 		}
 	}
-	out, err := exec.Command("git", "-C", cwd, "remote", "get-url", "--push", remote).Output()
+	out, err := exec.Command("git", "-C", cwd, "remote", "get-url", "--push", remote).Output() //nolint:gosec // remote is an argument that does not start with "-"
 	if err != nil {
 		return remote
 	}
@@ -569,7 +569,7 @@ func applyOne(c review.Change) error {
 // copyFile replaces dst atomically: write a temp file next to it, then
 // rename over the old one.
 func copyFile(src, dst string, mode fs.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil { //nolint:gosec // a directory in the user's workspace, with the usual mode less the umask
 		return err
 	}
 	in, err := os.Open(src)

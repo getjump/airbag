@@ -297,7 +297,7 @@ func Resume(id, workspace string) (*Session, error) {
 	for _, d := range []string{s.WSWork(), s.HomeWork(), s.EtcWork(), s.RunDir()} {
 		_ = filepath.WalkDir(d, func(p string, de os.DirEntry, err error) error {
 			if err == nil && de.IsDir() {
-				_ = os.Chmod(p, 0o700)
+				_ = os.Chmod(p, 0o700) //nolint:gosec // a directory: the owner needs x to remove what is inside
 			}
 			return nil
 		})
@@ -321,7 +321,7 @@ func Resume(id, workspace string) (*Session, error) {
 func (s *Session) RemoveAll() error {
 	_ = filepath.WalkDir(s.Dir, func(p string, d os.DirEntry, err error) error {
 		if err == nil && d.IsDir() {
-			_ = os.Chmod(p, 0o700)
+			_ = os.Chmod(p, 0o700) //nolint:gosec // a directory: the owner needs x to remove what is inside
 		}
 		return nil
 	})

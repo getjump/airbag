@@ -475,7 +475,7 @@ func checkTLS(p *probe) Result {
 		if prof != nil {
 			args = append([]string{"/usr/bin/sandbox-exec", "-p", prof.String()}, args...)
 		}
-		cmd := exec.Command(args[0], args[1:]...)
+		cmd := exec.Command(args[0], args[1:]...) //nolint:gosec // the probe's own commands
 		cmd.Env = append(viaProxy(os.Environ(), px.Port()), "TMPDIR="+p.dir)
 		out, _ := cmd.CombinedOutput()
 		return tlsTry{ok: strings.Contains(string(out), "tls=ok"), out: strings.TrimSpace(string(out))}

@@ -424,7 +424,7 @@ func applyTemp(p string, d fs.DirEntry, copying map[string]bool) bool {
 func removeTemps(dir string, copying map[string]bool) {
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && applyTemp(p, d, copying) {
-			_ = os.Remove(p)
+			_ = os.Remove(p) //nolint:gosec // the rollback runs after the session stopped: nothing from the sandbox can swap a path during the walk
 		}
 		return nil
 	})
@@ -509,7 +509,7 @@ func giveBack(e genEntry, clone bool) error {
 	if clone && e.Kind == review.Deleted {
 		return nil // absent from the clone is what a deletion is
 	}
-	if err := os.MkdirAll(filepath.Dir(e.Upper), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(e.Upper), 0o755); err != nil { //nolint:gosec // a directory of the session's upper layer, inside the 0700 session dir
 		return err
 	}
 	switch {
@@ -518,7 +518,7 @@ func giveBack(e genEntry, clone bool) error {
 		// since Linux 5.8).
 		return unix.Mknod(e.Upper, syscall.S_IFCHR|0o000, 0)
 	case e.Type == fs.ModeDir:
-		if err := os.MkdirAll(e.Upper, 0o755); err != nil {
+		if err := os.MkdirAll(e.Upper, 0o755); err != nil { //nolint:gosec // a directory of the session's upper layer, inside the 0700 session dir
 			return err
 		}
 		if e.Kind == review.Replaced {
@@ -594,7 +594,7 @@ func copyTree(from, to string) error {
 			if err != nil {
 				return err
 			}
-			return os.Symlink(t, dst)
+			return os.Symlink(t, dst) //nolint:gosec // copies run after the session stopped: nothing from the sandbox can swap a path during the walk
 		case info.Mode().IsRegular():
 			return copyFile(p, dst, info.Mode().Perm())
 		}
