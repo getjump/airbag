@@ -98,6 +98,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	if len(sts) > 0 {
 		renderSteps(w, sts)
 	}
+	renderShell(w, effs)
 
 	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))
 	for _, in := range intents {
@@ -281,4 +282,46 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// Predicted effects worth a look before applying.
+var notable = []string{"fs.delete", "net.egress", "intent.", "persist", "fs.exec_bit"}
+
+// renderShell lists shell commands whose models predict risky effects.
+func renderShell(w io.Writer, effs []effects.Effect) {
+	total, opaque := 0, 0
+	type row struct{ cmd, pred string }
+	var rows []row
+	for _, e := range effs {
+		if e.Kind != "proc.exec" {
+			continue
+		}
+		total++
+		var hits []string
+		for _, p := range e.Predict {
+			if strings.HasPrefix(p, "opaque") {
+				opaque++
+			}
+			for _, n := range notable {
+				if strings.HasPrefix(p, n) {
+					hits = append(hits, p)
+					break
+				}
+			}
+		}
+		if len(hits) > 0 {
+			rows = append(rows, row{e.Target, strings.Join(hits, ", ")})
+		}
+	}
+	if total == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nShell      %d commands, %d without a model\n", total, opaque)
+	for i, r := range rows {
+		if i == maxListed {
+			fmt.Fprintf(w, "  … and %d more\n", len(rows)-maxListed)
+			return
+		}
+		fmt.Fprintf(w, "  $ %-40s → %s\n", clip(r.cmd, 40), r.pred)
+	}
 }

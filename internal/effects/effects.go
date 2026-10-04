@@ -17,6 +17,8 @@ type Effect struct {
 	Target  string    `json:"target"`            // host:port, argv, path
 	Verdict string    `json:"verdict,omitempty"` // allow, deny, defer
 	Reason  string    `json:"reason,omitempty"`
+	// Predict: what a command model expects this command to do.
+	Predict []string `json:"predict,omitempty"`
 }
 
 type Log struct {

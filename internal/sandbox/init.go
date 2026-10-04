@@ -182,8 +182,10 @@ func privateRun(s *session.Session) error {
 			return err
 		}
 	}
-	if err := os.Symlink(airbagBinInside, filepath.Join(shim.BinDir, "git")); err != nil {
-		return err
+	for _, name := range []string{"git", "bash", "sh"} {
+		if err := os.Symlink(airbagBinInside, filepath.Join(shim.BinDir, name)); err != nil {
+			return err
+		}
 	}
 	return os.MkdirAll(fmt.Sprintf(runtimeDirFormat, s.UID), 0o700)
 }
@@ -354,8 +356,11 @@ func agentEnv(s *session.Session) []string {
 		"HTTPS_PROXY": "http://" + ProxyAddr, "https_proxy": "http://" + ProxyAddr,
 		"HTTP_PROXY": "http://" + ProxyAddr, "http_proxy": "http://" + ProxyAddr,
 		"NO_PROXY": "localhost,127.0.0.1,::1", "no_proxy": "localhost,127.0.0.1,::1",
-		"XDG_RUNTIME_DIR": fmt.Sprintf(runtimeDirFormat, s.UID),
-		"AIRBAG_SESSION":  s.ID,
+		"XDG_RUNTIME_DIR":  fmt.Sprintf(runtimeDirFormat, s.UID),
+		"AIRBAG_SESSION":   s.ID,
+		"AIRBAG_WORKSPACE": s.Workspace,
+		// Claude Code runs its Bash tool through this shell.
+		"CLAUDE_CODE_SHELL": shim.BinDir + "/bash",
 	}
 	var env []string
 	for _, kv := range os.Environ() {

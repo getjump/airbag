@@ -15,6 +15,7 @@ import (
 
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/models"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/steps"
 )
@@ -32,6 +33,7 @@ func (s *Server) Serve(l net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /intent", s.intent)
 	mux.HandleFunc("POST /hook/{agent}/{event}", s.hook)
+	mux.HandleFunc("POST /exec", s.exec)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	return srv.Serve(l)
 }
@@ -83,6 +85,51 @@ func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_, _ = w.Write([]byte("{}"))
+}
+
+// Exec is what the shell shim reports before running a script.
+type Exec struct {
+	Shell      string           `json:"shell"`
+	Script     string           `json:"script"`
+	Commands   []models.Command `json:"commands"`
+	ParseError string           `json:"parse_error,omitempty"`
+}
+
+func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
+	var e Exec
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&e); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if e.ParseError != "" {
+		s.Log.Add(effects.Effect{Kind: "proc.exec", Target: clip(e.Script, 200), Verdict: "allow", Reason: "unparsed: " + e.ParseError})
+	}
+	for _, c := range e.Commands {
+		var pred []string
+		for _, ef := range c.Effects {
+			pred = append(pred, ef.String())
+		}
+		s.Log.Add(effects.Effect{Kind: "proc.exec", Target: clip(strings.Join(c.Argv, " "), 200), Verdict: "allow", Predict: pred})
+	}
+	_, _ = w.Write([]byte("{}"))
+}
+
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// ReportExec is called by the shell shim inside the sandbox.
+func ReportExec(e Exec) ([]byte, error) {
+	body, _ := json.Marshal(e)
+	resp, err := client(3*time.Second).Post("http://airbag/exec", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
 
 // Hook forwards a hook event from inside the sandbox.

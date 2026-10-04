@@ -38,6 +38,7 @@ type request struct {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8099", "listen address")
 	script := flag.String("script", "", "JSON file with tool calls")
+	logPath := flag.String("log", "", "append every request body here (what the model would see)")
 	flag.Parse()
 	var calls []call
 	if b, err := os.ReadFile(*script); err == nil {
@@ -47,6 +48,12 @@ func main() {
 	}
 	http.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		if *logPath != "" {
+			if f, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+				_, _ = f.Write(append(body, '\n'))
+				f.Close()
+			}
+		}
 		var req request
 		_ = json.Unmarshal(body, &req)
 		done := strings.Count(string(body), `"type":"tool_result"`)

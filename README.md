@@ -62,13 +62,17 @@ one-time profile to install. macOS is not supported yet (use a Linux VM).
 Early v0. Working: sandbox, branch, proxy with allowlist, git push outbox, review,
 diff, apply with conflict check, discard. Claude Code gets airbag's hooks as
 read-only managed settings, so the review shows which tool call changed which file.
+`bash` and `sh` are shimmed: each `-c` script is parsed, every command is matched
+against a model of its effects (`rm -rf` deletes, `curl -d` sends data out, `git
+config core.hooksPath` persists), and known secret values (from `.env` and
+credential-like variables) are masked in output that goes back to the agent.
 
 Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `python3 test/ctrlc.py`
 and `test/claude-e2e.sh` (the real Claude Code binary against a scripted mock of the
 Messages API). With a real login, follow [docs/manual-test.md](docs/manual-test.md).
 
-Not yet: the shell shim with command models, CEL policies in `airbag.yaml`, a local
-registry mirror, secret handles and output masking, an interactive review with
+Not yet: CEL policies in `airbag.yaml` (predictions are reported, not enforced),
+a local registry mirror, secret handles in files, an interactive review with
 partial apply, Codex hooks.
 
 ## Threat model

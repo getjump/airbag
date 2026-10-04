@@ -41,8 +41,12 @@ ID defaults to the newest open session of the current workspace.
 `
 
 func main() {
-	if filepath.Base(os.Args[0]) == "git" {
+	switch name := filepath.Base(os.Args[0]); name {
+	case "git":
 		shim.Git(os.Args[1:])
+		return
+	case "bash", "sh":
+		shim.Shell(name, os.Args[1:])
 		return
 	}
 	if len(os.Args) >= 4 && os.Args[1] == "hook" {
