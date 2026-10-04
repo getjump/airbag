@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/creds"
 	"github.com/getjump/airbag/internal/effects"
@@ -280,4 +282,48 @@ func TestUpstreamHost(t *testing.T) {
 			t.Errorf("upstreamHost(%q) = %q, %q; want %q, %q", c.target, name, host, c.name, c.host)
 		}
 	}
+}
+
+// A protocol upgrade to a host a credential is bound to is refused
+// before it reaches the host: the upgraded stream could not be checked
+// for the value. Nothing of the connection stays behind.
+func TestInterceptRefusesUpgrade(t *testing.T) {
+	var reached atomic.Bool
+	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Store(true)
+		c, brw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: " + r.Header.Get("Upgrade") + "\r\n\r\n")
+		_ = brw.Flush()
+		_, _ = io.Copy(c, brw)
+	}))
+	t.Cleanup(up.Close)
+	c, live, path := mitmProxyWith(t, up, "", func(p *Proxy) { p.Limits = testLimits })
+	g0, fd0 := usage()
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/socket", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "protocol upgrade") || reached.Load() {
+		t.Fatalf("upgrade: %d %q, reached the host: %v", resp.StatusCode, body, reached.Load())
+	}
+	effs, _ := effects.Read(path)
+	var logged bool
+	for _, e := range effs {
+		logged = logged || (e.Kind == "http.request" && e.Verdict == "deny" && strings.HasPrefix(e.Reason, "protocol upgrade"))
+	}
+	if !logged {
+		t.Fatalf("refusal not logged: %+v", effs)
+	}
+	settle(t, g0, fd0, 2, 2, 3*time.Second) // the client's pool keeps nothing either once KeepAlive closes it
+	c.CloseIdleConnections()
 }

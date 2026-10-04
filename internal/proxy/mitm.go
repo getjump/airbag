@@ -125,7 +125,8 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 // The connection is the flow f: bytes either way on it or on its
 // upstream connections keep it open. It is closed when it has waited
 // Limits.KeepAlive for its next request, or when a request in progress
-// has moved no byte for Limits.Idle (a host that stalls).
+// has moved no byte for Limits.Idle (a host that stalls). A protocol
+// upgrade is refused, so no connection outlives its HTTP exchanges.
 func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, live *creds.Live, f *flow) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -250,16 +251,22 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 				return
 			}
 		}
+		if req.Header.Get("Upgrade") != "" {
+			// After an upgrade (a websocket) the stream is not HTTP.
+			// Putting the placeholder back in it would mean holding up
+			// any bytes that could start the value (a "ping", when the
+			// value starts with "g"); without that, a host that echoes
+			// would hand the value to the agent. The request is refused
+			// before it reaches the host.
+			p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "protocol upgrade: the stream cannot be checked for the credential"})
+			http.Error(w, "airbag: "+host+" is reached with a credential, and airbag does not pass a protocol upgrade (websocket) there: it could not keep the value out of the upgraded stream", http.StatusForbidden)
+			return
+		}
 		reason := ""
 		if live.Substitute(req.Header.Clone(), cloneURL(req)) {
 			reason = live.Name
 		}
 		p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "allow", Reason: reason})
-		if req.Header.Get("Upgrade") != "" {
-			// A hijacked connection never reports closed; its end is
-			// when the proxied exchange returns.
-			defer once.Do(func() { close(closed) })
-		}
 		rp.ServeHTTP(w, req)
 	})
 
