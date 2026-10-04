@@ -43,9 +43,11 @@ leading candidate. A first step: port three existing models and keep their
 tests passing.
 
 **macOS.** There are no Linux namespaces there. [docs/macos.md](docs/macos.md)
-covers running in a Linux VM today, what still needs checking there, and a
-native design: Seatbelt for the network and credentials, APFS clones for the
-workspace branch, FUSE-T or FSKit for secret tracking.
+compares how Claude Code, Codex, Gemini CLI, Cursor, nono and AgentFS sandbox
+agents on macOS, and lays out a native design without a VM: one Seatbelt
+profile around the agent, the proxy on a localhost port, and the workspace
+branch served over NFS on localhost, as AgentFS does. It starts with a list of
+things to check on a real Mac.
 
 **Syscall-level control.** The shell shim sees `bash -c` scripts, not what a
 Python program does inside. A seccomp user-notification supervisor
