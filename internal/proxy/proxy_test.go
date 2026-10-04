@@ -300,6 +300,8 @@ rules:
 		{"API.EXAMPLE:0443", http.StatusForbidden, "not this host"},
 		{"api.example:99999", http.StatusBadRequest, "not a port number"},
 		{"api.example:", http.StatusBadRequest, "no port"},
+		{"api.example", http.StatusBadRequest, "no port"},
+		{":443", http.StatusBadRequest, "no host"},
 		{"[::1..]:443", http.StatusBadRequest, "not an IP address"},
 		{"ap\u0130.example:443", http.StatusBadRequest, "ASCII"},
 		{"\u212Aite.example:443", http.StatusBadRequest, "ASCII"},
@@ -395,5 +397,14 @@ func TestAllowlistCanonical(t *testing.T) {
 	if !a.Allows("::1") || !a.explicitIP("::1") || !a.AllowsPort("svc.example", "8443") || a.AllowsPort("svc.example", "9443") {
 		t.Fatalf("Allows(::1)=%v explicitIP(::1)=%v AllowsPort(svc.example, 8443)=%v (9443)=%v",
 			a.Allows("::1"), a.explicitIP("::1"), a.AllowsPort("svc.example", "8443"), a.AllowsPort("svc.example", "9443"))
+	}
+}
+
+// An entry that names no host allows none.
+func TestAllowlistEmptyEntry(t *testing.T) {
+	for _, e := range []string{":*", ".:*", "[]:*", "", "."} {
+		if a := (Allowlist{e}); a.Allows("") || a.AllowsPort("", "443") {
+			t.Errorf("Allowlist{%q} allows the empty host", e)
+		}
 	}
 }

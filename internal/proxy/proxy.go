@@ -52,6 +52,9 @@ func (a Allowlist) Allows(host string) bool {
 			p = h
 		}
 		p = creds.CanonHost(p)
+		if p == "" {
+			continue // ":*", "." or "[]" names no host
+		}
 		if p == host || (strings.HasPrefix(p, "*.") && strings.HasSuffix(host, p[1:])) {
 			return true
 		}
@@ -184,9 +187,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var err error
 		// "api.example:" would read as 443 to the credential lookup
 		// and as no port to the rules.
-		if _, port, err = net.SplitHostPort(r.Host); err == nil && port == "" && why == "" {
+		if _, port, err = net.SplitHostPort(r.Host); (err != nil || port == "") && why == "" {
 			why = "CONNECT names no port"
 		}
+	}
+	if why == "" && canon == "" {
+		why = "no host named" // the checks below would see "" and the dial something else
 	}
 	if why == "" && port != "" {
 		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
