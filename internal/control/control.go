@@ -54,7 +54,11 @@ func (s *Server) Serve(l net.Listener) error {
 	mux.HandleFunc("POST /hook/{agent}/{event}", s.hook)
 	mux.HandleFunc("POST /exec", s.exec)
 	mux.HandleFunc("POST /taint", s.taint)
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// The agent can open connections here, and each one held is a
+	// goroutine and a file descriptor on the host side: a request must
+	// arrive whole within a minute (its header within 10 s), and a
+	// connection waiting for its next request is closed after two.
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: time.Minute, IdleTimeout: 2 * time.Minute}
 	return srv.Serve(l)
 }
 
@@ -378,13 +382,21 @@ func post(timeout time.Duration, url string, body io.Reader) (*http.Response, er
 	return client(timeout).Do(req)
 }
 
+// transport is shared by every call. A Transport of its own per call
+// would keep that call's connection open and idle, with two goroutines
+// on this side and one on the host's, for as long as the process runs:
+// the sandbox's init reports each secret read through here.
+var transport = &http.Transport{
+	DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", socketPath())
+	},
+	MaxIdleConns:    2,
+	IdleConnTimeout: 30 * time.Second,
+}
+
 func client(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout, Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socketPath())
-		},
-	}}
+	return &http.Client{Timeout: timeout, Transport: transport}
 }
 
 // Defer asks whether a call waits in the outbox; from inside the
