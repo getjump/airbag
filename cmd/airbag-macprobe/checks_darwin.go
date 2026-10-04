@@ -37,31 +37,46 @@ func systemVersion() string {
 // two attempts can stack. When neither umount nor diskutil can unmount
 // it, the mount and the server stay and the failure is returned.
 func (p *probe) cleanup() error {
-	for i := 0; p.mnt != "" && isMount(p.mnt); i++ {
+	for i := 0; p.mnt != "" && (p.mounted || isMount(p.mnt)); i++ {
 		if i == 3 {
 			return fmt.Errorf("%s is still mounted after three unmounts", p.mnt)
 		}
-		if _, err := run(20*time.Second, "", "/sbin/umount", p.mnt); err != nil {
+		if _, err := run(20*time.Second, "", "/sbin/umount", p.mnt); err != nil && isMount(p.mnt) {
+			// diskutil acts on the volume holding a path, so it gets
+			// only a path confirmed to be this mount point.
 			if out, err := run(20*time.Second, "", "/usr/sbin/diskutil", "unmount", "force", p.mnt); err != nil {
 				return fmt.Errorf("cannot unmount %s: %v: %s", p.mnt, err, firstLine(out))
 			}
 		}
+		p.mounted = false
 	}
-	p.mounted = false
 	if p.srv != nil {
 		_ = p.srv.Close()
 	}
 	return nil
 }
 
-// isMount reports whether p is a mount point: statfs names it as the
-// directory its filesystem is mounted on.
+// isMount reports whether p is in the kernel's mount table. getfsstat
+// with MNT_NOWAIT reads the table without asking the filesystems, so a
+// server that stopped answering does not make a live mount look gone,
+// as statfs on it would. The names are compared without case, as APFS
+// does by default.
 func isMount(p string) bool {
-	var st unix.Statfs_t
-	if err := unix.Statfs(p, &st); err != nil {
+	n, err := unix.Getfsstat(nil, unix.MNT_NOWAIT)
+	if err != nil {
 		return false
 	}
-	return unix.ByteSliceToString(st.Mntonname[:]) == p
+	buf := make([]unix.Statfs_t, n+8)
+	n, err = unix.Getfsstat(buf, unix.MNT_NOWAIT)
+	if err != nil {
+		return false
+	}
+	for _, st := range buf[:n] {
+		if strings.EqualFold(unix.ByteSliceToString(st.Mntonname[:]), p) {
+			return true
+		}
+	}
+	return false
 }
 
 // S1: a deny-first profile around a shell: writes only where allowed,
@@ -69,7 +84,10 @@ func isMount(p string) bool {
 func checkSeatbelt(p *probe) Result {
 	r := Result{ID: "S1", Name: "Seatbelt profile around a shell"}
 	ws, secret := filepath.Join(p.dir, "ws"), filepath.Join(p.dir, "secret")
-	for _, d := range []string{ws, secret} {
+	// outside: a directory the profile does not allow, which this
+	// process can write: a "no" there is Seatbelt's, whatever $HOME is.
+	outside := filepath.Join(p.dir, "outside")
+	for _, d := range []string{ws, secret, outside} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return fail(r, err)
 		}
@@ -115,20 +133,22 @@ func checkSeatbelt(p *probe) Result {
 		}
 	}
 	p.tag = fmt.Sprintf("airbag-macprobe-%d", time.Now().UnixNano())
-	homeFile := filepath.Join(p.home, "."+p.tag)
+	homeFile, outsideFile := filepath.Join(p.home, "."+p.tag), filepath.Join(outside, "."+p.tag)
 	// The home directory must be writable outside the profile, or "no"
-	// inside it would say nothing about Seatbelt.
+	// inside it would say nothing about Seatbelt; then only the other
+	// directory shows the denial.
 	homeWritable := writeFile(homeFile, "x\n") == nil
 	_ = os.Remove(homeFile)
 	prof := Profile{Tag: p.tag, Write: []string{ws}, NoRead: []string{secret}, Ports: []int{px.Port()}}
 	script := fmt.Sprintf(`try() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
 echo "write-workspace=$(try sh -c 'echo x > %[1]s/f')"
 echo "write-home=$(try sh -c 'echo x > %[2]s')"
+echo "write-outside=$(try sh -c 'echo x > %[6]s')"
 echo "read-secret=$(try cat %[3]s/token)"
 echo "read-system=$(try cat /etc/hosts)"
 echo "connect-other-port=$(try /usr/bin/nc -z -G 3 127.0.0.1 %[5]d)"
 echo "connect-proxy=$(try /usr/bin/nc -z -G 3 127.0.0.1 %[4]d)"
-`, shq(ws), shq(homeFile), shq(secret), px.Port(), otherPort)
+`, shq(ws), shq(homeFile), shq(secret), px.Port(), otherPort, shq(outsideFile))
 	if internet {
 		script += "echo \"connect-internet=$(try /usr/bin/nc -z -G 3 1.1.1.1 443)\"\n"
 	}
@@ -143,7 +163,7 @@ echo "connect-proxy=$(try /usr/bin/nc -z -G 3 127.0.0.1 %[4]d)"
 		return r
 	}
 	want := map[string]string{
-		"write-workspace": "yes", "write-home": "no", "read-secret": "no",
+		"write-workspace": "yes", "write-home": "no", "write-outside": "no", "read-secret": "no",
 		"read-system": "yes", "connect-other-port": "no", "connect-proxy": "yes",
 	}
 	if internet {
@@ -158,6 +178,9 @@ echo "connect-proxy=$(try /usr/bin/nc -z -G 3 127.0.0.1 %[4]d)"
 		return r
 	}
 	r.Status, r.Reason = Pass, "writes only to the workspace, credentials unreadable, network only to the proxy port"
+	if !homeWritable {
+		r.Reason += " (the home directory is not writable here, so the write denial was shown in a second directory only)"
+	}
 	if !internet {
 		r.Reason += " (the internet is not reachable from here, so that was shown on a second local port only)"
 	}
@@ -173,7 +196,7 @@ func checkViolationLog(p *probe) Result {
 		return r
 	}
 	time.Sleep(2 * time.Second) // the log is written asynchronously
-	file := "." + p.tag         // S1's denied write in the home directory
+	file := "." + p.tag         // S1's denied writes, in ~ and in the other directory
 	pred := fmt.Sprintf(`eventMessage CONTAINS %q`, file)
 	out, err := run(90*time.Second, "", "/usr/bin/log", "show", "--last", "5m", "--style", "ndjson", "--predicate", pred)
 	r.Detail = clip(out, 4000)
@@ -338,7 +361,7 @@ func checkGitAtMount(p *probe) Result {
 	}
 	for _, agent := range []string{"claude", "codex"} {
 		if path, err := exec.LookPath(agent); err == nil {
-			out, err := run(30*time.Second, repo, path, "--version")
+			out, err := runEnv(30*time.Second, repo, env, path, "--version")
 			log = append(log, agent+" --version at the mount: "+orNone(strings.TrimSpace(out+" "+errString(err))))
 		}
 	}

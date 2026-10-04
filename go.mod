@@ -4,6 +4,7 @@ go 1.24
 
 require (
 	cel.dev/cel-go v0.32.0
+	github.com/cyphar/filepath-securejoin v0.2.5
 	github.com/go-git/go-billy/v5 v5.6.0
 	github.com/hanwen/go-fuse/v2 v2.7.2
 	github.com/willscott/go-nfs v0.0.4
@@ -17,7 +18,6 @@ require (
 require (
 	cel.dev/expr v0.25.1 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
-	github.com/cyphar/filepath-securejoin v0.2.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect

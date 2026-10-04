@@ -63,7 +63,10 @@ Differences to accept:
 `cmd/airbag-macprobe` checks these on your Mac. It needs no root. It writes
 inside a temporary directory and removes it, plus one dot file in `~` that it
 removes at once, and mounts the NFS export under that directory for the run;
-if the export will not unmount, it says so, leaves the directory and exits 1:
+if the export will not unmount, it says so, leaves the directory and exits 1
+(130 when interrupted). While it runs, its NFS server answers any local client,
+for the temporary export only. N3 runs `claude --version` and `codex --version`
+if they are installed, which may write their own files:
 
 ```console
 $ go run ./cmd/airbag-macprobe            # one line per check
@@ -78,7 +81,7 @@ your user name; read it before pasting.
 
 | Check | What it answers |
 |---|---|
-| S1 | A deny-first Seatbelt profile around a shell: writes only in the workspace, a credentials directory unreadable, outbound traffic only to the proxy's localhost port (shown on a second local port that is reachable outside the profile, and on the internet when it is reachable from the Mac) |
+| S1 | A deny-first Seatbelt profile around a shell: writes only in the workspace (refused in another directory and in `~`), a credentials directory unreadable, outbound traffic only to the proxy's localhost port (shown on a second local port that is reachable outside the profile, and on the internet when it is reachable from the Mac) |
 | S2 | The denials from S1 can be read from the unified log without admin rights, so review can list blocked operations: a log entry that is a `deny` and names S1's file (not one where the path is `<private>`) |
 | N1 | `mount_nfs` mounts an NFSv3 export served from a localhost port by a regular user; read, write, rename, mkdir and delete reach the export |
 | N2 | How much slower creating and walking a `node_modules`-sized tree is through the mount |

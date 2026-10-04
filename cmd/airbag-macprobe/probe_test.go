@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/go-git/go-billy/v5"
 	nfsc "github.com/willscott/go-nfs-client/nfs"
 	"github.com/willscott/go-nfs-client/nfs/rpc"
 )
@@ -220,5 +222,49 @@ func TestGitEnv(t *testing.T) {
 	want := []string{"HOME=/h", "PATH=/bin", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
 	if strings.Join(env, " ") != strings.Join(want, " ") {
 		t.Fatalf("got %q, want %q", env, want)
+	}
+}
+
+// The export holds every path inside its directory: through "..", an
+// absolute path or a symlink the agent (or any local NFS client) made,
+// nothing outside can be read, written or changed.
+func TestExportStaysInside(t *testing.T) {
+	base := t.TempDir()
+	dir, outside := filepath.Join(base, "export"), filepath.Join(base, "outside")
+	for _, d := range []string{dir, outside} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secret := filepath.Join(outside, "secret")
+	if err := os.WriteFile(secret, []byte("s3cret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	fs := exportFS(dir)
+	for _, name := range []string{"../outside/secret", secret, "link/secret"} {
+		if f, err := fs.Open(name); err == nil {
+			b, _ := io.ReadAll(f)
+			f.Close()
+			if string(b) == "s3cret" {
+				t.Errorf("Open(%q) read the file outside the export", name)
+			}
+		}
+		if f, err := fs.Create(name); err == nil {
+			_, _ = f.Write([]byte("x"))
+			f.Close()
+		}
+		ch := fs.(billy.Change)
+		_ = ch.Chmod(name, 0o666)
+		_ = ch.Chtimes(name, time.Unix(0, 0), time.Unix(0, 0))
+	}
+	st, err := os.Stat(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(secret); string(b) != "s3cret" || st.Mode().Perm() != 0o600 || st.ModTime().Unix() == 0 {
+		t.Fatalf("the file outside changed: %q %v %v", b, st.Mode(), st.ModTime())
 	}
 }
