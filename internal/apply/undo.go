@@ -512,6 +512,36 @@ func copyTree(from, to string) error {
 	})
 }
 
+// Held is the user's version of Path from before an apply, which only
+// the session has, at Saved.
+type Held struct{ Path, Saved string }
+
+// HeldVersions lists the versions from before an apply that s holds for
+// paths a rollback left as they were, or that an apply which did not
+// finish had moved. Discarding s would delete them.
+func HeldVersions(s *session.Session) ([]Held, error) {
+	gs, err := listGenerations(s)
+	if err != nil {
+		return nil, err
+	}
+	var out []Held
+	for _, r := range gs {
+		g, err := loadGeneration(r.dir)
+		if err != nil {
+			return nil, err
+		}
+		if g.Complete && !g.Partial {
+			continue // applied: discarding it keeps the apply, as asked
+		}
+		for _, e := range g.Entries {
+			if _, err := os.Lstat(e.Saved); e.Saved != "" && err == nil {
+				out = append(out, Held{e.Path, e.Saved})
+			}
+		}
+	}
+	return out, nil
+}
+
 // Rollback undoes the last apply of s: real files get their previous
 // versions back, the agent's versions return to the session. A pushed
 // intent is not undone; Rollback lists those.

@@ -47,7 +47,9 @@ const usage = `airbag — approve outcomes, not commands
                               put the result on a new git branch instead;
                               the working tree is not touched
   airbag rollback [ID]        undo the last apply; its changes go back to the session
-  airbag discard [ID] [--yes] throw the branch away
+  airbag discard [ID] [--yes] [--force]
+                              throw the branch away; --force also when it holds
+                              your versions of paths a rollback left
   airbag ls                   list sessions
   airbag log [ID]             raw effect log
   airbag approve [ID]         list or approve requests blocked by an "ask" rule
@@ -492,6 +494,7 @@ func listIntents(s *session.Session) []outbox.Intent {
 func cmdDiscard(args []string) error {
 	fs := flag.NewFlagSet("discard", flag.ExitOnError)
 	yes := fs.Bool("yes", false, "do not ask for confirmation")
+	force := fs.Bool("force", false, "discard also the versions from before an apply that a rollback left in the session")
 	_ = fs.Parse(reorder(args))
 	s, err := findSession(fs.Arg(0))
 	if err != nil {
@@ -499,6 +502,23 @@ func cmdDiscard(args []string) error {
 	}
 	if s.Status == session.StatusRunning {
 		return fmt.Errorf("session %s is still running", s.ID)
+	}
+	if !*force {
+		// After a partial rollback, or an apply that did not finish, the
+		// session may hold the only copy of the user's own files.
+		held, err := apply.HeldVersions(s)
+		if err != nil {
+			return fmt.Errorf("session %s: read its undo journal: %w; nothing discarded", s.ID, err)
+		}
+		if len(held) > 0 {
+			var b strings.Builder
+			for _, h := range held {
+				fmt.Fprintf(&b, "\n  %s: kept at %s", h.Path, h.Saved)
+			}
+			return fmt.Errorf("session %s holds your versions from before an apply of paths that were not rolled back:%s\n"+
+				"run `airbag rollback %s` once those paths are as the apply left them, or copy what you need from there; "+
+				"`airbag discard --force %s` deletes them; nothing discarded", s.ID, b.String(), s.ID, s.ID)
+		}
 	}
 	if !*yes {
 		fmt.Printf("Discard session %s and everything the agent did in it? [y/N] ", s.ID)
