@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/shim"
@@ -30,7 +31,7 @@ const (
 // Init runs as PID 1 in the new namespaces, as root of the new user
 // namespace (mapped to the real user). It never returns.
 func Init(dir string) {
-	signal.Ignore(os.Interrupt, syscall.SIGQUIT, syscall.SIGTSTP, syscall.SIGTTIN, syscall.SIGTTOU)
+	swallow(os.Interrupt, syscall.SIGQUIT)
 	s, err := session.Load(dir)
 	if err != nil {
 		fatal("load session", err)
@@ -115,6 +116,9 @@ func buildWorld(s *session.Session) error {
 		}
 	}
 
+	if err := agentConfig(s); err != nil {
+		fmt.Fprintf(os.Stderr, "airbag: warning: agent hooks not installed: %v\n", err)
+	}
 	if err := privateRun(s); err != nil {
 		return err
 	}
@@ -135,6 +139,27 @@ func buildWorld(s *session.Session) error {
 		fmt.Fprintf(os.Stderr, "airbag: warning: private /proc unavailable (%v); host processes stay visible\n", err)
 	}
 	return nil
+}
+
+// agentConfig puts airbag's hooks into agents' managed (policy) config.
+// /etc gets its own branch so the files can be added; the directories
+// are then made read-only mounts, which the agent cannot undo.
+func agentConfig(s *session.Session) error {
+	if err := overlay("/etc", s.EtcUpper(), s.EtcWork(), "/etc"); err != nil {
+		return fmt.Errorf("/etc overlay: %w", err)
+	}
+	dir := agents.ClaudeManagedSettingsDir
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "90-airbag.json"), agents.ClaudeManagedSettings(), 0o444); err != nil {
+		return err
+	}
+	top := filepath.Dir(dir)
+	if err := bind(top, top, true); err != nil {
+		return err
+	}
+	return setRO(top, true, true)
 }
 
 // privateRun mounts an empty /run with airbag's sockets and shims.

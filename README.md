@@ -60,11 +60,16 @@ one-time profile to install. macOS is not supported yet (use a Linux VM).
 ## Status
 
 Early v0. Working: sandbox, branch, proxy with allowlist, git push outbox, review,
-diff, apply with conflict check, discard.
+diff, apply with conflict check, discard. Claude Code gets airbag's hooks as
+read-only managed settings, so the review shows which tool call changed which file.
+
+Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `python3 test/ctrlc.py`
+and `test/claude-e2e.sh` (the real Claude Code binary against a scripted mock of the
+Messages API). With a real login, follow [docs/manual-test.md](docs/manual-test.md).
 
 Not yet: the shell shim with command models, CEL policies in `airbag.yaml`, a local
 registry mirror, secret handles and output masking, an interactive review with
-partial apply, Claude Code hooks.
+partial apply, Codex hooks.
 
 ## Threat model
 

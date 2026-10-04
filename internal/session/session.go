@@ -77,7 +77,7 @@ func Create(m Meta) (*Session, error) {
 	m.Status = StatusRunning
 	s := &Session{Meta: m, Dir: filepath.Join(root, m.ID)}
 	for _, d := range []string{
-		s.WSUpper(), s.WSWork(), s.HomeUpper(), s.HomeWork(),
+		s.WSUpper(), s.WSWork(), s.HomeUpper(), s.HomeWork(), s.EtcUpper(), s.EtcWork(),
 		s.MountDir("ws"), s.MountDir("realhome"), s.RunDir(),
 	} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -91,6 +91,8 @@ func (s *Session) WSUpper() string             { return filepath.Join(s.Dir, "ws
 func (s *Session) WSWork() string              { return filepath.Join(s.Dir, "ws", "work") }
 func (s *Session) HomeUpper() string           { return filepath.Join(s.Dir, "home", "upper") }
 func (s *Session) HomeWork() string            { return filepath.Join(s.Dir, "home", "work") }
+func (s *Session) EtcUpper() string            { return filepath.Join(s.Dir, "etc", "upper") }
+func (s *Session) EtcWork() string             { return filepath.Join(s.Dir, "etc", "work") }
 func (s *Session) MountDir(name string) string { return filepath.Join(s.Dir, "mnt", name) }
 func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "run") }
 func (s *Session) ProxySock() string           { return filepath.Join(s.RunDir(), "proxy.sock") }

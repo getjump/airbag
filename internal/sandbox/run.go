@@ -23,6 +23,7 @@ import (
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/internal/steps"
 )
 
 // InitArg is the hidden subcommand that runs inside the namespaces.
@@ -66,7 +67,8 @@ func Run(s *session.Session, allow proxy.Allowlist) (int, error) {
 		return 1, err
 	}
 	defer cl.Close()
-	go func() { _ = (&control.Server{Box: outbox.Open(s.OutboxPath()), Log: log}).Serve(cl) }()
+	ctl := &control.Server{Box: outbox.Open(s.OutboxPath()), Log: log, Steps: steps.NewTracker(s)}
+	go func() { _ = ctl.Serve(cl) }()
 
 	// Pass-through dirs must exist on the host, or the agent would
 	// create them inside the branch and lose them on discard.
@@ -91,7 +93,9 @@ func Run(s *session.Session, allow proxy.Allowlist) (int, error) {
 		Pdeathsig:                  syscall.SIGKILL,
 	}
 	// Ctrl-C belongs to the agent; airbag stays up until the agent exits.
-	signal.Ignore(os.Interrupt, syscall.SIGQUIT)
+	// Catch, don't ignore: an ignored signal stays ignored across exec,
+	// and the agent would start deaf to Ctrl-C.
+	swallow(os.Interrupt, syscall.SIGQUIT)
 	defer signal.Reset(os.Interrupt, syscall.SIGQUIT)
 
 	err = cmd.Run()
@@ -115,4 +119,15 @@ func userNSHint() string {
 			" run `airbag doctor` for the one-time fix"
 	}
 	return ""
+}
+
+// swallow catches signals and drops them. Unlike signal.Ignore, caught
+// signals are reset to their default in child processes.
+func swallow(sigs ...os.Signal) {
+	ch := make(chan os.Signal, 8)
+	signal.Notify(ch, sigs...)
+	go func() {
+		for range ch {
+		}
+	}()
 }

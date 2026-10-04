@@ -12,6 +12,7 @@ import (
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/internal/steps"
 )
 
 // Noise: caches in $HOME are folded into one line per directory.
@@ -19,7 +20,7 @@ var homeNoise = []string{".cache/", ".npm/", "go/pkg/", ".cargo/registry/", ".lo
 
 const maxListed = 40
 
-func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect, intents []outbox.Intent) {
+func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect, intents []outbox.Intent, sts []steps.Step) {
 	dur := "running"
 	if !s.Ended.IsZero() {
 		dur = s.Ended.Sub(s.Created).Round(time.Second).String()
@@ -92,6 +93,10 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	fmt.Fprintf(w, "\nNetwork    %d allowed%s\n", total(allowed), hostList(allowed))
 	if len(denied) > 0 {
 		fmt.Fprintf(w, "           %d denied%s\n", total(denied), hostList(denied))
+	}
+
+	if len(sts) > 0 {
+		renderSteps(w, sts)
 	}
 
 	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))
@@ -221,4 +226,59 @@ func sortedKeys(m map[string]int) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// renderSteps lists the agent's tool calls that changed something.
+func renderSteps(w io.Writer, sts []steps.Step) {
+	var changed []steps.Step
+	for _, st := range sts {
+		if len(st.Changes) > 0 {
+			changed = append(changed, st)
+		}
+	}
+	calls := 0
+	for _, st := range sts {
+		if st.Tool != "-" {
+			calls++
+		}
+	}
+	fmt.Fprintf(w, "\nSteps      %d tool calls, %d of them changed files\n", calls, len(changed))
+	for i, st := range changed {
+		if i == maxListed {
+			fmt.Fprintf(w, "  … and %d more\n", len(changed)-maxListed)
+			return
+		}
+		var shown []string
+		git, more := 0, 0
+		for _, c := range st.Changes {
+			mark, rest := c[:1], c[1:]
+			layer, path, _ := strings.Cut(rest, ":")
+			if gitDir(path) != "" {
+				git++
+				continue
+			}
+			if layer == "home" {
+				path = "~/" + path
+			}
+			if len(shown) == 3 {
+				more++
+				continue
+			}
+			shown = append(shown, mark+path)
+		}
+		if more > 0 {
+			shown = append(shown, fmt.Sprintf("+%d more", more))
+		}
+		if git > 0 {
+			shown = append(shown, fmt.Sprintf("(git: %d files)", git))
+		}
+		fmt.Fprintf(w, "  #%-3d %-6s %-38s → %s\n", st.N, st.Tool, clip(st.Summary, 38), strings.Join(shown, " "))
+	}
+}
+
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }

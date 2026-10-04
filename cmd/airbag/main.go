@@ -6,12 +6,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/getjump/airbag/internal/apply"
+	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/proxy"
@@ -19,6 +21,7 @@ import (
 	"github.com/getjump/airbag/internal/sandbox"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/shim"
+	"github.com/getjump/airbag/internal/steps"
 )
 
 const usage = `airbag — approve outcomes, not commands
@@ -40,6 +43,10 @@ ID defaults to the newest open session of the current workspace.
 func main() {
 	if filepath.Base(os.Args[0]) == "git" {
 		shim.Git(os.Args[1:])
+		return
+	}
+	if len(os.Args) >= 4 && os.Args[1] == "hook" {
+		cmdHook(os.Args[2], os.Args[3])
 		return
 	}
 	if len(os.Args) >= 3 && os.Args[1] == sandbox.InitArg {
@@ -144,6 +151,15 @@ func cmdRun(args []string) (int, error) {
 	return code, nil
 }
 
+// cmdHook runs inside the sandbox as an agent hook. It always exits 0:
+// exit 2 would block the agent's tool call, and enforcement does not
+// live in hooks anyway.
+func cmdHook(agent, event string) {
+	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, 4<<20))
+	_, _ = control.Hook(agent, event, payload)
+	os.Exit(0)
+}
+
 // workspace is the git toplevel, or the current directory.
 func workspace(cwd string) string {
 	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
@@ -179,7 +195,8 @@ func cmdReview(s *session.Session) error {
 	}
 	effs, _ := effects.Read(s.EffectsPath())
 	intents, _ := outbox.Open(s.OutboxPath()).List()
-	review.Render(os.Stdout, s, cs, effs, intents)
+	sts, _ := steps.Read(s)
+	review.Render(os.Stdout, s, cs, effs, intents, sts)
 	return nil
 }
 
