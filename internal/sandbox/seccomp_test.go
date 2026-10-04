@@ -71,60 +71,92 @@ func runtime_GOARCH(t *testing.T) string {
 	}
 }
 
-// TestDeniedCalls checks every denied number, on every ABI of the build
-// arch, with and without the x32 bit where it applies.
-func TestDeniedCalls(t *testing.T) {
-	abis := abisFor(runtime_GOARCH(t))
-	for _, strict := range []bool{false, true} {
-		p := agentFilter(abis, strict)
-		if len(p) > 4096 {
-			t.Fatalf("program too long: %d", len(p))
-		}
-		for _, a := range abis {
-			variants := []uint32{0}
-			if a.x32 {
-				variants = append(variants, x32SyscallBit)
+// numbered is one ABI's numbering as the filter sees it: x32's numbers
+// carry the x32 bit under the x86_64 arch value.
+type numbered struct {
+	audit uint32
+	n     nrSet
+	bit   uint32
+}
+
+// allNumberings lists every ABI numbering of both build arches, so each
+// test covers x86_64, x32, i386, aarch64 and arm whatever the host is.
+func allNumberings() []struct {
+	goarch string
+	ns     []numbered
+} {
+	var out []struct {
+		goarch string
+		ns     []numbered
+	}
+	for _, goarch := range []string{"amd64", "arm64"} {
+		var ns []numbered
+		for _, a := range abisFor(goarch) {
+			ns = append(ns, numbered{a.audit, a.nrs, 0})
+			if a.x32 != nil {
+				ns = append(ns, numbered{a.audit, *a.x32, x32SyscallBit})
 			}
-			check := func(name string, nr uint32, want uint32) {
-				if nr == 0 {
-					return
-				}
-				for _, v := range variants {
-					got := runBPF(t, p, seccompData(a.audit, nr|v, 0, 0))
-					if got != want {
-						t.Errorf("strict=%v arch=%#x %s(nr=%d|%#x): got %#x want %#x",
-							strict, a.audit, name, nr, v, got, want)
+		}
+		out = append(out, struct {
+			goarch string
+			ns     []numbered
+		}{goarch, ns})
+	}
+	return out
+}
+
+// TestDeniedCalls checks every denied number on every ABI.
+func TestDeniedCalls(t *testing.T) {
+	for _, g := range allNumberings() {
+		for _, strict := range []bool{false, true} {
+			p := agentFilter(abisFor(g.goarch), strict)
+			if len(p) > 4096 {
+				t.Fatalf("program too long: %d", len(p))
+			}
+			for _, a := range g.ns {
+				check := func(name string, nr uint32, want uint32) {
+					if got := runBPF(t, p, seccompData(a.audit, nr|a.bit, 0, 0)); got != want {
+						t.Errorf("%s strict=%v arch=%#x %s(nr=%d|%#x): got %#x want %#x",
+							g.goarch, strict, a.audit, name, nr, a.bit, got, want)
 					}
 				}
-			}
-			for _, nr := range a.nrs.eperm() {
-				check("eperm", nr, retEPERM)
-			}
-			for _, nr := range a.nrs.enosys() {
-				check("io_uring", nr, retENOSYS)
-			}
-			for _, nr := range a.nrs.strictENOSYS() {
-				want := uint32(retAllow)
-				if strict {
-					want = retENOSYS
+				for _, nr := range a.n.eperm() {
+					check("eperm", nr, retEPERM)
 				}
-				check("mount-api", nr, want)
+				for _, nr := range a.n.enosys() {
+					check("io_uring", nr, retENOSYS)
+				}
+				for _, nr := range a.n.strictENOSYS() {
+					want := uint32(retAllow)
+					if strict {
+						want = retENOSYS
+					}
+					check("mount-api", nr, want)
+				}
 			}
 		}
 	}
 }
 
+// TestX32OwnNumbers: x32's own numbers for kexec_load and ioctl are
+// covered, not only the x86_64 numbers with the x32 bit.
+func TestX32OwnNumbers(t *testing.T) {
+	p := agentFilter(abisFor("amd64"), false)
+	if got := runBPF(t, p, seccompData(unix.AUDIT_ARCH_X86_64, 528|x32SyscallBit, 0, 0)); got != retEPERM {
+		t.Errorf("x32 kexec_load (528): got %#x want EPERM", got)
+	}
+	if got := runBPF(t, p, seccompData(unix.AUDIT_ARCH_X86_64, 514|x32SyscallBit, 0, unix.TIOCSTI)); got != retEPERM {
+		t.Errorf("x32 ioctl (514) TIOCSTI: got %#x want EPERM", got)
+	}
+}
+
 // TestIoctlFilter keeps the terminal-injection refusals, including the
-// high-bit and x32 cases.
+// high-bit case, on every ABI.
 func TestIoctlFilter(t *testing.T) {
-	abis := abisFor(runtime_GOARCH(t))
-	p := agentFilter(abis, false)
-	for _, a := range abis {
-		nrs := []uint32{a.nrs.ioctl}
-		if a.x32 {
-			nrs = append(nrs, a.nrs.ioctl|x32SyscallBit, 514|x32SyscallBit)
-		}
-		for _, nr := range nrs {
+	for _, g := range allNumberings() {
+		p := agentFilter(abisFor(g.goarch), false)
+		for _, a := range g.ns {
+			nr := a.n.ioctl | a.bit
 			for _, c := range []struct {
 				arg1 uint64
 				want uint32
@@ -136,41 +168,43 @@ func TestIoctlFilter(t *testing.T) {
 				{unix.TCGETS, retAllow},
 			} {
 				if got := runBPF(t, p, seccompData(a.audit, nr, 0, c.arg1)); got != c.want {
-					t.Errorf("arch %#x ioctl nr %d arg %#x: got %#x want %#x", a.audit, nr, c.arg1, got, c.want)
+					t.Errorf("%s arch %#x ioctl nr %#x arg %#x: got %#x want %#x", g.goarch, a.audit, nr, c.arg1, got, c.want)
 				}
 			}
-		}
-		// A non-ioctl syscall with a TIOCSTI-shaped argument is allowed.
-		if got := runBPF(t, p, seccompData(a.audit, a.nrs.socket, unix.AF_INET, unix.TIOCSTI)); got == retEPERM {
-			t.Errorf("arch %#x: a non-ioctl call refused on its argument", a.audit)
+			// A non-ioctl syscall with a TIOCSTI-shaped argument is allowed.
+			if got := runBPF(t, p, seccompData(a.audit, a.n.socket|a.bit, unix.AF_INET, unix.TIOCSTI)); got == retEPERM {
+				t.Errorf("%s arch %#x: a non-ioctl call refused on its argument", g.goarch, a.audit)
+			}
 		}
 	}
 }
 
-// TestSocketFilter: allowed families pass, the rest are refused, on
-// every ABI.
+// TestSocketFilter: allowed families pass, the rest are refused, for
+// socket on every ABI.
 func TestSocketFilter(t *testing.T) {
-	abis := abisFor(runtime_GOARCH(t))
-	p := agentFilter(abis, false)
-	denied := []uint32{unix.AF_VSOCK, unix.AF_PACKET, unix.AF_BLUETOOTH, unix.AF_IPX}
-	for _, a := range abis {
-		nrs := []uint32{a.nrs.socket}
-		if a.x32 {
-			nrs = append(nrs, a.nrs.socket|x32SyscallBit)
-		}
-		for _, nr := range nrs {
-			for _, fam := range allowedSocketFamilies {
-				if got := runBPF(t, p, seccompData(a.audit, nr, uint64(fam), 0)); got != retAllow {
-					t.Errorf("arch %#x socket family %d: got %#x want allow", a.audit, fam, got)
+	denied := []uint32{unix.AF_VSOCK, unix.AF_PACKET, unix.AF_TIPC, unix.AF_BLUETOOTH, unix.AF_IPX}
+	for _, g := range allNumberings() {
+		p := agentFilter(abisFor(g.goarch), false)
+		for _, a := range g.ns {
+			for name, nr := range map[string]uint32{"socket": a.n.socket} {
+				if nr == 0 {
+					t.Errorf("%s arch %#x: no %s number", g.goarch, a.audit, name)
+					continue
 				}
-			}
-			for _, fam := range denied {
-				if got := runBPF(t, p, seccompData(a.audit, nr, uint64(fam), 0)); got != retEPERM {
-					t.Errorf("arch %#x socket family %d: got %#x want EPERM", a.audit, fam, got)
+				nr |= a.bit
+				for _, fam := range allowedSocketFamilies {
+					if got := runBPF(t, p, seccompData(a.audit, nr, uint64(fam), 0)); got != retAllow {
+						t.Errorf("%s arch %#x %s family %d: got %#x want allow", g.goarch, a.audit, name, fam, got)
+					}
 				}
-				// A high-bit-set family must not sneak past (int arg).
-				if got := runBPF(t, p, seccompData(a.audit, nr, 1<<32|uint64(fam), 0)); got != retEPERM {
-					t.Errorf("arch %#x socket family %d high bits: got %#x want EPERM", a.audit, fam, got)
+				for _, fam := range denied {
+					if got := runBPF(t, p, seccompData(a.audit, nr, uint64(fam), 0)); got != retEPERM {
+						t.Errorf("%s arch %#x %s family %d: got %#x want EPERM", g.goarch, a.audit, name, fam, got)
+					}
+					// The family is an int: high bits must not change the verdict.
+					if got := runBPF(t, p, seccompData(a.audit, nr, 1<<32|uint64(fam), 0)); got != retEPERM {
+						t.Errorf("%s arch %#x %s family %d high bits: got %#x want EPERM", g.goarch, a.audit, name, fam, got)
+					}
 				}
 			}
 		}
@@ -178,18 +212,20 @@ func TestSocketFilter(t *testing.T) {
 }
 
 // TestPersonalityFilter: the safe values pass (0xffffffff is the query),
-// a domain switch is refused.
+// a domain switch is refused, on every ABI.
 func TestPersonalityFilter(t *testing.T) {
-	abis := abisFor(runtime_GOARCH(t))
-	p := agentFilter(abis, false)
-	for _, a := range abis {
-		for _, v := range allowedPersonality {
-			if got := runBPF(t, p, seccompData(a.audit, a.nrs.personality, uint64(v), 0)); got != retAllow {
-				t.Errorf("arch %#x personality %#x: got %#x want allow", a.audit, v, got)
+	for _, g := range allNumberings() {
+		p := agentFilter(abisFor(g.goarch), false)
+		for _, a := range g.ns {
+			nr := a.n.personality | a.bit
+			for _, v := range allowedPersonality {
+				if got := runBPF(t, p, seccompData(a.audit, nr, uint64(v), 0)); got != retAllow {
+					t.Errorf("%s arch %#x personality %#x: got %#x want allow", g.goarch, a.audit, v, got)
+				}
 			}
-		}
-		if got := runBPF(t, p, seccompData(a.audit, a.nrs.personality, 0x4, 0)); got != retEPERM {
-			t.Errorf("arch %#x personality switch: got %#x want EPERM", a.audit, got)
+			if got := runBPF(t, p, seccompData(a.audit, nr, 0x4, 0)); got != retEPERM {
+				t.Errorf("%s arch %#x personality switch: got %#x want EPERM", g.goarch, a.audit, got)
+			}
 		}
 	}
 }
@@ -322,4 +358,87 @@ func parseSysnums(t *testing.T, path string) map[string]uint32 {
 		}
 	}
 	return out
+}
+
+// nrsByName maps kernel syscall names to an nrSet's numbers.
+func nrsByName(n nrSet) map[string]uint32 {
+	return map[string]uint32{
+		"io_uring_setup": n.ioURingSetup, "io_uring_enter": n.ioURingEnter, "io_uring_register": n.ioURingRegister,
+		"bpf": n.bpf, "perf_event_open": n.perfEventOpen, "userfaultfd": n.userfaultfd,
+		"keyctl": n.keyctl, "add_key": n.addKey, "request_key": n.requestKey,
+		"kexec_load": n.kexecLoad, "kexec_file_load": n.kexecFileLoad,
+		"init_module": n.initModule, "finit_module": n.finitModule, "delete_module": n.deleteModule,
+		"open_by_handle_at": n.openByHandleAt, "quotactl": n.quotactl, "acct": n.acct,
+		"swapon": n.swapon, "swapoff": n.swapoff, "reboot": n.reboot, "syslog": n.syslog, "uselib": n.uselib,
+		"lookup_dcookie": n.lookupDcookie,
+		"open_tree":      n.openTree, "move_mount": n.moveMount, "fsopen": n.fsopen,
+		"fsconfig": n.fsconfig, "fsmount": n.fsmount, "fspick": n.fspick, "mount_setattr": n.mountSetattr,
+		"ioctl": n.ioctl, "socket": n.socket, "personality": n.personality,
+	}
+}
+
+// TestX32SyscallNumbers pins nrsX32 to the kernel's syscall_64.tbl
+// (testdata/syscall_64.tbl.excerpt, cited there). x/sys has no x32
+// table. For each call the x32 number is its "x32" row if there is one,
+// else its "common" row; a call with only a "64" row has no x32 entry
+// and must be 0 in nrsX32.
+func TestX32SyscallNumbers(t *testing.T) {
+	f, err := os.Open(filepath.Join("testdata", "syscall_64.tbl.excerpt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	type row struct {
+		nr  uint32
+		abi string
+	}
+	rows := map[string][]row{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 3 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		nr, err := strconv.ParseUint(fields[0], 10, 32)
+		if err != nil {
+			t.Fatalf("bad row %q", sc.Text())
+		}
+		rows[fields[2]] = append(rows[fields[2]], row{uint32(nr), fields[1]})
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range nrsByName(nrsX32) {
+		rs, ok := rows[name]
+		if !ok {
+			t.Errorf("%s: not in the syscall_64.tbl excerpt", name)
+			continue
+		}
+		var want uint32
+		for _, r := range rs {
+			switch r.abi {
+			case "x32":
+				want = r.nr
+			case "common":
+				if want == 0 {
+					want = r.nr
+				}
+			}
+		}
+		if got != want {
+			t.Errorf("x32 %s: table has %d, syscall_64.tbl gives %d (rows %v)", name, got, want, rs)
+		}
+	}
+	// The x86_64 table must agree with the same rows ("common" or "64").
+	for name, got := range nrsByName(nrsAMD64) {
+		var want uint32
+		for _, r := range rows[name] {
+			if r.abi == "common" || r.abi == "64" {
+				want = r.nr
+			}
+		}
+		if got != want {
+			t.Errorf("x86_64 %s: table has %d, syscall_64.tbl gives %d", name, got, want)
+		}
+	}
 }

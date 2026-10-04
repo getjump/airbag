@@ -1,0 +1,41 @@
+# Excerpt of arch/x86/entry/syscalls/syscall_64.tbl, Linux v6.18:
+# https://github.com/torvalds/linux/blob/v6.18/arch/x86/entry/syscalls/syscall_64.tbl
+# Only the rows for the calls the seccomp filter routes; lines kept verbatim.
+# Columns: <number> <abi> <name> <entry point>. abi "common" = x86_64 and x32,
+# "64" = x86_64 only, "x32" = x32 only. TestX32SyscallNumbers reads this.
+16	64	ioctl			sys_ioctl
+41	common	socket			sys_socket
+53	common	socketpair		sys_socketpair
+103	common	syslog			sys_syslog
+134	64	uselib
+135	common	personality		sys_personality
+163	common	acct			sys_acct
+167	common	swapon			sys_swapon
+168	common	swapoff			sys_swapoff
+169	common	reboot			sys_reboot
+175	common	init_module		sys_init_module
+176	common	delete_module		sys_delete_module
+179	common	quotactl		sys_quotactl
+212	common	lookup_dcookie
+246	64	kexec_load		sys_kexec_load
+248	common	add_key			sys_add_key
+249	common	request_key		sys_request_key
+250	common	keyctl			sys_keyctl
+298	common	perf_event_open		sys_perf_event_open
+304	common	open_by_handle_at	sys_open_by_handle_at
+313	common	finit_module		sys_finit_module
+320	common	kexec_file_load		sys_kexec_file_load
+321	common	bpf			sys_bpf
+323	common	userfaultfd		sys_userfaultfd
+425	common	io_uring_setup		sys_io_uring_setup
+426	common	io_uring_enter		sys_io_uring_enter
+427	common	io_uring_register	sys_io_uring_register
+428	common	open_tree		sys_open_tree
+429	common	move_mount		sys_move_mount
+430	common	fsopen			sys_fsopen
+431	common	fsconfig		sys_fsconfig
+432	common	fsmount			sys_fsmount
+433	common	fspick			sys_fspick
+442	common	mount_setattr		sys_mount_setattr
+514	x32	ioctl			compat_sys_ioctl
+528	x32	kexec_load		compat_sys_kexec_load

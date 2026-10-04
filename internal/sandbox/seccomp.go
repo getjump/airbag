@@ -39,9 +39,9 @@ const (
 
 	// x32SyscallBit marks a syscall made through the x32 ABI; it shares
 	// the AUDIT_ARCH_X86_64 value with 64-bit calls and is told apart
-	// only by this bit on the number. Denied numbers are filtered with
-	// and without it so an x32 entry cannot slip a denied call through
-	// (the legacy-ABI bypass nono shipped, GHSA-vhq2-h2q7-8mmc).
+	// only by this bit on the number. x32 has its own numbering (nrsX32),
+	// filtered with this bit set, so a refused call is refused on x32 too
+	// (nono shipped without that, GHSA-vhq2-h2q7-8mmc).
 	x32SyscallBit = 0x40000000
 
 	retAllow  = unix.SECCOMP_RET_ALLOW
@@ -111,16 +111,18 @@ type nrSet struct {
 }
 
 // abi is one ABI the filter covers: an AUDIT_ARCH value and the syscall
-// numbers for that ABI. x32 shares x86_64's arch value, so x86_64's set
-// is filtered twice, with and without the x32 bit, in buildPrograms.
+// numbers for that ABI. x32 shares x86_64's arch value, so the x86_64
+// entry also carries x32's own numbers, filtered with x32SyscallBit set.
 type abi struct {
 	audit uint32
 	nrs   nrSet
-	x32   bool // also filter nrs|x32SyscallBit under this arch
+	x32   *nrSet // x32's numbers under the same arch value, or nil
 }
 
-// Syscall numbers per ABI. Verified against golang.org/x/sys's zsysnum
-// tables by TestSyscallNumbers; never hand-edit a number without that
+// Syscall numbers per ABI. The native and i386/arm ones are verified
+// against golang.org/x/sys's zsysnum tables by TestSyscallNumbers, the
+// x32 ones against an excerpt of the kernel's syscall_64.tbl by
+// TestX32SyscallNumbers; never hand-edit a number without that
 // cross-check.
 var (
 	nrsAMD64 = nrSet{
@@ -135,6 +137,27 @@ var (
 		openTree:      428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
 		ioctl: 16, socket: 41, personality: 135,
+	}
+	// nrsX32 is the x32 ABI, from arch/x86/entry/syscalls/syscall_64.tbl
+	// (https://github.com/torvalds/linux/blob/v6.18/arch/x86/entry/syscalls/syscall_64.tbl):
+	// a "common" row has the same number as x86_64, an "x32" row
+	// (512-547) is x32's own. kexec_load (528) and ioctl (514) are x32
+	// rows. uselib (134) is "64"-only and has no x32 entry, so it is 0
+	// here; the kernel returns ENOSYS for it, as for the "64"-only ioctl
+	// (16) and kexec_load (246) numbers, when called through x32. The
+	// filter adds x32SyscallBit to every number below.
+	nrsX32 = nrSet{
+		ioURingSetup: 425, ioURingEnter: 426, ioURingRegister: 427,
+		bpf: 321, perfEventOpen: 298, userfaultfd: 323,
+		keyctl: 250, addKey: 248, requestKey: 249,
+		kexecLoad: 528, kexecFileLoad: 320,
+		initModule: 175, finitModule: 313, deleteModule: 176,
+		openByHandleAt: 304, quotactl: 179, acct: 163,
+		swapon: 167, swapoff: 168, reboot: 169, syslog: 103, uselib: 0, // "64"-only
+		lookupDcookie: 212,
+		openTree:      428, moveMount: 429, fsopen: 430,
+		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
+		ioctl: 514, socket: 41, personality: 135,
 	}
 	nrs386 = nrSet{
 		ioURingSetup: 425, ioURingEnter: 426, ioURingRegister: 427,
@@ -185,7 +208,7 @@ func abisFor(goarch string) []abi {
 	switch goarch {
 	case "amd64":
 		return []abi{
-			{audit: unix.AUDIT_ARCH_X86_64, nrs: nrsAMD64, x32: true},
+			{audit: unix.AUDIT_ARCH_X86_64, nrs: nrsAMD64, x32: &nrsX32},
 			{audit: unix.AUDIT_ARCH_I386, nrs: nrs386},
 		}
 	case "arm64":
@@ -311,30 +334,31 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 		b.jmp(next)
 		b.ld(offNr)
 
-		each := func(nrs []uint32, f func(uint32)) {
-			for _, nr := range nrs {
-				f(nr)
-				if a.x32 {
-					f(nr | x32SyscallBit)
+		// The native numbers, then (on x86_64) x32's own with its bit.
+		type numbering struct {
+			n   nrSet
+			bit uint32
+		}
+		sets := []numbering{{a.nrs, 0}}
+		if a.x32 != nil {
+			sets = append(sets, numbering{*a.x32, x32SyscallBit})
+		}
+		for _, s := range sets {
+			route := func(nrs []uint32, label string) {
+				for _, nr := range nrs {
+					b.jeqNext(nr | s.bit)
+					b.jmp(label)
 				}
 			}
+			route(s.n.eperm(), "eperm")
+			route(s.n.enosys(), "enosys")
+			if strict {
+				route(s.n.strictENOSYS(), "enosys")
+			}
+			route(nonzero(s.n.ioctl), "ioctl")
+			route(nonzero(s.n.socket), "socket")
+			route(nonzero(s.n.personality), "personality")
 		}
-		refuse := func(label string) func(uint32) {
-			return func(nr uint32) { b.jeqNext(nr); b.jmp(label) }
-		}
-		each(a.nrs.eperm(), refuse("eperm"))
-		each(a.nrs.enosys(), refuse("enosys"))
-		if strict {
-			each(a.nrs.strictENOSYS(), refuse("enosys"))
-		}
-		each(nonzero(a.nrs.ioctl), refuse("ioctl"))
-		// x32 reaches ioctl through its own number too (16|x32 and 514).
-		if a.x32 {
-			b.jeqNext(514 | x32SyscallBit)
-			b.jmp("ioctl")
-		}
-		each(nonzero(a.nrs.socket), refuse("socket"))
-		each(nonzero(a.nrs.personality), refuse("personality"))
 		b.jmp("allow")
 	}
 
