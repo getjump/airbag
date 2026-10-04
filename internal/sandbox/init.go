@@ -45,6 +45,14 @@ func Init(dir string, tty bool) {
 	if err != nil {
 		fatal("load session", err)
 	}
+	// PID 1 is the supervisor: it holds the raw proxy, control and
+	// forward sockets and the FUSE backing fds. Make it non-dumpable so
+	// the agent, which shares this pid namespace, can neither ptrace it
+	// nor read /proc/1/mem or /proc/1/environ, even where
+	// yama.ptrace_scope=0.
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		fatal("protect supervisor", err)
+	}
 	if err := buildWorld(s); err != nil {
 		fatal("build sandbox", err)
 	}
@@ -176,8 +184,21 @@ func buildWorld(s *session.Session) error {
 			return fmt.Errorf("hide session root: %w", err)
 		}
 	}
-	if err := unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
-		fmt.Fprintf(os.Stderr, "airbag: warning: private /proc unavailable (%v); host processes stay visible\n", err)
+	// hidepid=2 hides from the agent every process it cannot access,
+	// PID 1 (the supervisor, in the parent user namespace) included, so
+	// /proc/1 and other processes' /proc entries are invisible. The
+	// agent still sees /proc/self and its own descendants. subset=pid is
+	// deliberately NOT set: it would also hide /proc/cpuinfo,
+	// /proc/meminfo, /proc/stat and /proc/sys, which node, go and build
+	// tools read. Older kernels reject the option, so fall back to a
+	// plain mount.
+	flags := uintptr(unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC)
+	if err := unix.Mount("proc", "/proc", "proc", flags, "hidepid=2"); err != nil {
+		if err := unix.Mount("proc", "/proc", "proc", flags, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "airbag: warning: private /proc unavailable (%v); host processes stay visible\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "airbag: warning: /proc without hidepid; other processes stay visible to the agent\n")
+		}
 	}
 	return nil
 }
@@ -299,6 +320,29 @@ func privateRun(s *session.Session) error {
 		}
 	}
 	return os.MkdirAll(fmt.Sprintf(runtimeDirFormat, s.UID), 0o700)
+}
+
+// closeInheritedFDs marks every open descriptor above stdio
+// close-on-exec, so none survives into the agent across its exec. The
+// supervisor keeps the descriptors open for itself; it does not exec
+// again. CLOSE_RANGE_CLOEXEC (kernel 5.11+) does the whole range at
+// once; a kernel without it falls back to walking /proc/self/fd.
+func closeInheritedFDs() {
+	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err == nil {
+		return
+	}
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "airbag: warning: could not list open fds to close before exec: %v\n", err)
+		return
+	}
+	for _, e := range ents {
+		fd, err := strconv.Atoi(e.Name())
+		if err != nil || fd < 3 {
+			continue
+		}
+		_, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC)
+	}
 }
 
 func bind(src, dst string, rec bool) error {
@@ -489,7 +533,21 @@ func runAgent(s *session.Session, ctl *os.File) int {
 		cmd.SysProcAttr.Foreground = true
 		cmd.SysProcAttr.Ctty = 0
 	}
-	if err := restrictAgent(); err != nil {
+	// A crash must not write a core dump: it could hold secrets the
+	// agent had in memory. The limit is inherited across fork and exec.
+	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0}); err != nil {
+		fmt.Fprintf(os.Stderr, "airbag: warning: could not disable core dumps: %v\n", err)
+	}
+	// Close every inherited fd above stdio before the agent starts, so
+	// a descriptor leaked from airbag's caller cannot reach it (the runc
+	// CVE-2024-21626 class). CLOSE_RANGE_CLOEXEC marks them close-on-exec
+	// rather than closing them here: the supervisor keeps its own
+	// sockets and the FUSE fd (it never exec()s again), while the agent,
+	// which does exec, loses all of them. The ones airbag passes on
+	// purpose are stdio (0,1,2) and, under tty, the control fd, which is
+	// already close-on-exec; the agent inherits none of them.
+	closeInheritedFDs()
+	if err := restrictAgent(s.Strict); err != nil {
 		fmt.Fprintf(os.Stderr, "airbag: warning: %v\n", err)
 	}
 	if err := cmd.Start(); err != nil {
