@@ -479,13 +479,18 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 	// gives up, so a read that has not come back within 2 s counts as one
 	// that got nothing.
 	got := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		f, err := target.Open("/hello.txt")
 		if err == nil {
 			_ = f.Close()
 		}
 		got <- err
 	}()
+	// The test ends when the read has given up, so it leaves no
+	// goroutine behind.
+	defer func() { <-done }()
 	select {
 	case err := <-got:
 		if err == nil {

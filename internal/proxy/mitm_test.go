@@ -79,6 +79,8 @@ func mitmProxy(t *testing.T, upstream *httptest.Server, rules string) (*http.Cli
 	roots.AppendCertsFromPEM(ca.PEM)
 	pu, _ := url.Parse("http://" + l.Addr().String())
 	c := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(pu), TLSClientConfig: &tls.Config{RootCAs: roots}}}
+	// The intercepted connection lives as long as the client keeps it.
+	t.Cleanup(c.CloseIdleConnections)
 	return c, live, path
 }
 
