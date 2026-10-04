@@ -78,4 +78,11 @@ echo "$log" | grep 'cut' | grep -q 'example.com:443.*secret-taint' || fail "cut 
 "$AIRBAG" review | grep -q '1 cut when a secret was read: example.com:443' || fail "review does not show the cut tunnel"
 [ "$(cat .env)" = "API_TOKEN=sk-taint-0123456789" ] || fail ".env changed"
 "$AIRBAG" discard --yes >/dev/null
+
+# Without FUSE the secret files are hidden, never readable untracked.
+out=$(AIRBAG_NO_FUSE=1 "$AIRBAG" run -- sh -c 'cat .env apps/web/.env; echo "size=$(wc -c < .env)"' 2>&1)
+echo "$out" | grep -q 'sk-taint-0123456789\|web-nested-secret' && fail "secret readable without FUSE: $out"
+echo "$out" | grep -q 'size=0' || fail ".env not hidden without FUSE: $out"
+echo "$out" | grep -q 'secret files are hidden' || fail "no warning when FUSE is off: $out"
+"$AIRBAG" discard --yes >/dev/null
 echo PASS

@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -141,8 +142,19 @@ func buildWorld(s *session.Session) error {
 		return err
 	}
 	if len(secrets) > 0 {
-		if err := serveSecrets(s, secrets); err != nil {
-			fmt.Fprintf(os.Stderr, "airbag: warning: reads of .env are not tracked: %v\n", err)
+		// Without FUSE the session cannot see reads of the secret files,
+		// so they are hidden rather than left readable untracked.
+		err := errors.New("AIRBAG_NO_FUSE is set")
+		if os.Getenv("AIRBAG_NO_FUSE") == "" {
+			err = serveSecrets(s, secrets)
+		}
+		if err != nil {
+			for _, f := range secrets {
+				if herr := hide(filepath.Join(s.Workspace, f.Rel)); herr != nil {
+					return fmt.Errorf("secret %s is neither tracked (%v) nor hidden: %w", f.Rel, err, herr)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "airbag: warning: %d secret files are hidden from the agent: reads cannot be tracked (%v)\n", len(secrets), err)
 		}
 	}
 	for _, d := range []string{"/tmp", "/var/tmp", "/dev/shm"} {

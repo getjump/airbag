@@ -26,6 +26,7 @@ echo new > new.txt
 rm old.txt
 echo "alias evil=1" >> ~/.airbag-e2e-rc
 printf '#!/bin/sh\n' > .git/hooks/post-checkout && chmod +x .git/hooks/post-checkout
+printf '#!/bin/sh\ntouch hook-ran\n' > .git/hooks/pre-push && chmod +x .git/hooks/pre-push
 git add -A && git commit -qm "agent work"
 git push origin main
 curl -s --unix-socket /run/airbag/ctl.sock -d '{"kind":"git.push","argv":["rm","-rf","/"]}' http://x/intent | grep -q "only" || echo "LEAK: forged intent accepted"
@@ -57,8 +58,13 @@ echo "$applied" | grep -q "left pending" || fail "intent ran under --yes althoug
 [ ! -f old.txt ] || fail "old.txt not deleted"
 grep -q evil "$HOME/.airbag-e2e-rc" || fail "~ change not applied"
 [ "$(git -C "$T/remote.git" rev-parse main)" = "$before" ] || fail "remote changed before the intent was confirmed"
-printf 'y\n' | "$AIRBAG" apply >/dev/null
+# A later apply keeps the session's pushes untrusted: they wait for --trust-git.
+again=$(printf 'y\n' | "$AIRBAG" apply)
+echo "$again" | grep -q -- "--trust-git" || fail "second apply did not hold the push: $again"
+[ "$(git -C "$T/remote.git" rev-parse main)" = "$before" ] || fail "second apply pushed without --trust-git"
+printf 'y\n' | "$AIRBAG" apply --trust-git >/dev/null
 [ "$(git -C "$T/remote.git" rev-parse main)" = "$(git rev-parse HEAD)" ] || fail "push intent did not run"
+[ ! -e hook-ran ] || fail "the agent's pre-push hook ran on the host"
 # User namespaces: allowed by default, refused under --strict.
 if command -v unshare >/dev/null; then
 	probe='unshare -Ur true 2>/dev/null && echo nested-allowed || echo nested-refused'

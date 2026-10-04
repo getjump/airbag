@@ -21,9 +21,13 @@ import (
 
 const (
 	Pending  = "pending"
+	Running  = "running" // recorded before the action starts
 	Done     = "done"
 	Failed   = "failed"
 	Rejected = "rejected"
+	// Unknown: airbag stopped while the action ran, so whether it took
+	// effect is not known. It is never run again on its own.
+	Unknown = "unknown"
 )
 
 type Intent struct {

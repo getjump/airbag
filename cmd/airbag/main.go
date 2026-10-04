@@ -317,6 +317,7 @@ func cmdApply(args []string) error {
 	yes := fs.Bool("yes", false, "do not ask for confirmation")
 	force := fs.Bool("force", false, "overwrite files changed on the host during the session")
 	inter := fs.Bool("i", false, "go through the changes one by one")
+	trustGit := fs.Bool("trust-git", false, "run the session's pushes although it changed .git/config or git hooks (hooks stay off)")
 	var only stringList
 	fs.Var(&only, "only", "apply only changes under this path (repeatable)")
 	_ = fs.Parse(reorder(args))
@@ -339,7 +340,7 @@ func cmdApply(args []string) error {
 	out := term.Safe(os.Stdout)
 	defer out.Flush()
 	return apply.Apply(s, cs, box, apply.Options{
-		Yes: *yes, Force: *force, Interactive: *inter, Only: only, In: os.Stdin, Out: out})
+		Yes: *yes, Force: *force, Interactive: *inter, Only: only, TrustGit: *trustGit, In: os.Stdin, Out: out})
 }
 
 // listIntents reads a session's outbox; a session without one has none.

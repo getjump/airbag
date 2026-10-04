@@ -41,7 +41,13 @@ done
 
 # Second session: the same artifacts come from the cache, also after
 # the session read a secret; anything new is refused then, and the
-# registries themselves are reachable only through the mirror.
+# registries themselves are reachable only through the mirror. Reading
+# the secret needs FUSE (without it the file is hidden and nothing taints).
+if [ ! -w /dev/fuse ]; then
+	echo "SKIP: tainted part (/dev/fuse not writable)"
+	echo PASS
+	exit 0
+fi
 printf 'API_TOKEN=sk-mirror-0123456789\n' > .env
 out=$("$AIRBAG" run -- sh -c "cat .env >/dev/null; $script
 	curl -s -o /dev/null --max-time 5 https://registry.npmjs.org/left-pad; true" 2>&1)

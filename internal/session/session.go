@@ -46,6 +46,10 @@ type Meta struct {
 	PassEnv []string `json:"pass_env,omitempty"`
 	// Strict keeps the agent from creating user namespaces.
 	Strict bool `json:"strict,omitempty"`
+	// GitTouched: an apply of this session wrote .git/config or git
+	// hooks into the real repository. It stays set for every later
+	// apply, so the session's pushes keep running untrusted.
+	GitTouched bool `json:"git_touched,omitempty"`
 }
 
 type Session struct {

@@ -25,8 +25,11 @@ type Options struct {
 	Force       bool     // apply over files changed on the host during the session
 	Interactive bool     // ask about each unit
 	Only        []string // apply only units touching these paths
-	In          io.Reader
-	Out         io.Writer
+	// TrustGit runs the session's pushes although the session changed
+	// .git/config or git hooks; hooks stay disabled.
+	TrustGit bool
+	In       io.Reader
+	Out      io.Writer
 }
 
 type Conflict struct {
@@ -90,7 +93,7 @@ func changedInside(dir string, t time.Time) string {
 
 func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) error {
 	if s.Status == session.StatusApplied {
-		return runIntents(s, box, false, bufio.NewReader(o.In), o)
+		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
 	}
 	if s.Status == session.StatusRunning {
 		return fmt.Errorf("session %s is still running", s.ID)
@@ -117,6 +120,9 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 	}
 	forget(picked)
+	if gitTouched(picked) {
+		s.GitTouched = true
+	}
 	if len(picked) > 0 {
 		fmt.Fprintf(o.Out, "Applied %d changes.\n", len(picked))
 	}
@@ -139,7 +145,7 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 			return nil
 		}
 	}
-	return runIntents(s, box, gitTouched(picked), in, o)
+	return runIntents(s, box, s.GitTouched, in, o)
 }
 
 // choose picks the units to apply: all of them, the ones matching
@@ -223,6 +229,17 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 		return err
 	}
 	for _, it := range intents {
+		if it.Status == outbox.Running {
+			// A run was recorded but not its end: airbag stopped mid-push.
+			it.Status = outbox.Unknown
+			it.Output = "airbag stopped while this ran, so it may or may not have reached the remote " +
+				"(check with git ls-remote); it is not run again"
+			if err := box.Update(it); err != nil {
+				return fmt.Errorf("intent %s: %w", it.ID, err)
+			}
+			fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
+			continue
+		}
 		if it.Status != outbox.Pending {
 			continue
 		}
@@ -230,23 +247,38 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 		if err != nil || !within(it.Cwd, s.Workspace) {
 			it.Status, it.Output = outbox.Rejected, fmt.Sprintf("invalid intent: %v (cwd %s)", err, it.Cwd)
 			fmt.Fprintf(o.Out, "intent %s rejected: %s\n", it.ID, it.Output)
-			_ = box.Update(it)
+			if err := box.Update(it); err != nil {
+				return fmt.Errorf("intent %s: %w", it.ID, err)
+			}
 			continue
 		}
 		if risky {
-			// The agent's hooks never run on the host.
+			// The repository now carries the agent's git config or hooks,
+			// which run on the host during a push (hooks, credential
+			// helpers, ssh commands). Nothing runs until the user has
+			// looked and says so; even then hooks stay off.
+			if !o.TrustGit {
+				fmt.Fprintf(o.Out, "intent %s left pending: session %s changed .git/config or git hooks, which run on this "+
+					"machine during a push. Inspect them (git config --local --list; ls .git/hooks), then run "+
+					"`airbag apply --trust-git %s`, or push yourself\n", it.ID, s.ID, s.ID)
+				continue
+			}
 			args = append([]string{"-c", "core.hooksPath=/dev/null"}, args...)
 		}
 		where := pushTarget(it.Cwd, args)
-		if risky && o.Yes {
-			fmt.Fprintf(o.Out, "intent %s left pending: the session changed .git/config or git hooks; "+
-				"check the push target (%s) and run `airbag apply %s` without --yes\n", it.ID, where, s.ID)
-			continue
-		}
 		if !confirm(in, o, fmt.Sprintf("Run intent %s: `git %s` → %s?", it.ID, strings.Join(args, " "), where)) {
 			it.Status = outbox.Rejected
-			_ = box.Update(it)
+			if err := box.Update(it); err != nil {
+				return fmt.Errorf("intent %s: %w", it.ID, err)
+			}
 			continue
+		}
+		// Record the start first: if airbag stops during the push, the
+		// next apply reports the outcome as unknown instead of pushing
+		// again.
+		it.Status = outbox.Running
+		if err := box.Update(it); err != nil {
+			return fmt.Errorf("intent %s not run: %w", it.ID, err)
 		}
 		cmd := exec.Command("git", args...)
 		cmd.Dir = it.Cwd
@@ -258,7 +290,9 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 			it.Status = outbox.Failed
 			fmt.Fprintf(o.Out, "intent %s failed: %v\n", it.ID, err)
 		}
-		_ = box.Update(it)
+		if err := box.Update(it); err != nil {
+			return fmt.Errorf("intent %s ran (%s), but its result was not recorded: %w", it.ID, it.Status, err)
+		}
 	}
 	return nil
 }
