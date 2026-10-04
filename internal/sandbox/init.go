@@ -128,6 +128,11 @@ func buildWorld(s *session.Session) error {
 			return err
 		}
 	}
+	for _, p := range s.HiddenHost {
+		if err := hide(p); err != nil {
+			return fmt.Errorf("hide %s: %w", p, err)
+		}
+	}
 
 	if err := agentConfig(s); err != nil {
 		fmt.Fprintf(os.Stderr, "airbag: warning: agent hooks not installed: %v\n", err)

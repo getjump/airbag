@@ -118,6 +118,7 @@ func cmdRun(args []string) (int, error) {
 	var passEnv stringList
 	fs.Var(&passEnv, "pass-env", "give the agent this credential-like environment variable (repeatable)")
 	strict := fs.Bool("strict", false, "keep the agent from creating user namespaces; breaks the agents' own sandboxes and Chromium's sandbox")
+	nixDaemon := fs.Bool("nix-daemon", false, "let the agent use the Nix daemon; its builds and substitutes reach the network outside airbag's proxy")
 	_ = fs.Parse(args)
 	argv := fs.Args()
 	if len(argv) == 0 {
@@ -140,11 +141,28 @@ func cmdRun(args []string) (int, error) {
 		return 1, fmt.Errorf("policy: %w", err)
 	}
 	allow = append(allow, pol.Allow...)
+	hidden := append(append([]string{}, sandbox.DefaultHidden...), pol.Hide...)
+	var hiddenHost []string
+	for _, p := range sandbox.HostSockets {
+		if !(*nixDaemon && p == sandbox.NixDaemonSocket) {
+			hiddenHost = append(hiddenHost, p)
+		}
+	}
+	for i := 0; i < len(hidden); i++ {
+		if filepath.IsAbs(hidden[i]) {
+			hiddenHost = append(hiddenHost, hidden[i])
+			hidden = slices.Delete(hidden, i, i+1)
+			i--
+		}
+	}
+	if *nixDaemon {
+		fmt.Fprintln(os.Stderr, "airbag: warning: --nix-daemon: Nix builds and substitutes run outside the sandbox and reach the network without the proxy")
+	}
 	s, err := session.Create(session.Meta{
 		Workspace: ws, Home: home, OverHome: !*noHome,
 		UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 		Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
-		Passthrough: sandbox.DefaultPassthrough, Hidden: sandbox.DefaultHidden,
+		Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
 		PassEnv: passEnv, Strict: *strict,
 	})
 	if err != nil {
@@ -159,15 +177,15 @@ func cmdRun(args []string) (int, error) {
 	}
 	fmt.Fprintf(os.Stderr, "airbag: session %s · branch of %s%s · network: allowlist only\n",
 		s.ID, ws, map[bool]string{true: " and ~", false: ""}[s.OverHome])
-	var hidden []string
+	var hiddenEnv []string
 	for _, kv := range os.Environ() {
 		k, v, _ := strings.Cut(kv, "=")
 		if sandbox.Credential(k, v) && !slices.Contains(passEnv, k) {
-			hidden = append(hidden, k)
+			hiddenEnv = append(hiddenEnv, k)
 		}
 	}
-	if len(hidden) > 0 {
-		fmt.Fprintf(os.Stderr, "airbag: hidden from the agent: %s (--pass-env NAME keeps one)\n", strings.Join(hidden, ", "))
+	if len(hiddenEnv) > 0 {
+		fmt.Fprintf(os.Stderr, "airbag: hidden from the agent: %s (--pass-env NAME keeps one)\n", strings.Join(hiddenEnv, ", "))
 	}
 	if len(pol.Sources) > 1 {
 		fmt.Fprintf(os.Stderr, "airbag: policy: %s\n", strings.Join(pol.Sources, " + "))

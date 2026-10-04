@@ -43,6 +43,11 @@ func fakeSession(t *testing.T) *session.Session {
 	write(filepath.Join(s.WSUpper(), "build/app"), "bin", 0o755)
 	write(filepath.Join(s.HomeUpper(), ".bashrc"), "export A=1\nalias x=y\n", 0o644)
 	write(filepath.Join(s.HomeUpper(), ".cache/go/x"), "cache", 0o644)
+	write(filepath.Join(ws, "deploy", "prod", ".env.production"), "DB_PASSWORD='deep-secret-value'\n", 0o600)
+	write(filepath.Join(s.WSUpper(), "docs", "notes.md"), "db pass is deep-secret-value\n", 0o644)
+	write(filepath.Join(s.HomeUpper(), ".local/share/systemd/user/sync.service"), "[Service]\nExecStart=/bin/true\n", 0o644)
+	write(filepath.Join(s.HomeUpper(), ".local/lib/python3.12/site-packages/zz.pth"), "import os\n", 0o644)
+	write(filepath.Join(s.HomeUpper(), ".local/share/recently-used.xbel"), "x", 0o644)
 	return s
 }
 
@@ -71,6 +76,10 @@ func TestScanAndClassify(t *testing.T) {
 		"home:.bashrc":             {Modified, []string{"outside workspace", "persist"}},
 		"ws:pkg/api/AGENTS.md":     {Added, []string{"persist"}},
 		"ws:.husky/pre-commit":     {Added, []string{"persist"}},
+		"ws:docs/notes.md":         {Added, []string{"secret in diff"}},
+		"home:.local/share/systemd/user/sync.service":     {Added, []string{"outside workspace", "persist"}},
+		"home:.local/lib/python3.12/site-packages/zz.pth": {Added, []string{"outside workspace", "persist"}},
+		"home:.local/share/recently-used.xbel":            {Added, []string{"outside workspace"}},
 	}
 	for k, e := range expect {
 		c, ok := got[k]
@@ -92,7 +101,7 @@ func TestScanAndClassify(t *testing.T) {
 		}
 	}
 	att := Attention(cs)
-	if len(att) != 6 { // leak.txt, pre-commit, tool.sh, ~/.bashrc, AGENTS.md, .husky/pre-commit
+	if len(att) != 9 { // leak.txt, pre-commit, tool.sh, ~/.bashrc, AGENTS.md, .husky/pre-commit, notes.md, sync.service, zz.pth
 		t.Errorf("attention = %d items: %+v", len(att), att)
 	}
 }
@@ -114,6 +123,28 @@ func TestNoise(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("Noise(%q) = %q, want %q", rel, got, want)
+		}
+	}
+}
+
+func TestPersistTable(t *testing.T) {
+	for rel, want := range map[string]bool{
+		".bash_login": true, ".zlogin": true, ".config/environment.d/10-x.conf": true,
+		".local/share/dbus-1/services/x.service": true, ".local/share/applications/x.desktop": true,
+		".config/niri/config.kdl": true, ".gradle/init.d/x.gradle": true, ".cargo/config.toml": true,
+		".claude.json": true, ".claude.json.backup": false, ".local/share/fonts/a.ttf": false,
+		".local/lib/python3.12/site-packages/pkg/__init__.py": false, ".config/systemd": true,
+	} {
+		if got := persistReason(rel, persistHomeTable) != ""; got != want {
+			t.Errorf("home %s: persist %v, want %v", rel, got, want)
+		}
+	}
+	for rel, want := range map[string]bool{
+		".gitmodules": true, ".pnpmfile.cjs": true, ".mvn/extensions.xml": true,
+		".vscode/settings.json": true, ".vscode/extensions.json": false, "src/main.go": false,
+	} {
+		if got := persistReason(rel, persistWSTable) != ""; got != want {
+			t.Errorf("ws %s: persist %v, want %v", rel, got, want)
 		}
 	}
 }

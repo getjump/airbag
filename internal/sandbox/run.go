@@ -51,7 +51,27 @@ var DefaultHidden = []string{
 	".ssh", ".aws", ".gnupg", ".config/gh", ".config/gcloud", ".azure",
 	".kube", ".docker", ".netrc", ".git-credentials", ".npmrc", ".pypirc",
 	".config/hub", ".terraform.d/credentials.tfrc.json",
+	// Decryption keys and decrypted secrets: sops and age keys,
+	// sops-nix's runtime secrets, pass, Vault, rclone remotes, keyrings.
+	".config/sops", ".config/sops-nix", ".config/age", ".password-store", ".vault-token",
+	".config/rclone", ".local/share/keyrings", ".config/op",
 }
+
+// HostSockets: daemons whose sockets live outside /run, which the
+// sandbox makes private. A unix socket path is reachable from any
+// network namespace, and connecting needs no write access to the
+// mount, so a read-only host does not stop it. Each would act for the
+// agent outside the sandbox: Incus and LXD as root (for members of
+// their admin group), the Nix daemon by building with network access
+// outside the proxy (see --nix-daemon).
+var HostSockets = []string{
+	NixDaemonSocket,
+	"/var/lib/incus/unix.socket", "/var/lib/incus/unix.socket.user",
+	"/var/lib/lxd/unix.socket", "/var/snap/lxd/common/lxd/unix.socket",
+	"/var/snap/lxd/common/lxd/unix.socket.user",
+}
+
+const NixDaemonSocket = "/nix/var/nix/daemon-socket"
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
 	gate := policy.NewGate(pol, s.Dir)

@@ -69,6 +69,34 @@ if command -v unshare >/dev/null; then
 	echo "$out" | grep -q nested-refused || fail "--strict let the agent create a user namespace: $out"
 	"$AIRBAG" discard --yes >/dev/null
 fi
+# A host socket named in hide: is out of reach (as the built-in list
+# hides the Nix daemon, Incus and LXD sockets outside /run). It needs a
+# directory outside $HOME, /tmp and /run that this user can write:
+# AIRBAG_E2E_HOSTDIR, prepared by root (mkdir -m 1777).
+H=${AIRBAG_E2E_HOSTDIR:-/var/lib/airbag-e2e}
+if [ -d "$H" ] && [ -w "$H" ]; then
+	sock="$H/daemon-$$.sock"
+	python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(5); time.sleep(30)' "$sock" &
+	lp=$!
+	sleep 0.5
+	probe='import socket,sys
+c=socket.socket(socket.AF_UNIX)
+try: c.connect(sys.argv[1]); print("sock-reachable")
+except OSError: print("sock-blocked")'
+	out=$("$AIRBAG" run -- python3 -c "$probe" "$sock" 2>/dev/null)
+	echo "$out" | grep -q sock-reachable || fail "baseline: host socket not reachable without hide: $out"
+	"$AIRBAG" discard --yes >/dev/null
+	printf 'hide: ["%s"]\n' "$sock" > airbag.yaml
+	out=$("$AIRBAG" run -- python3 -c "$probe" "$sock" 2>/dev/null)
+	echo "$out" | grep -q sock-blocked || fail "hidden host socket reachable: $out"
+	"$AIRBAG" discard --yes >/dev/null
+	rm airbag.yaml
+	kill $lp 2>/dev/null || true
+	rm -f "$sock"
+else
+	echo "SKIP: host socket check (no writable $H)"
+fi
+
 # Text the agent controls is shown, not interpreted, by the terminal.
 "$AIRBAG" run -- sh -c 'printf "x\033[2Jy\n" > "$(printf "esc\033]0;t\007.txt")"' >/dev/null 2>&1
 esc=$(printf '\033')

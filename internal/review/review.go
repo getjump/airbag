@@ -18,6 +18,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 )
 
@@ -158,30 +159,6 @@ func sameContent(a, b string) bool {
 	}
 }
 
-// Persistence: files that run code later, outside the sandbox.
-var persistWS = []string{
-	".git/hooks/", ".git/config", ".github/workflows/", ".gitlab-ci.yml", ".envrc",
-	".husky/", ".pre-commit-config.yaml", // run on the next commit
-	".claude/", ".mcp.json", ".codex/", ".cursor/", ".gemini/", ".github/copilot-instructions.md",
-	".vscode/tasks.json", ".devcontainer/", "airbag.yaml",
-}
-
-// Instructions agents read at the start of every later session, at any
-// depth of the tree: changing them steers the next agent.
-var persistNames = []string{
-	"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "GEMINI.md",
-	".cursorrules", ".windsurfrules",
-}
-
-var persistHome = []string{
-	".bashrc", ".bash_profile", ".profile", ".zshrc", ".zprofile", ".zshenv", ".config/fish/",
-	".config/systemd/", ".config/autostart/", ".local/bin/", ".gitconfig", ".config/git/",
-	".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/", ".claude/agents/",
-	".claude/skills/", ".claude/commands/", ".claude/plugins/", ".claude/CLAUDE.md", ".claude.json",
-	".codex/config.toml", ".codex/hooks.json", ".codex/rules/", ".codex/AGENTS.md",
-	".npmrc", ".pypirc", ".docker/", ".config/gh/", ".ssh/", ".bin/", "bin/",
-}
-
 var buildDirs = []string{"bin/", "build/", "dist/", "target/", "out/", "node_modules/", ".venv/", "vendor/"}
 
 func classify(s *session.Session, cs []Change) {
@@ -192,12 +169,12 @@ func classify(s *session.Session, cs []Change) {
 		if c.IsDir() {
 			rel += "/"
 		}
-		patterns := persistWS
+		table := persistWSTable
 		if c.Layer == "home" {
-			patterns = persistHome
+			table = persistHomeTable
 			c.Flags = append(c.Flags, "outside workspace")
 		}
-		if (hasPrefix(rel, patterns) || slices.Contains(persistNames, path.Base(rel))) && !strings.HasSuffix(rel, ".sample") {
+		if (persistReason(rel, table) != "" || slices.Contains(persistNames, path.Base(rel))) && !strings.HasSuffix(rel, ".sample") {
 			c.Flags = append(c.Flags, "persist")
 		}
 		if c.Kind != Deleted && c.Type == 0 && c.Mode&0o111 != 0 && !hasPrefix(rel, buildDirs) && !strings.HasPrefix(rel, ".git/") {
@@ -218,14 +195,27 @@ func hasPrefix(rel string, patterns []string) bool {
 	return false
 }
 
-// knownSecrets reads values from the workspace's real .env files. A
-// value of 8+ characters that shows up in the agent's changes is
-// reported: the branch is about to put a secret into the repo.
+// knownSecrets reads values from the workspace's real secret files, the
+// same ones secretfs serves (.env at any depth, keys, credentials,
+// *.tfvars). A value of 8+ characters that shows up in the agent's
+// changes is reported: the branch is about to put a secret into the
+// repo. Values are what follows "=" or ":" on a line; a long line with
+// no spaces (the body of a PEM key) counts as a whole.
 func knownSecrets(ws string) []string {
-	files, _ := filepath.Glob(filepath.Join(ws, ".env*"))
 	seen := map[string]bool{}
 	var out []string
-	for _, f := range files {
+	add := func(v string) {
+		v = strings.Trim(strings.TrimSpace(v), `"',;`)
+		if len(v) >= 8 && !strings.ContainsAny(v, " \t") && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	for _, rel := range secretfs.Find(ws) {
+		f := filepath.Join(ws, rel)
+		if st, err := os.Stat(f); err != nil || st.Size() > 1<<20 {
+			continue
+		}
 		fh, err := os.Open(f)
 		if err != nil {
 			continue
@@ -233,14 +223,13 @@ func knownSecrets(ws string) []string {
 		sc := bufio.NewScanner(fh)
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text())
-			if line == "" || strings.HasPrefix(line, "#") {
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-----") {
 				continue
 			}
-			_, v, ok := strings.Cut(line, "=")
-			v = strings.Trim(strings.TrimSpace(v), `"'`)
-			if ok && len(v) >= 8 && !seen[v] {
-				seen[v] = true
-				out = append(out, v)
+			if i := strings.IndexAny(line, "=:"); i >= 0 {
+				add(line[i+1:])
+			} else if len(line) >= 32 {
+				add(line)
 			}
 		}
 		fh.Close()

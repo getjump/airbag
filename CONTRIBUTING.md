@@ -24,6 +24,11 @@ $ for t in test/*-e2e.sh; do sh "$t"; done
 $ python3 test/ctrlc.py
 ```
 
+One check needs a directory outside `$HOME`, `/tmp` and `/run` that the test
+user can write, to place a host socket there: `sudo mkdir -m 1777
+/var/lib/airbag-e2e` (or set `AIRBAG_E2E_HOSTDIR`); without it the check is
+skipped.
+
 `test/claude-e2e.sh` and `test/codex-e2e.sh` drive the real Claude Code and
 Codex binaries (they skip when the binary is missing). The model is
 `test/mockapi`, a scripted stand-in for the Anthropic Messages and OpenAI

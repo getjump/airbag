@@ -65,9 +65,20 @@ func skipDir(name string) bool {
 	return false
 }
 
-// Open finds the workspace's secret files, at any depth.
+// Open finds the workspace's secret files, at any depth, and opens them.
 func Open(workspace string) []File {
 	var out []File
+	for _, rel := range Find(workspace) {
+		if f, err := os.Open(filepath.Join(workspace, rel)); err == nil {
+			out = append(out, File{Rel: rel, F: f})
+		}
+	}
+	return out
+}
+
+// Find lists the workspace's secret files, relative to it.
+func Find(workspace string) []string {
+	var out []string
 	_ = filepath.WalkDir(workspace, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -85,12 +96,8 @@ func Open(workspace string) []File {
 		if err != nil || !st.Mode().IsRegular() {
 			return nil
 		}
-		rel, err := filepath.Rel(workspace, p)
-		if err != nil {
-			return nil
-		}
-		if f, err := os.Open(p); err == nil {
-			out = append(out, File{Rel: rel, F: f})
+		if rel, err := filepath.Rel(workspace, p); err == nil {
+			out = append(out, rel)
 		}
 		return nil
 	})

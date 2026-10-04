@@ -40,6 +40,8 @@ type Meta struct {
 	Passthrough []string `json:"passthrough"`
 	// Paths under $HOME hidden from the agent (credentials).
 	Hidden []string `json:"hidden"`
+	// Host paths hidden from the agent (daemon sockets outside /run).
+	HiddenHost []string `json:"hidden_host,omitempty"`
 	// Credential-like environment variables passed to the agent anyway.
 	PassEnv []string `json:"pass_env,omitempty"`
 	// Strict keeps the agent from creating user namespaces.

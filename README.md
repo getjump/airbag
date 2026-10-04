@@ -82,8 +82,13 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
 - **No credentials.** `~/.ssh`, `~/.aws`, `gh`, `docker`, `kube` and similar are
   hidden, and so are credential-like environment variables (`*TOKEN*`,
   `*SECRET*`, `*API_KEY*`, ...) except the agents' own API keys; `--pass-env NAME`
-  keeps one. Host sockets (docker.sock, D-Bus, ssh-agent, X11, Wayland) are out of
-  reach: `/run`, `/tmp` and `/dev/shm` are private.
+  keeps one. Decryption keys and decrypted secrets are hidden too: sops and age
+  keys, sops-nix's runtime secrets, `pass`, Vault, rclone, keyrings; `hide:` in
+  `airbag.yaml` adds paths. Host sockets (docker.sock, D-Bus, ssh-agent, X11,
+  Wayland) are out of reach: `/run`, `/tmp` and `/dev/shm` are private. Daemons
+  that keep their socket elsewhere are hidden by name: Incus and LXD (root for
+  their admin group) and the Nix daemon, whose builds reach the network outside
+  the proxy; `--nix-daemon` gives the agent Nix anyway.
 - **Watched secrets.** The workspace's secret files are served read-only through
   FUSE (`.env` and `.env.*` at any depth, private keys, `.npmrc`, `.pypirc`,
   cloud credentials, `*.tfvars`). The first read by anything but airbag taints

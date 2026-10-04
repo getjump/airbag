@@ -47,11 +47,15 @@ type Rule struct {
 
 type File struct {
 	Allow []string `yaml:"allow"`
+	// Hide: more paths to hide from the agent, relative to $HOME or
+	// absolute. Hiding only takes away, so the repository may add some.
+	Hide  []string `yaml:"hide"`
 	Rules []Rule   `yaml:"rules"`
 }
 
 type Policy struct {
 	Allow   []string
+	Hide    []string
 	Rules   []Rule
 	Sources []string
 }
@@ -133,6 +137,7 @@ func Load(workspace, home string) (*Policy, error) {
 		}
 		p.Sources = append(p.Sources, path)
 		p.Allow = append(p.Allow, f.Allow...)
+		p.Hide = append(p.Hide, f.Hide...)
 		for i, r := range f.Rules {
 			if r.Name == "" {
 				r.Name = fmt.Sprintf("%s#%d", filepath.Base(path), i+1)
