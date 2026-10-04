@@ -15,8 +15,25 @@ import (
 // `airbag approve a-N`, and the retry passes.
 type Gate struct {
 	*Policy
-	mu  sync.Mutex
-	dir string
+	mu      sync.Mutex
+	dir     string
+	tainted string // what secret the session read, if any
+}
+
+// Taint marks the session as having read a secret.
+func (g *Gate) Taint(source string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.tainted == "" {
+		g.tainted = source
+	}
+}
+
+// Tainted returns what tainted the session, or "".
+func (g *Gate) Tainted() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.tainted
 }
 
 type Request struct {
@@ -36,6 +53,7 @@ func asksPath(dir string) string { return filepath.Join(dir, "asks.json") }
 // Check decides an effect. For ask it returns the request's ID, or
 // allow when the human already approved this exact effect.
 func (g *Gate) Check(in Input) (Decision, string) {
+	in.Tainted = in.Tainted || g.Tainted() != ""
 	d := g.Decide(in)
 	if d.Verdict != Ask {
 		return d, ""

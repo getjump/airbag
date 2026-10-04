@@ -40,8 +40,10 @@ API_TOKEN=sk-e2e-0123456789abcdef "$AIRBAG" run -- sh -c "'$T/mockapi' -addr 127
 
 [ ! -e claude.txt ] || fail "claude.txt reached the real workspace"
 rev=$("$AIRBAG" review)
-for want in "6 tool calls" "Bash   echo from-claude > claude.txt" "+claude.txt" "Write" "+notes.md" "git push origin main" \
-	"fs.delete build (recursive)" "net.egress paste.example.net (POST)" "denied: paste.example.net:443"; do
+# After `cat .env` the session is tainted, so the exfiltration call is
+# refused in PreToolUse and never runs; neither does the denied marker.
+for want in "5 tool calls" "Bash   echo from-claude > claude.txt" "+claude.txt" "Write" "+notes.md" "git push origin main" \
+	"Secrets    read: .env" "secret-taint"; do
 	echo "$rev" | grep -qF -- "$want" || fail "review lacks '$want':
 $rev"
 done
@@ -53,6 +55,8 @@ log="${AIRBAG_HOME:-/var/tmp/airbag-$(id -u)}/$id/home/upper/${T#$HOME/}/model.l
 grep -q "sk-e2e-0123456789abcdef" "$log" && fail "the secret reached the model API"
 grep -q "masked API_TOKEN" "$log" || fail "masked output not seen by the model"
 grep -q 'blocked by policy' "$log" || fail "the PreToolUse deny did not reach the model"
-echo "$rev" | grep -q "marker.txt" && fail "a command denied by policy ran"
+grep -q 'secret-taint' "$log" || fail "the model was not told why sending .env failed"
+echo "$rev" | grep -q "^  - build" && fail "a refused call ran"
+echo "$rev" | grep -q "^  + marker.txt" && fail "a command denied by policy ran"
 "$AIRBAG" discard --yes >/dev/null
 echo "PASS"

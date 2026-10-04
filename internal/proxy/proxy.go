@@ -72,6 +72,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "airbag: egress to "+host+" denied by policy (host not in allowlist)", http.StatusForbidden)
 		return
 	}
+	if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
+		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "secret-taint"})
+		http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted()+
+			"; only model APIs and package registries stay reachable", http.StatusForbidden)
+		return
+	}
 	if p.Gate != nil {
 		_, port, _ := net.SplitHostPort(target)
 		if d, id := p.Gate.Check(policy.Input{Effect: models.Effect{Kind: "net.connect", Target: host, Detail: port}}); d.Verdict != policy.Allow {

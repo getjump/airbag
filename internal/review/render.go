@@ -91,6 +91,15 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 			allowed[host]++
 		}
 	}
+	var reads []string
+	for _, e := range effs {
+		if e.Kind == "secret.read" {
+			reads = append(reads, fmt.Sprintf("%s by %s", e.Target, e.Reason))
+		}
+	}
+	if len(reads) > 0 {
+		fmt.Fprintf(w, "\nSecrets    read: %s\n           egress was limited to model APIs and registries from then on\n", strings.Join(reads, ", "))
+	}
 	fmt.Fprintf(w, "\nNetwork    %d allowed%s\n", total(allowed), hostList(allowed))
 	if len(denied) > 0 {
 		fmt.Fprintf(w, "           %d denied%s\n", total(denied), hostList(denied))

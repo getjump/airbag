@@ -36,6 +36,7 @@ func (s *Server) Serve(l net.Listener) error {
 	mux.HandleFunc("POST /intent", s.intent)
 	mux.HandleFunc("POST /hook/{agent}/{event}", s.hook)
 	mux.HandleFunc("POST /exec", s.exec)
+	mux.HandleFunc("POST /taint", s.taint)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	return srv.Serve(l)
 }
@@ -91,6 +92,7 @@ func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 			cmds, _ := models.Analyze(in.Command)
 			for _, c := range cmds {
 				if d, id := s.judge(c); d.Verdict != policy.Allow {
+					s.Log.Add(effects.Effect{Kind: "tool.call", Target: p.ToolName + ": " + summary, Verdict: d.Verdict, Reason: d.Rule})
 					_ = json.NewEncoder(w).Encode(map[string]any{"hookSpecificOutput": map[string]any{
 						"hookEventName":            "PreToolUse",
 						"permissionDecision":       "deny",
@@ -106,6 +108,33 @@ func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_, _ = w.Write([]byte("{}"))
+}
+
+// Taint is reported by the secret filesystem when a process reads .env.
+type Taint struct {
+	File string `json:"file"`
+	Exe  string `json:"exe"`
+}
+
+func (s *Server) taint(w http.ResponseWriter, r *http.Request) {
+	var t Taint
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&t); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.Gate != nil {
+		s.Gate.Taint(t.File)
+	}
+	s.Log.Add(effects.Effect{Kind: "secret.read", Target: t.File, Verdict: "taint", Reason: t.Exe})
+	_, _ = w.Write([]byte("{}"))
+}
+
+// ReportTaint is called from the sandbox init process.
+func ReportTaint(t Taint) {
+	body, _ := json.Marshal(t)
+	if resp, err := client(3*time.Second).Post("http://airbag/taint", "application/json", bytes.NewReader(body)); err == nil {
+		resp.Body.Close()
+	}
 }
 
 // Exec is what the shell shim reports before running a script.

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/control"
+	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/shim"
 )
@@ -72,6 +74,9 @@ func buildWorld(s *session.Session) error {
 	if err := bind(s.Home, s.MountDir("realhome"), true); err != nil {
 		return err
 	}
+	// Open .env files now: once the workspace is branched, their paths
+	// lead to the copies airbag serves.
+	secrets := secretfs.Open(s.Workspace)
 	if err := setRO("/", true, true); err != nil {
 		return fmt.Errorf("make host read-only: %w", err)
 	}
@@ -122,6 +127,11 @@ func buildWorld(s *session.Session) error {
 	if err := privateRun(s); err != nil {
 		return err
 	}
+	if len(secrets) > 0 {
+		if err := serveSecrets(s, secrets); err != nil {
+			fmt.Fprintf(os.Stderr, "airbag: warning: reads of .env are not tracked: %v\n", err)
+		}
+	}
 	for _, d := range []string{"/tmp", "/var/tmp", "/dev/shm"} {
 		if _, err := os.Stat(d); err == nil {
 			if err := unix.Mount("tmpfs", d, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777"); err != nil {
@@ -160,6 +170,40 @@ func agentConfig(s *session.Session) error {
 		return err
 	}
 	return setRO(top, true, true)
+}
+
+// serveSecrets puts the workspace's .env files behind secretfs: every
+// read by anything but airbag itself taints the session.
+func serveSecrets(s *session.Session, files []secretfs.File) error {
+	dir := "/run/airbag/secrets"
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	self, _ := os.Stat("/proc/self/exe")
+	var mu sync.Mutex
+	reported := map[string]bool{}
+	onRead := func(name string, pid uint32) {
+		exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+		if st, err := os.Stat(fmt.Sprintf("/proc/%d/exe", pid)); err == nil && self != nil && os.SameFile(st, self) {
+			return // the shell shim reads values to mask them
+		}
+		mu.Lock()
+		first := !reported[name+exe]
+		reported[name+exe] = true
+		mu.Unlock()
+		if first {
+			go control.ReportTaint(control.Taint{File: name, Exe: exe})
+		}
+	}
+	if _, err := secretfs.Mount(dir, files, onRead); err != nil {
+		return err
+	}
+	for _, f := range files {
+		if err := bind(filepath.Join(dir, f.Name), filepath.Join(s.Workspace, f.Name), false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // privateRun mounts an empty /run with airbag's sockets and shims.

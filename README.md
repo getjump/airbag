@@ -28,6 +28,10 @@ script, so it is repeatable without an account (`demo/demo.sh`).
 - **No credentials.** `~/.ssh`, `~/.aws`, `gh`, `docker`, `kube` and similar are
   hidden. Host sockets (docker.sock, D-Bus, ssh-agent, X11, Wayland) are out of
   reach: `/run`, `/tmp` and `/dev/shm` are private.
+- **Watched secrets.** The workspace's `.env` files are served read-only through
+  FUSE. The first read by anything but airbag taints the session: commands that
+  send data out are refused, and only model APIs and package registries stay
+  reachable. Output going back to the agent has known secret values masked.
 - **Its own state.** Transcripts and logins (`~/.claude/projects`, `~/.codex/sessions`,
   tokens) pass through, so discarding a branch does not log you out.
 
@@ -100,10 +104,12 @@ config core.hooksPath` persists), and known secret values (from `.env` and
 credential-like variables) are masked in output that goes back to the agent.
 
 Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `test/policy-e2e.sh`,
-`test/partial-e2e.sh`, `python3 test/ctrlc.py` and `test/claude-e2e.sh` (the real Claude Code binary against a scripted mock of the
+`test/partial-e2e.sh`, `test/secret-e2e.sh`, `python3 test/ctrlc.py` and
+`test/claude-e2e.sh` (the real Claude Code binary against a scripted mock of the
 Messages API). With a real login, follow [docs/manual-test.md](docs/manual-test.md).
 
-Not yet: a local registry mirror, secret handles in files, Codex hooks.
+Not yet: a local registry mirror, secret handles (the agent sees a placeholder,
+airbag substitutes the value at an allowed boundary), Codex hooks.
 
 ## Threat model
 

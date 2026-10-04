@@ -50,6 +50,12 @@ type Policy struct {
 // Builtin: effects that cannot be undone and cannot wait in the outbox.
 var Builtin = []Rule{
 	{
+		Name:    "secret-taint",
+		When:    `session.tainted && effect.kind == "net.egress"`,
+		Verdict: Deny,
+		Message: "this session read a secret (.env); data can no longer leave the machine",
+	},
+	{
 		Name:    "no-publish",
 		When:    `effect.kind == "net.egress" && effect.detail == "publish"`,
 		Verdict: Deny,
