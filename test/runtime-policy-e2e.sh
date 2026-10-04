@@ -70,12 +70,22 @@ if pid == 0:
     os._exit(0 if ctypes.get_errno() == 13 else 1)
 assert os.waitpid(pid, 0)[1] == 0
 # Init's channel/backing fds must stay inaccessible to the agent.
-try:
-    os.listdir('/proc/1/fd')
-except PermissionError:
-    pass
-else:
-    raise AssertionError('supervisor descriptors exposed')
+# Listing fd numbers alone is permitted on some namespace/proc combinations.
+# The security boundary is dereferencing/reopening the supervisor's fd links.
+for number in os.listdir('/proc/1/fd'):
+    try:
+        os.readlink('/proc/1/fd/' + number)
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError('supervisor descriptor link readable')
+    try:
+        fd = os.open('/proc/1/fd/' + number, os.O_RDONLY | os.O_NONBLOCK)
+    except PermissionError:
+        pass
+    else:
+        os.close(fd)
+        raise AssertionError('supervisor descriptor reopened')
 # Taint must retain the actual reader, even through the outer filesystem.
 assert 'runtime-secret' in p('.env').read_text()
 PY

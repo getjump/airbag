@@ -579,9 +579,15 @@ func runAgent(s *session.Session, ctl *os.File, client *runtimepolicy.Client) in
 			_ = syscall.Kill(pgrp, syscall.SIGKILL)
 			return 125
 		}
-		defer unix.Close(listener)
+		controllerDone := make(chan struct{})
+		defer func() { close(controllerDone); unix.Close(listener) }()
 		go func() {
 			if err := serveExec(listener, client.Check); err != nil {
+				select {
+				case <-controllerDone:
+					return
+				default:
+				}
 				fmt.Fprintln(os.Stderr, "airbag: exec controller stopped:", err)
 				_ = syscall.Kill(pgrp, syscall.SIGKILL)
 			}
