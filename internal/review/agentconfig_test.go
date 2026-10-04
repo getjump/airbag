@@ -315,3 +315,43 @@ func TestKeyPathString(t *testing.T) {
 		}
 	}
 }
+
+// A changed key the table does not know is neither written back nor
+// persistence: review lists it plainly under attention, by name.
+func TestReviewListsUnknownKeys(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1,"theme":"dark"}`)
+	writeCfg(t, branchPath, `{"numStartups":2,"theme":"light"}`)
+	WriteBackConfigs(s)
+
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	att := Attention(cs)
+	if len(att) != 1 || att[0].Rel != ".claude.json" {
+		t.Fatalf("attention = %+v, want ~/.claude.json", att)
+	}
+	fl := att[0].Flags
+	if !slices.Contains(fl, "unknown key(s): theme") {
+		t.Errorf("flags %v lack the unknown key", fl)
+	}
+	if slices.Contains(fl, "persist") {
+		t.Errorf("an unknown key was flagged as persistence: %v", fl)
+	}
+	var b strings.Builder
+	WriteAttention(&b, BuildReport(s, cs, nil, nil, nil))
+	if !strings.Contains(b.String(), "unknown key(s): theme") || strings.Contains(b.String(), "light") {
+		t.Errorf("attention output: %q", b.String())
+	}
+
+	// Mixed with a persist key, both are named, each in its class.
+	writeCfg(t, branchPath, `{"numStartups":2,"theme":"light","mcpServers":{"x":{}}}`)
+	cs, _ = Scan(s)
+	fl = Attention(cs)[0].Flags
+	for _, want := range []string{"persist", "persist key(s): mcpServers", "unknown key(s): theme"} {
+		if !slices.Contains(fl, want) {
+			t.Errorf("mixed flags %v lack %q", fl, want)
+		}
+	}
+}

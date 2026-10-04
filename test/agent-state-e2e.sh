@@ -54,7 +54,7 @@ grep -Eq '"numStartups": *2' "$HOME/.claude.json" || fail "benign counter not wr
 rev=$("$AIRBAG" review)
 echo "$rev" | grep -qF ".claude.json" || fail "review lacks ~/.claude.json:
 $rev"
-echo "$rev" | grep -qF "keys: mcpServers" || fail "review does not name the changed key:
+echo "$rev" | grep -qF "persist key(s): mcpServers" || fail "review does not name the changed key as persist:
 $rev"
 echo "$rev" | grep -qF "memory/NOTES.md" || fail "review lacks the memory file:
 $rev"

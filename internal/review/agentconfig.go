@@ -314,6 +314,37 @@ func configKeyChange(c Change) (keys []string, persist bool, ok bool) {
 	return keys, persist, ok
 }
 
+// configFlags are review's flags for a config file change, one per
+// class, each naming its keys: "persist" and "persist key(s): …" for keys
+// that run code or change trust, "unknown key(s): …" for keys the table
+// does not list (shown plainly, not as persistence), and "benign key(s):
+// …" for listed benign keys that were not written back (the real file
+// could not be written). nil when c is not a config file.
+func configFlags(c Change) []string {
+	changes, readable, ok := configChanges(c)
+	if !ok {
+		return nil
+	}
+	if !readable {
+		return []string{"not a readable regular JSON file"}
+	}
+	byClass := map[keyClass][]string{}
+	for _, ch := range changes {
+		byClass[ch.class] = append(byClass[ch.class], ch.String())
+	}
+	var out []string
+	if k := byClass[classPersist]; len(k) > 0 {
+		out = append(out, "persist", "persist key(s): "+strings.Join(k, ", "))
+	}
+	if k := byClass[classUnknown]; len(k) > 0 {
+		out = append(out, "unknown key(s): "+strings.Join(k, ", "))
+	}
+	if k := byClass[classWriteBack]; len(k) > 0 {
+		out = append(out, "benign key(s): "+strings.Join(k, ", "))
+	}
+	return out
+}
+
 func topLevel(b []byte) (map[string]json.RawMessage, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(b, &m); err != nil {

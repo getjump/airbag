@@ -469,18 +469,19 @@ func Diff(w io.Writer, c Change) {
 		}
 		return
 	}
-	// A config file is shown by the names of the top-level keys that
-	// changed, never their values, which may carry tokens.
-	if keys, persist, ok := configKeyChange(c); ok {
-		note := ""
-		if persist {
-			note = " (persist)"
+	// A config file is shown by the names of the keys that changed, by
+	// class, never their values, which may carry tokens.
+	if fl := configFlags(c); fl != nil {
+		var parts []string
+		for _, f := range fl {
+			if f != "persist" {
+				parts = append(parts, f)
+			}
 		}
-		if len(keys) == 0 {
-			fmt.Fprintf(w, "~ %s: changed (not a readable regular JSON file)%s\n", display(c), note)
-			return
+		if len(parts) == 0 {
+			parts = []string{"no key changed"}
 		}
-		fmt.Fprintf(w, "~ %s: top-level keys changed%s: %s\n", display(c), note, strings.Join(keys, ", "))
+		fmt.Fprintf(w, "~ %s: %s\n", display(c), strings.Join(parts, "; "))
 		return
 	}
 	a, b := c.Path, c.Upper
