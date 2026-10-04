@@ -50,8 +50,10 @@ pushes.
 | One view of what changed | no | no | effect log, steps per tool call, hosts, packages |
 | You decide | before the run | during the run | after the run, once |
 
-airbag sets up its namespaces itself. Running on bubblewrap underneath is an
-open question; see [CONTRIBUTING.md](CONTRIBUTING.md).
+airbag sets up its namespaces itself. Could it run on bubblewrap underneath?
+Not yet: bubblewrap 0.9, which Ubuntu 24.04 ships, cannot make the overlay the
+branch needs, and FUSE, the proxy bridge and the agent settings would stay
+airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
 
 ## What the agent gets
 

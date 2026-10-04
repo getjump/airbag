@@ -63,10 +63,10 @@ cannot tell the agent's key from another one. Terminating TLS for those hosts
 inside the sandbox would allow that check, and secret handles: the agent sees
 a placeholder, airbag substitutes the value at an allowed boundary.
 
-**bubblewrap underneath.** airbag sets up namespaces itself in Go. Running on
-bubblewrap would put battle-tested code on the most sensitive path; it needs
-FUSE inside the sandbox, a nested user namespace so mounts stay locked, and
-recursive read-only binds. Worth an evaluation.
+**bubblewrap underneath.** airbag sets up namespaces itself in Go.
+[docs/bwrap-backend.md](docs/bwrap-backend.md) has the evaluation: not with
+bubblewrap 0.9 (no overlay), worth measuring as a hybrid once 0.10+ is common.
+Meanwhile its `--disable-userns` idea can move into airbag now.
 
 **More agents.** Claude Code and Codex get hooks, so the review shows which
 tool call changed what. Gemini CLI, Aider, OpenCode and others run in the
