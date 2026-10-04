@@ -247,7 +247,14 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 				keep(e, "changed after the apply stopped")
 				continue
 			}
-		} else if fingerprint(e.Path) != e.After {
+		} else if fp := fingerprint(e.Path); fp != e.After {
+			if fp == "absent" && e.Saved == "" {
+				// The user removed the agent's version, and nothing was
+				// there before the apply: there is nothing to undo, and
+				// nothing to keep. Kept, the entry could later take for
+				// the agent's a file of the user's that is the same.
+				continue
+			}
 			keep(e, "changed after the apply")
 			continue
 		}

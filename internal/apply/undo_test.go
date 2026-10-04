@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -797,5 +798,125 @@ func TestRollbackKeepsUserFileAtUnfinishedStep(t *testing.T) {
 		case !tc.kept && got == tc.data:
 			t.Fatalf("rollback left the agent's version of an unfinished step:\n%s", out.String())
 		}
+	}
+}
+
+// overlayReplacedDir lays out an overlay session in which the agent
+// replaced the user's directory src, holding the files real, with one
+// holding the files agent; both also hold a symlink link to a.go. It
+// returns the real path of src.
+func overlayReplacedDir(t *testing.T, real, agent map[string]string) (*session.Session, *outbox.Box, string) {
+	t.Helper()
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	src, up := filepath.Join(ws, "src"), filepath.Join(s.WSUpper(), "src")
+	for dir, files := range map[string]map[string]string{src: real, up: agent} {
+		for rel, data := range files {
+			p := filepath.Join(dir, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink("a.go", filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := unix.Setxattr(up, "user.overlay.opaque", []byte("y"), 0); err != nil {
+		t.Skipf("cannot mark a directory opaque here: %v", err)
+	}
+	s.Baseline = time.Now() // the real files are from before the session
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { box.Close() })
+	return s, box, src
+}
+
+// When the agent replaces a directory (opaque in the upper layer), the
+// apply writes all of the agent's version, files the same as before
+// included, and nothing of the user's: the directory is what the agent
+// saw. Rollback brings the user's back.
+func TestApplyWritesAllOfReplacedDir(t *testing.T) {
+	s, box, src := overlayReplacedDir(t, map[string]string{
+		"a.go":     "package a\n",
+		"b.go":     "package b\n",
+		"sub/c.go": "package c\n",
+	}, map[string]string{
+		"a.go":     "package a\n", // the same as before
+		"new.go":   "package new\n",
+		"sub/c.go": "package c\n", // the same, in a directory not marked
+	})
+	if cf := Conflicts(s, mustScan(t, s)); len(cf) > 0 {
+		t.Fatalf("conflicts although nothing changed on the host: %+v", cf)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	for rel, want := range map[string]string{"a.go": "package a\n", "new.go": "package new\n", "sub/c.go": "package c\n"} {
+		if got := read(t, filepath.Join(src, rel)); got != want {
+			t.Errorf("after the apply src/%s = %q, want the agent's %q", rel, got, want)
+		}
+	}
+	if l, err := os.Readlink(filepath.Join(src, "link")); err != nil || l != "a.go" {
+		t.Errorf("after the apply src/link = %q (%v), want the agent's link to a.go", l, err)
+	}
+	if _, err := os.Lstat(filepath.Join(src, "b.go")); err == nil {
+		t.Errorf("src/b.go, which the agent's src does not have, is still there")
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	for rel, want := range map[string]string{"a.go": "package a\n", "b.go": "package b\n", "sub/c.go": "package c\n"} {
+		if got := read(t, filepath.Join(src, rel)); got != want {
+			t.Errorf("after the rollback src/%s = %q, want the user's %q\n%s", rel, got, want, out.String())
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(src, "new.go")); err == nil {
+		t.Errorf("src/new.go still there after the rollback")
+	}
+	if gs, err := listGenerations(s); err != nil || len(gs) != 0 {
+		t.Fatalf("rollback not complete: generations %v (%v)\n%s", gs, err, out.String())
+	}
+}
+
+// A file of the agent's that the user removed after the apply, from a
+// replaced directory, is not kept by rollback as "changed": nothing was
+// there before the apply either. Kept, it would match the user's own
+// file, the same as the agent's, once the directory is restored, and a
+// later rollback would remove that file.
+func TestRollbackKeepsUserFileSameAsAgentsRemovedOne(t *testing.T) {
+	s, box, src := overlayReplacedDir(t,
+		map[string]string{"a.go": "package a\n", "b.go": "package b\n"},
+		map[string]string{"a.go": "package a\n", "new.go": "package new\n"})
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	a := filepath.Join(src, "a.go")
+	if err := os.Remove(a); err != nil {
+		t.Fatal(err)
+	}
+	for round := 1; round <= 2; round++ {
+		out.Reset()
+		if err := Rollback(s, nil, &out); err != nil && round == 1 {
+			t.Fatal(err, out.String())
+		}
+		if got := read(t, a); got != "package a\n" {
+			t.Fatalf("after rollback %d the user's src/a.go = %q\n%s", round, got, out.String())
+		}
+	}
+	if gs, err := listGenerations(s); err != nil || len(gs) != 0 {
+		t.Fatalf("rollback not complete: generations %v (%v)", gs, err)
 	}
 }

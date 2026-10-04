@@ -43,7 +43,10 @@ type Change struct {
 func (c Change) IsDir() bool { return c.Type == fs.ModeDir }
 
 // Scan walks both upper layers. Whiteouts are deletions, opaque
-// directories replace their lower counterpart.
+// directories replace their lower counterpart. What is inside such a
+// directory is compared with nothing, as the agent saw it: each entry
+// is added, even one the same as the file it replaces, so that applying
+// the directory writes all of the agent's version.
 func Scan(s *session.Session) ([]Change, error) {
 	if s.Clone {
 		out, err := ScanTree("ws", s.Workspace, s.CloneDir())
@@ -59,6 +62,7 @@ func Scan(s *session.Session) ([]Change, error) {
 		layers = append(layers, struct{ name, upper, lower string }{"home", s.HomeUpper(), s.Home})
 	}
 	for _, l := range layers {
+		var replaced []string // opaque directories found so far, as paths with a trailing slash
 		err := filepath.WalkDir(l.upper, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -74,6 +78,11 @@ func Scan(s *session.Session) ([]Change, error) {
 			}
 			c.Mode = info.Mode().Perm()
 			lst, lerr := os.Lstat(c.Path)
+			for _, r := range replaced {
+				if strings.HasPrefix(p, r) {
+					lst, lerr = nil, fs.ErrNotExist // hidden from the agent by r
+				}
+			}
 			switch {
 			case isWhiteout(info):
 				c.Kind = Deleted
@@ -84,6 +93,7 @@ func Scan(s *session.Session) ([]Change, error) {
 				c.Type = fs.ModeDir
 				if isOpaque(p) && lerr == nil {
 					c.Kind = Replaced
+					replaced = append(replaced, p+string(filepath.Separator))
 				} else if lerr != nil {
 					c.Kind = Added
 				} else {
