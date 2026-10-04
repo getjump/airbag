@@ -74,12 +74,12 @@ speed checks (5000 by default), `-v` prints command output under passing checks.
 
 | Check | What it answers |
 |---|---|
-| S1 | A deny-first Seatbelt profile around a shell: writes only in the workspace, a credentials directory unreadable, outbound traffic only to the proxy's localhost port |
+| S1 | A deny-first Seatbelt profile around a shell: writes only in the workspace, a credentials directory unreadable, outbound traffic only to the proxy's localhost port (shown on a second local port that is reachable outside the profile, and on the internet when it is reachable from the Mac) |
 | S2 | The denials from S1 can be read from the unified log without admin rights, so review can list blocked operations |
 | N1 | `mount_nfs` mounts an NFSv3 export served from a localhost port by a regular user; read, write, rename, mkdir and delete reach the export |
 | N2 | How much slower creating and walking a `node_modules`-sized tree is through the mount |
 | N3 | git works in a repository at the mount path; the agents' versions there, if installed |
-| C1 | An APFS clone (`cp -c`) of the same tree: if it is fast and independent, a first prototype can branch the workspace by cloning it, with no NFS server, and review and apply by comparing the clone with the original |
+| C1 | An APFS clone (`clonefile`, which fails where cloning is not supported, unlike `cp -c`, which falls back to a copy) of the same tree: if it is fast and independent, a first prototype can branch the workspace by cloning it, with no NFS server, and review and apply by comparing the clone with the original |
 | T1 | A Go program inside the profile verifies TLS through the proxy without `com.apple.trustd.agent` (and with it, to compare) |
 
 ### Order

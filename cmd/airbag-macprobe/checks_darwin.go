@@ -3,12 +3,16 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var checks = []func(*probe) Result{
@@ -57,6 +61,38 @@ func checkSeatbelt(p *probe) Result {
 		return fail(r, err)
 	}
 	defer px.Close()
+	// A second local listener on a port the profile does not allow. It is
+	// reachable from here, so a refusal inside the profile is Seatbelt's
+	// and not a network that happens to be down.
+	other, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fail(r, err)
+	}
+	defer other.Close()
+	go func() {
+		for {
+			c, err := other.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	if c, err := net.DialTimeout("tcp", other.Addr().String(), 3*time.Second); err != nil {
+		return fail(r, fmt.Errorf("the control listener is not reachable outside the profile: %w", err))
+	} else {
+		c.Close()
+	}
+	otherPort := other.Addr().(*net.TCPAddr).Port
+	// The internet is judged only where it is reachable from here: offline
+	// or behind a proxy, "no" inside the profile would prove nothing.
+	internet := false
+	if !p.opts.noNet {
+		if c, err := net.DialTimeout("tcp", "1.1.1.1:443", 3*time.Second); err == nil {
+			c.Close()
+			internet = true
+		}
+	}
 	p.tag = fmt.Sprintf("airbag-macprobe-%d", time.Now().UnixNano())
 	homeFile := filepath.Join(p.home, "."+p.tag)
 	prof := Profile{Tag: p.tag, Write: []string{ws}, NoRead: []string{secret}, Ports: []int{px.Port()}}
@@ -65,9 +101,12 @@ echo "write-workspace=$(try sh -c 'echo x > %[1]s/f')"
 echo "write-home=$(try sh -c 'echo x > %[2]s')"
 echo "read-secret=$(try cat %[3]s/token)"
 echo "read-system=$(try cat /etc/hosts)"
-echo "connect-internet=$(try /usr/bin/nc -z -G 3 1.1.1.1 443)"
+echo "connect-other-port=$(try /usr/bin/nc -z -G 3 127.0.0.1 %[5]d)"
 echo "connect-proxy=$(try /usr/bin/nc -z -G 3 127.0.0.1 %[4]d)"
-`, shq(ws), shq(homeFile), shq(secret), px.Port())
+`, shq(ws), shq(homeFile), shq(secret), px.Port(), otherPort)
+	if internet {
+		script += "echo \"connect-internet=$(try /usr/bin/nc -z -G 3 1.1.1.1 443)\"\n"
+	}
 	out, err := run(60*time.Second, ws, "/usr/bin/sandbox-exec", "-p", prof.String(), "/bin/sh", "-c", script)
 	_ = os.Remove(homeFile) // in case the profile let it through
 	r.Detail = out
@@ -78,15 +117,22 @@ echo "connect-proxy=$(try /usr/bin/nc -z -G 3 127.0.0.1 %[4]d)"
 		r.Status, r.Reason = Fail, "sandbox-exec did not run: "+firstLine(out+" "+err.Error())
 		return r
 	}
-	bad := mismatches(markers(out), map[string]string{
+	want := map[string]string{
 		"write-workspace": "yes", "write-home": "no", "read-secret": "no",
-		"read-system": "yes", "connect-internet": "no", "connect-proxy": "yes",
-	})
+		"read-system": "yes", "connect-other-port": "no", "connect-proxy": "yes",
+	}
+	if internet {
+		want["connect-internet"] = "no"
+	}
+	bad := mismatches(markers(out), want)
 	if len(bad) > 0 {
 		r.Status, r.Reason = Fail, strings.Join(bad, ", ")
 		return r
 	}
 	r.Status, r.Reason = Pass, "writes only to the workspace, credentials unreadable, network only to the proxy port"
+	if !internet {
+		r.Reason += " (the internet is not reachable from here, so that was shown on a second local port only)"
+	}
 	return r
 }
 
@@ -270,8 +316,11 @@ func checkGitAtMount(p *probe) Result {
 	return r
 }
 
-// C1: an APFS clone of a tree (cp -c, clonefile) as a cheaper branch than
-// NFS: instant copy-on-write, no server, at the cost of a different path.
+// C1: an APFS clone of a tree (clonefile) as a cheaper branch than NFS:
+// instant copy-on-write, no server, at the cost of a different path.
+// clonefile(2) is called directly: `cp -c` falls back to a plain copy
+// where cloning is not supported, so its success would not prove a clone
+// happened, and its timing would be a copy's.
 func checkClone(p *probe) Result {
 	r := Result{ID: "C1", Name: fmt.Sprintf("APFS clone of a %d-file tree", p.opts.files)}
 	src := filepath.Join(p.dir, "clone-src")
@@ -279,9 +328,13 @@ func checkClone(p *probe) Result {
 		return fail(r, err)
 	}
 	cl, cp := filepath.Join(p.dir, "clone-c"), filepath.Join(p.dir, "clone-plain")
-	tc, err := timed(func() error { _, err := run(5*time.Minute, "", "/bin/cp", "-c", "-R", src, cl); return err })
-	if err != nil {
-		r.Status, r.Reason = Fail, "cp -c failed (not APFS?): "+err.Error()
+	tc, err := timed(func() error { return unix.Clonefile(src, cl, unix.CLONE_NOFOLLOW) })
+	switch {
+	case errors.Is(err, unix.ENOTSUP):
+		r.Status, r.Reason = Fail, "this filesystem cannot clone (not APFS?); airbag's cp -c would make a full copy here"
+		return r
+	case err != nil:
+		r.Status, r.Reason = Fail, "clonefile failed: "+err.Error()
 		return r
 	}
 	tp, err := timed(func() error { _, err := run(5*time.Minute, "", "/bin/cp", "-R", src, cp); return err })

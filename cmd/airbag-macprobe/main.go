@@ -61,15 +61,20 @@ func main() {
 	rp := strings.NewReplacer(dir, "$TMP", resolve(dir), "$TMP", home, "~")
 
 	p := &probe{opts: o, dir: resolve(dir), home: home}
-	interrupted := make(chan os.Signal, 1)
+	interrupted := make(chan os.Signal, 2)
 	signal.Notify(interrupted, os.Interrupt)
-	done := make(chan struct{})
+	if !o.json {
+		fmt.Println(rep.Header())
+	}
+	// Only the worker touches rep and the probe's mounts while it runs;
+	// on Ctrl-C it is told to stop and waited for, so cleanup never races
+	// a check that is still using the tree, the server or the mount.
+	stop, done := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
 		for _, c := range checks {
 			select {
-			case <-interrupted:
-				rep.Interrupted = true
+			case <-stop:
 				return
 			default:
 			}
@@ -80,12 +85,17 @@ func main() {
 			}
 		}
 	}()
-	if !o.json {
-		fmt.Println(rep.Header())
-	}
 	select {
 	case <-done:
 	case <-interrupted:
+		close(stop)
+		fmt.Fprintln(os.Stderr, "airbag-macprobe: interrupted; finishing the running check, then cleaning up (Ctrl-C again to quit now)")
+		select {
+		case <-done:
+		case <-interrupted:
+			fmt.Fprintln(os.Stderr, "airbag-macprobe: quit without cleanup; remove", dir, "and any mount under it by hand")
+			os.Exit(130)
+		}
 		rep.Interrupted = true
 	}
 	p.cleanup()
