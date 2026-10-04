@@ -167,6 +167,11 @@ Outbox     1
   i-1  git push origin feature/retry               pending
 ```
 
+`airbag review --attention` prints only what needs a decision: secret reads, flagged
+changes, many deletions, waiting pushes, blocked calls. `airbag review --json` prints
+the whole review as data for editors and CI, with a versioned schema
+(`airbag.review/v1`; fields are only added within a version).
+
 It flags persistence (git hooks, shell rc files, CI config, agent settings), new
 executables, changes outside the workspace and values from your `.env` files that
 ended up in the diff. `apply` refuses to overwrite files you changed on the host

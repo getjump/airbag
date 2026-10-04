@@ -52,6 +52,20 @@ for want in "~ README.md" "+ new.txt" "- old.txt" ".git/hooks/post-checkout  per
 $rev"
 done
 
+# The same review as data, and as a short list of decisions.
+"$AIRBAG" review --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["schema"] == "airbag.review/v1", r["schema"]
+att = {(a["what"], a["target"]) for a in r["attention"]}
+for want in [("change", ".git/hooks/post-checkout"), ("change", ".git/hooks/pre-push"), ("intent", "i-1")]:
+    assert want in att, (want, att)
+assert any(c["layer"] == "home" and c["path"] == ".airbag-e2e-rc" for c in r["changes"])
+assert any(c["path"] == "README.md" and c["kind"] == "modified" for c in r["changes"])
+assert r["network"]["denied"].get("example.com:443"), r["network"]
+' || fail "review --json"
+"$AIRBAG" review --attention | grep -q "things need a decision" || fail "review --attention"
+
 # rollback undoes the apply, and the changes come back to the session.
 "$AIRBAG" apply --yes >/dev/null
 rb=$("$AIRBAG" rollback)

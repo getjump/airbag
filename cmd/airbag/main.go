@@ -32,7 +32,9 @@ const usage = `airbag — approve outcomes, not commands
   airbag run [--allow HOST]... [--no-home] [--session ID|last] -- AGENT [ARGS...]
       run the agent in a branch of the workspace and $HOME (--session: on the
       branch of a stopped session, with its outbox and labels)
-  airbag review [ID]          what the agent changed, sent and queued
+  airbag review [ID] [--json | --attention]
+                              what the agent changed, sent and queued; --json for
+                              tools, --attention for only what needs a decision
   airbag diff [ID] [PATH...]  unified diff of changed files
   airbag apply [ID] [-i] [--only PATH]... [--yes] [--force] [--trust-git]
                               write the branch (or part of it) to the real files,
@@ -77,7 +79,7 @@ func main() {
 	case "run":
 		code, err = cmdRun(args)
 	case "review", "status":
-		err = withSession(args, cmdReview)
+		err = cmdReviewArgs(args)
 	case "diff":
 		err = cmdDiff(args)
 	case "apply":
@@ -281,18 +283,35 @@ func withSession(args []string, f func(*session.Session) error) error {
 	return f(s)
 }
 
-func cmdReview(s *session.Session) error {
-	cs, err := review.Scan(s)
-	if err != nil {
-		return err
-	}
-	effs, _ := effects.Read(s.EffectsPath())
-	intents := listIntents(s)
-	sts, _ := steps.Read(s)
-	out := term.Safe(os.Stdout)
-	defer out.Flush()
-	review.Render(out, s, cs, effs, intents, sts)
-	return nil
+// cmdReviewArgs: review [ID] [--json | --attention].
+func cmdReviewArgs(args []string) error {
+	fs := flag.NewFlagSet("review", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "print the review as JSON (schema "+review.Schema+")")
+	attention := fs.Bool("attention", false, "print only what needs a decision")
+	_ = fs.Parse(reorder(args))
+	return withSession(fs.Args(), func(s *session.Session) error {
+		cs, err := review.Scan(s)
+		if err != nil {
+			return err
+		}
+		effs, _ := effects.Read(s.EffectsPath())
+		intents := listIntents(s)
+		sts, _ := steps.Read(s)
+		switch {
+		case *asJSON:
+			// JSON escapes control characters itself.
+			return review.WriteJSON(os.Stdout, review.BuildReport(s, cs, effs, intents, sts))
+		case *attention:
+			out := term.Safe(os.Stdout)
+			defer out.Flush()
+			review.WriteAttention(out, review.BuildReport(s, cs, effs, intents, sts))
+		default:
+			out := term.Safe(os.Stdout)
+			defer out.Flush()
+			review.Render(out, s, cs, effs, intents, sts)
+		}
+		return nil
+	})
 }
 
 func cmdLog(s *session.Session) error {
