@@ -488,3 +488,44 @@ func TestRollbackRetryRestoresReplacedDirAfterUserCleansSubdir(t *testing.T) {
 		t.Fatalf("second rollback not complete: generations %v (%v)\n%s", gs, err, out.String())
 	}
 }
+
+// A directory the apply made, which a rollback cannot remove because
+// the user put a file in it, is still known as the apply's while the
+// generation is kept for another path: once the user removes the file,
+// the next rollback takes the directory out.
+func TestRollbackRetryRemovesMadeDirAfterUserCleansIt(t *testing.T) {
+	s, box := undoSession(t)
+	ws := s.Workspace
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	// mod.txt keeps the generation; sub/ is a directory the apply made.
+	if err := os.WriteFile(filepath.Join(ws, "mod.txt"), []byte("edited after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	added := filepath.Join(ws, "sub", "user.txt")
+	if err := os.WriteFile(added, []byte("added after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, added); got != "added after\n" {
+		t.Fatalf("rollback lost a file added after the apply: %q\n%s", got, out.String())
+	}
+	if err := os.Remove(added); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "sub")); err == nil {
+		t.Fatalf("second rollback left the directory the apply made, now empty:\n%s", out.String())
+	}
+	if got := read(t, filepath.Join(ws, "mod.txt")); got != "edited after\n" {
+		t.Fatalf("rollback overwrote a later edit: %q", got)
+	}
+}

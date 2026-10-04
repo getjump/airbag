@@ -60,6 +60,9 @@ type generation struct {
 	// their previous versions are kept under saved/.
 	Partial bool       `json:"partial,omitempty"`
 	Entries []genEntry `json:"entries"`
+	// Dirs: directories the apply made that a partial rollback could
+	// not remove because they were not empty; the next one tries again.
+	Dirs []string `json:"dirs,omitempty"`
 }
 
 func generationsDir(s *session.Session) string { return filepath.Join(s.Dir, "undo") }
@@ -187,7 +190,7 @@ func (g *generation) finish() error {
 // and the agent's version returns to the session. It reports the paths
 // it had to leave.
 func (g *generation) rollback(out io.Writer) (left int, err error) {
-	var dirs []string // directories the apply created, removed last, deepest first
+	dirs := slices.Clone(g.Dirs) // directories the apply created, removed last, deepest first
 	var kept []genEntry
 	keep := func(e genEntry, why string) {
 		fmt.Fprintf(out, "  left as is (%s): %s\n", why, e.Path)
@@ -255,10 +258,16 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		}
 	}
 	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	var still []string
 	for _, d := range dirs {
 		removeEmptyDir(d)
+		if _, err := os.Lstat(d); err == nil && !slices.Contains(still, d) {
+			still = append(still, d)
+		}
 	}
 	if len(kept) == 0 {
+		// Nothing else is left, so what keeps those directories there
+		// is the user's, and there is no later rollback to try again.
 		return left, os.RemoveAll(g.dir)
 	}
 	// Keep what was left, with its previous versions, so nothing from
@@ -266,7 +275,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
 		kept[i], kept[j] = kept[j], kept[i]
 	}
-	g.Entries, g.Complete, g.Partial = kept, true, true
+	g.Entries, g.Dirs, g.Complete, g.Partial = kept, still, true, true
 	return left, g.save()
 }
 
