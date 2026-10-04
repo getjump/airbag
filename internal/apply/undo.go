@@ -493,7 +493,13 @@ func gone(err error) bool {
 // session's upper layer: the file itself, or a whiteout for a deletion.
 func giveBack(e genEntry, clone bool) error {
 	if _, err := os.Lstat(e.Upper); err == nil {
-		return nil // still there: the change was never forgotten
+		// Still there: the change was never forgotten, or, for a
+		// replaced directory, a path inside it given back first made
+		// it, without the mark.
+		if !clone && e.Type == fs.ModeDir && e.Kind == review.Replaced {
+			markOpaque(e.Upper)
+		}
+		return nil
 	}
 	if clone && e.Kind == review.Deleted {
 		return nil // absent from the clone is what a deletion is
@@ -511,13 +517,18 @@ func giveBack(e genEntry, clone bool) error {
 			return err
 		}
 		if e.Kind == review.Replaced {
-			// Opaque again: the directory replaces the real one.
-			_ = unix.Setxattr(e.Upper, "user.overlay.opaque", []byte("y"), 0)
+			markOpaque(e.Upper)
 		}
 		return nil
 	default:
 		return copyTree(e.Path, e.Upper)
 	}
+}
+
+// markOpaque makes dir opaque again: the directory replaces the real
+// one, and the session shows none of what the real one holds.
+func markOpaque(dir string) {
+	_ = unix.Setxattr(dir, "user.overlay.opaque", []byte("y"), 0)
 }
 
 // fingerprint describes what is at p: absent, a directory, a symlink

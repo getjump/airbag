@@ -942,3 +942,44 @@ func TestRollbackRemovesTempsOnlyFromCheckedDir(t *testing.T) {
 		t.Fatalf("rollback removed the user's %s: %q\n%s", p, got, out.String())
 	}
 }
+
+// After a rollback, a directory the agent replaced is opaque again in
+// the session, though the paths inside it are given back first: review
+// shows the replacement, and applying it again gives the agent's
+// version only.
+func TestRollbackKeepsReplacedDirOpaque(t *testing.T) {
+	s, box, src := overlayReplacedDir(t,
+		map[string]string{"a.go": "package a\n", "b.go": "package b\n"},
+		map[string]string{"a.go": "package a\n", "new.go": "package new\n"})
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if read(t, filepath.Join(src, "b.go")) != "package b\n" {
+		t.Fatalf("rollback did not restore the user's src:\n%s", out.String())
+	}
+	up := filepath.Join(s.WSUpper(), "src")
+	buf := make([]byte, 8)
+	if n, err := unix.Getxattr(up, "user.overlay.opaque", buf); err != nil || n == 0 || buf[0] != 'y' {
+		t.Errorf("%s is not opaque after the rollback (%v): the session would merge it with the user's src", up, err)
+	}
+	if got := scan(t, s); got["src"] != review.Replaced || got[filepath.Join("src", "new.go")] != review.Added {
+		t.Fatalf("review does not show the replacement again: %v", got)
+	}
+	out.Reset()
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	for rel, want := range map[string]string{"a.go": "package a\n", "new.go": "package new\n"} {
+		if got := read(t, filepath.Join(src, rel)); got != want {
+			t.Errorf("after the second apply src/%s = %q, want the agent's %q", rel, got, want)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(src, "b.go")); err == nil {
+		t.Errorf("the second apply kept src/b.go, which the agent's src does not have")
+	}
+}
