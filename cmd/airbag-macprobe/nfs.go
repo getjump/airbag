@@ -197,10 +197,10 @@ func (c *trackedConn) Close() error {
 
 // exportFS is what the server exports: dir and nothing outside it.
 // go-billy's BoundOS resolves every path, symlinks included, inside dir
-// (v5.9 also fixes the ChrootOS escape, GHSA-qw64-3x98-g7q2; BoundOS
-// is the backend the advisory recommends). BoundOS resolves a path and
-// then uses it, so
-// a client that swaps a symlink in between could still reach outside.
+// (v5.9 also fixes the ChrootOS escape, GHSA-qw64-3x98-g7q2; BoundOS is
+// the backend the advisory recommends). BoundOS resolves a path and then
+// uses it, so a client that swaps a symlink in between could still reach
+// outside.
 // The one client granted the export is the probe's own mount (see
 // mountGate), unless a local process reads the armed path from the
 // process list while mount_nfs runs and mounts first; then the probe's

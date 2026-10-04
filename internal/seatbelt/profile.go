@@ -38,7 +38,9 @@ type Profile struct {
 	// socket).
 	Sockets []string
 	// Trustd allows com.apple.trustd.agent, which Go programs need to
-	// verify TLS certificates; it widens what the agent can reach.
+	// verify TLS certificates with the platform verifier: always before
+	// Go 1.27, and in later Go when SSL_CERT_FILE and SSL_CERT_DIR are
+	// unset. It widens what the agent can reach.
 	Trustd bool
 }
 

@@ -331,7 +331,7 @@ right away: bind a token with the least scope that does the job, and use rules o
 `defer:` for writes. After a secret read the bound hosts are cut off like any host
 that is not a model API. Not covered: tokens in request bodies (OAuth flows),
 tools that pin certificates or keep their own trust store (Java), Go programs on
-macOS (they ignore `SSL_CERT_FILE`), and Node's built-in `fetch`, which ignores
+macOS built with Go before 1.27 (they ignore `SSL_CERT_FILE`), and Node's built-in `fetch`, which ignores
 `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` (Node 22.21 and later).
 
 Which tools an agent may call is the agent's own setting (Claude Code's
@@ -345,8 +345,9 @@ $ curl -fsSL https://raw.githubusercontent.com/getjump/airbag/main/install.sh | 
 $ airbag doctor
 ```
 
-The script installs the latest release for Linux or macOS (amd64, arm64) into
-`~/.local/bin` after checking its SHA-256 against the release. Or from source:
+The script installs the latest release for Linux or macOS 13 and later (amd64,
+arm64) into `~/.local/bin` after checking its SHA-256 against the release. Or
+from source, with Go 1.27.1 or newer:
 `go install github.com/getjump/airbag/cmd/airbag@latest`.
 
 With Nix: `nix run github:getjump/airbag -- doctor`, or add the flake's
