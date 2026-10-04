@@ -179,13 +179,14 @@ grep -q legacy "$HOME/.claude.json" && fail "a resumed legacy session wrote mcpS
 "$AIRBAG" discard --yes >/dev/null
 
 # A ~/.claude that is a symlink out of $HOME: nothing under it passes
-# through, and the agent cannot write the directory it points at.
+# through, airbag creates nothing behind it, and the agent cannot write
+# the directory it points at.
 H2="$T/home2"
-mkdir -p "$H2" "$T/outside/claude/projects/$slug/memory"
+mkdir -p "$H2" "$T/outside/claude"
 ln -s "$T/outside/claude" "$H2/.claude"
 (HOME="$H2" && export HOME && cd "$ws" &&
-	"$AIRBAG" run -- sh -c "echo planted > '$H2/.claude/projects/$slug/memory/X.md'" >"$T/run.out" 2>&1) || true
-[ ! -e "$T/outside/claude/projects/$slug/memory/X.md" ] || fail "a write through a symlinked ~/.claude reached the real directory"
+	"$AIRBAG" run -- sh -c "mkdir -p '$H2/.claude/projects/$slug/memory' && echo planted > '$H2/.claude/projects/$slug/memory/X.md'" >"$T/run.out" 2>&1) || true
+[ ! -e "$T/outside/claude/projects" ] || fail "airbag or the agent created directories behind a symlinked ~/.claude: $(find "$T/outside/claude")"
 grep -q "is not passed through" "$T/run.out" || fail "no warning for the symlinked passthrough: $(cat "$T/run.out")"
 (HOME="$H2" && export HOME && cd "$ws" && "$AIRBAG" discard --yes >/dev/null 2>&1) || true
 echo "PASS"

@@ -127,12 +127,15 @@ func buildWorld(s *session.Session) error {
 		var pass []string
 		for _, p := range s.Passthrough {
 			p = strings.TrimSuffix(p, "/")
-			if _, err := os.Lstat(filepath.Join(realhome, p)); err != nil {
-				continue
-			}
-			if err := noSymlink(realhome, p); err != nil {
+			// Checked before the path need exist: one that is missing
+			// because run.go would not create it behind a symlink gets
+			// the warning too.
+			if err := noSymlinkSoFar(realhome, p); err != nil {
 				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (%v); it stays in the branch\n", p, err)
 				continue
+			}
+			if _, err := os.Lstat(filepath.Join(realhome, p)); err != nil {
+				continue // not there: nothing to pass through
 			}
 			pass = append(pass, p)
 		}

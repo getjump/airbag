@@ -587,3 +587,27 @@ func TestWriteBackHostAddedKeyIsNotADeletion(t *testing.T) {
 		t.Fatalf("real file = %v, want the host's counter kept", got)
 	}
 }
+
+// A host-only change copied into the branch moves the base too: when
+// the host changes the key again in a later run, the branch takes that
+// as well, and the key never shows as the agent's change.
+func TestWriteBackRebaseMovesTheBase(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"userID":"u","numStartups":1,"mcpServers":{}}`) // the agent's change
+	writeCfg(t, realPath, `{"userID":"u","numStartups":2}`)                   // a host session
+	WriteBackConfigs(s)
+	// A resumed run: the branch keeps its copy and the base.
+	SnapshotConfigs(s)
+	writeCfg(t, realPath, `{"userID":"u","numStartups":3}`)
+	WriteBackConfigs(s)
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+	flags := strings.Join(configFlags(c), "; ")
+	if strings.Contains(flags, "numStartups") || !strings.Contains(flags, "mcpServers") {
+		t.Fatalf("flags = %q, want only the agent's mcpServers change", flags)
+	}
+	if got := readCfg(t, branchPath); got["numStartups"] != float64(3) {
+		t.Fatalf("branch = %v, want the host's latest counter", got)
+	}
+}

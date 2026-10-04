@@ -314,6 +314,17 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 			return "", false
 		}
 	}
+	// saveBase keeps base as the merge base of later runs.
+	saveBase := func(base map[string]json.RawMessage) {
+		out, err := marshalJSON(base, "  ")
+		if err != nil || os.MkdirAll(filepath.Dir(basePath(s, cf)), 0o700) != nil {
+			return
+		}
+		out = append(out, '\n')
+		if os.WriteFile(basePath(s, cf), out, 0o600) == nil {
+			baseRaw, haveBase = out, true
+		}
+	}
 	for range 3 {
 		before, exists, err := fileState(realPath)
 		if err != nil {
@@ -335,11 +346,19 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		prev, had := s.WroteBack[realPath]
 		hostEdited := exists && before.ctime > since.UnixNano() &&
 			!(had && prev.SHA256 == digest(realRaw) && prev.Ctime == before.ctime)
-		base := real
+		// The base is parsed afresh on every attempt, and never shares
+		// its maps with real: it takes a written value only once the
+		// write has landed.
+		base, _ := topLevel(realRaw)
 		if haveBase {
-			base, _ = topLevel(baseRaw) // parsed afresh on every attempt
+			base, _ = topLevel(baseRaw)
+		}
+		type kv struct {
+			path []string
+			v    json.RawMessage
 		}
 		var wrote []string
+		var written []kv
 		rebased := false
 		for _, ch := range cf.diff(nil, realRaw, branchRaw) {
 			if ch.class != classWriteBack {
@@ -352,15 +371,18 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 				// for review, never written back), or the host added it
 				// during the run, which the branch copy takes.
 				if rv, inReal := getPath(real, ch.path); !inBase && inReal && setPath(branch, ch.path, rv) == nil {
+					_ = setPath(base, ch.path, rv)
 					rebased = true
 				}
 				continue
 			}
 			if canon(v) == canon(bv) {
 				// The agent did not change it; the host did. The host's
-				// value stays, and the branch copy takes it, so review
-				// shows only what the agent changed.
+				// value stays, and the branch copy and the base take it,
+				// so review shows only what the agent changed, now and
+				// in a later run.
 				if rv, ok := getPath(real, ch.path); ok && setPath(branch, ch.path, rv) == nil {
+					_ = setPath(base, ch.path, rv)
 					rebased = true
 				}
 				continue
@@ -370,7 +392,7 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 			}
 			if err := setPath(real, ch.path, v); err == nil {
 				wrote = append(wrote, ch.String())
-				_ = setPath(base, ch.path, v)
+				written = append(written, kv{ch.path, v})
 			}
 		}
 		if rebased {
@@ -378,6 +400,7 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 				out = append(out, '\n')
 				if err := writeAtomic(branchPath, out, func() bool { return true }); err == nil {
 					branchRaw = out
+					saveBase(base)
 				}
 			}
 		}
@@ -402,11 +425,10 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		}
 		// The base now holds what was written back, so a later run does
 		// not take it for the agent's change again.
-		if out, err := marshalJSON(base, "  "); err == nil {
-			if err := os.MkdirAll(filepath.Dir(basePath(s, cf)), 0o700); err == nil {
-				_ = os.WriteFile(basePath(s, cf), append(out, '\n'), 0o600)
-			}
+		for _, w := range written {
+			_ = setPath(base, w.path, w.v)
 		}
+		saveBase(base)
 		// Record the write: the bytes airbag wrote and the change time
 		// right after, unless the host had edited the file too, or wrote
 		// it again just now.
