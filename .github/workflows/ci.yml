@@ -36,3 +36,5 @@ jobs:
           airbag doctor
           for t in test/e2e.sh test/*-e2e.sh; do echo "== $t"; sh "$t"; done
           python3 test/ctrlc.py
+      - name: runtime policy build cost (diagnostic)
+        run: sh test/runtime-policy-bench.sh

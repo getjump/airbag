@@ -88,6 +88,7 @@ var Builtin = []Rule{
 // The variables a rule sees. Field names come from the cel tags.
 type (
 	CELEffect struct {
+		Source string `cel:"source"`
 		Kind   string `cel:"kind"`
 		Target string `cel:"target"`
 		Detail string `cel:"detail"`
@@ -207,6 +208,7 @@ func (p *Policy) add(r Rule) error {
 
 // Input is one effect with its context.
 type Input struct {
+	Source  string // empty for predictions; fuse or seccomp for observed attempts
 	Effect  models.Effect
 	Argv    []string // the command that produces it, if any
 	Tainted bool     // session holds the "secret" label (kept for brevity)
@@ -230,7 +232,7 @@ func (p *Policy) Decide(in Input) Decision {
 		labels = []string{}
 	}
 	vars := map[string]any{
-		"effect":  CELEffect{Kind: in.Effect.Kind, Target: in.Effect.Target, Detail: in.Effect.Detail},
+		"effect":  CELEffect{Source: in.Source, Kind: in.Effect.Kind, Target: in.Effect.Target, Detail: in.Effect.Detail},
 		"command": CELCommand{Argv: argv, Line: strings.Join(argv, " ")},
 		"session": CELSession{Tainted: in.Tainted, Labels: labels},
 	}

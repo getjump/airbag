@@ -34,3 +34,38 @@ func TestAppendOnly(t *testing.T) {
 		t.Fatalf("rows = %d", n)
 	}
 }
+
+func TestLegacyLogAndRuntimeContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE events (id INTEGER PRIMARY KEY, t TEXT, kind TEXT, target TEXT, verdict TEXT, reason TEXT, predict TEXT);
+ INSERT INTO events VALUES (1, '2026-10-04T00:00:00Z', 'proc.exec', 'old', 'allow', '', '[]')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	old, err := Read(path)
+	if err != nil || len(old) != 1 || old[0].Source != "" {
+		t.Fatalf("legacy read: %+v %v", old, err)
+	}
+	log, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	if err := log.AddChecked(Effect{Kind: "proc.exec", Target: "/usr/bin/python3", Source: "seccomp", PID: 7, Detail: "execve", Argv: []string{"python3", "script.py"}, Verdict: "deny"}); err != nil {
+		t.Fatal(err)
+	}
+	es, err := Read(path)
+	if err != nil || len(es) != 2 || es[1].PID != 7 || len(es[1].Argv) != 2 {
+		t.Fatalf("roundtrip: %+v %v", es, err)
+	}
+	for _, q := range []string{`UPDATE event_context SET data='{}'`, `DELETE FROM event_context`} {
+		if _, err := log.db.Exec(q); err == nil {
+			t.Fatal("audit context is mutable", q)
+		}
+	}
+}

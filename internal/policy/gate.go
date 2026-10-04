@@ -61,6 +61,14 @@ func (g *Gate) Check(in Input) (Decision, string) {
 		return d, ""
 	}
 	key := d.Rule + "|" + in.Effect.String()
+	// An approval for one intercepted argv must not approve a different command.
+	if in.Source != "" {
+		context, _ := json.Marshal(struct {
+			Source string
+			Argv   []string
+		}{in.Source, in.Argv})
+		key += "|" + string(context)
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	asks, _ := ReadAsks(g.dir)

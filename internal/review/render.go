@@ -159,6 +159,15 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		renderSteps(w, sts)
 	}
 	renderShell(w, effs)
+	observed := map[string]int{}
+	for _, e := range effs {
+		if e.Source != "" {
+			observed[e.Source]++
+		}
+	}
+	if len(observed) > 0 {
+		fmt.Fprintf(w, "\nRuntime    %d filesystem entry points, %d exec attempts (airbag log --json)\n", observed["fuse"], observed["seccomp"])
+	}
 	var blocked []effects.Effect
 	for _, e := range effs {
 		if (e.Verdict == "deny" || e.Verdict == "ask") && e.Kind != "net.egress" {
@@ -402,7 +411,7 @@ func renderShell(w io.Writer, effs []effects.Effect) {
 	type row struct{ cmd, pred string }
 	var rows []row
 	for _, e := range effs {
-		if e.Kind != "proc.exec" {
+		if e.Kind != "proc.exec" || e.Source != "" {
 			continue
 		}
 		total++

@@ -48,7 +48,9 @@ type Meta struct {
 	// Credential-like environment variables passed to the agent anyway.
 	PassEnv []string `json:"pass_env,omitempty"`
 	// Strict keeps the agent from creating user namespaces.
-	Strict bool `json:"strict,omitempty"`
+	Strict     bool `json:"strict,omitempty"`
+	FilePolicy bool `json:"file_policy,omitempty"`
+	ExecPolicy bool `json:"exec_policy,omitempty"`
 	// GitTouched: an apply of this session wrote .git/config or git
 	// hooks into the real repository. It stays set for every later
 	// apply, so the session's pushes keep running untrusted.

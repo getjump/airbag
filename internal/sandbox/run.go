@@ -28,6 +28,7 @@ import (
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/proxy"
+	"github.com/getjump/airbag/internal/runtimepolicy"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/steps"
 	"github.com/getjump/airbag/internal/taint"
@@ -111,7 +112,25 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, fmt.Errorf("pseudo-terminal: %w", err)
 	}
+	hostRuntime, childRuntime, err := socketPair()
+	if err != nil {
+		return 1, err
+	}
+	defer childRuntime.Close()
+	runtimeConn, err := net.FileConn(hostRuntime)
+	hostRuntime.Close()
+	if err != nil {
+		return 1, err
+	}
+	defer runtimeConn.Close()
+	go func() { _ = runtimepolicy.Serve(runtimeConn, gate, log) }()
+	placeholder, err := os.Open(os.DevNull)
+	if err != nil {
+		return 1, err
+	}
+	defer placeholder.Close()
 	cmd := exec.Command(self, InitArg, s.Dir)
+	cmd.ExtraFiles = []*os.File{placeholder, childRuntime} // fd 3: tty; fd 4: private runtime channel
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The sandbox gets a session of its own, so the user's terminal is
 	// never its controlling terminal (tty.go).
@@ -130,7 +149,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		if _, err := unix.IoctlGetTermios(int(os.Stderr.Fd()), unix.TCGETS); err == nil {
 			cmd.Stderr = tty.slave
 		}
-		cmd.ExtraFiles = []*os.File{tty.ctlPeer} // fd 3: ttyCtlFd
+		cmd.ExtraFiles[0] = tty.ctlPeer // fd 3: ttyCtlFd
 		cmd.SysProcAttr.Setctty = true
 		cmd.SysProcAttr.Ctty = 0
 	}
@@ -160,6 +179,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if tty != nil {
 		tty.start()
 	}
+	childRuntime.Close()
 	err = cmd.Wait()
 	if tty != nil {
 		tty.finish()

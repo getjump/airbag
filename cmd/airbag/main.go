@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,6 +37,7 @@ const usage = `airbag — approve outcomes, not commands
   airbag run [--allow HOST]... [--no-home] [--session ID|last] -- AGENT [ARGS...]
       run the agent in a branch of the workspace and $HOME (--session: on the
       branch of a stopped session, with its outbox and labels)
+      --fs-policy: Linux FUSE audit/policy; --exec-policy: Linux exec notification audit/policy
   airbag review [ID] [--json | --attention]
                               what the agent changed, sent and queued; --json for
                               tools, --attention for only what needs a decision
@@ -51,7 +53,7 @@ const usage = `airbag — approve outcomes, not commands
                               throw the branch away; --force also when it holds
                               your versions of paths a rollback left
   airbag ls                   list sessions
-  airbag log [ID]             raw effect log
+  airbag log [ID] [--json]    raw effect log with runtime source, PID and argv
   airbag approve [ID]         list or approve requests blocked by an "ask" rule
   airbag doctor               check that this machine can run airbag
 
@@ -73,6 +75,10 @@ func main() {
 	}
 	if len(os.Args) >= 4 && os.Args[1] == "hook" {
 		cmdHook(os.Args[2], os.Args[3])
+		return
+	}
+	if len(os.Args) >= 4 && os.Args[1] == sandbox.ExecInitArg {
+		sandbox.ExecInit(os.Args[2], os.Args[3:])
 		return
 	}
 	if len(os.Args) >= 3 && os.Args[1] == sandbox.InitArg {
@@ -101,7 +107,7 @@ func main() {
 	case "ls", "list":
 		err = cmdList()
 	case "log":
-		err = withSession(args, cmdLog)
+		err = cmdLogArgs(args)
 	case "doctor":
 		err = cmdDoctor()
 	case "approve":
@@ -139,9 +145,14 @@ func cmdRun(args []string) (int, error) {
 	var passEnv stringList
 	fs.Var(&passEnv, "pass-env", "give the agent this credential-like environment variable (repeatable)")
 	strict := fs.Bool("strict", false, "keep the agent from creating user namespaces; breaks the agents' own sandboxes and Chromium's sandbox")
+	filePolicy := fs.Bool("fs-policy", false, "Linux: audit and check filesystem operations on the final workspace and HOME views (requires FUSE)")
+	execPolicy := fs.Bool("exec-policy", false, "Linux: audit and check execve/execveat attempts with seccomp-notify")
 	resume := fs.String("session", "", "run on the branch of a stopped session (its ID, or last) instead of a new one")
 	nixDaemon := fs.Bool("nix-daemon", false, "let the agent use the Nix daemon; its builds and substitutes reach the network outside airbag's proxy")
 	_ = fs.Parse(args)
+	if runtime.GOOS != "linux" && (*filePolicy || *execPolicy) {
+		return 2, errors.New("--fs-policy and --exec-policy require Linux")
+	}
 	argv := fs.Args()
 	if len(argv) == 0 {
 		return 2, errors.New("usage: airbag run [flags] -- AGENT [ARGS...]")
@@ -210,6 +221,8 @@ func cmdRun(args []string) (int, error) {
 			}
 		}
 		s.Strict = s.Strict || *strict
+		s.FilePolicy = s.FilePolicy || *filePolicy
+		s.ExecPolicy = s.ExecPolicy || *execPolicy
 		for _, f := range forwards {
 			if !slices.Contains(s.Forwards, f) {
 				s.Forwards = append(s.Forwards, f)
@@ -225,7 +238,7 @@ func cmdRun(args []string) (int, error) {
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
 			Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
-			PassEnv: passEnv, Strict: *strict, Forwards: forwards,
+			PassEnv: passEnv, Strict: *strict, Forwards: forwards, FilePolicy: *filePolicy, ExecPolicy: *execPolicy,
 		}
 		if runtime.GOOS == "darwin" {
 			// The macOS prototype: the workspace branch is a clone, $HOME
@@ -356,12 +369,46 @@ func cmdReviewArgs(args []string) error {
 	})
 }
 
+func cmdLogArgs(args []string) error {
+	id := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		id, args = args[0], args[1:]
+	}
+	flags := flag.NewFlagSet("log", flag.ContinueOnError)
+	asJSON := flags.Bool("json", false, "emit events with runtime context as JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if len(flags.Args()) > 0 {
+		if id != "" || len(flags.Args()) != 1 {
+			return errors.New("usage: airbag log [ID] [--json]")
+		}
+		id = flags.Args()[0]
+	}
+	return withSession([]string{id}, func(s *session.Session) error {
+		effs, err := effects.Read(s.EffectsPath())
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			if effs == nil {
+				effs = []effects.Effect{}
+			}
+			return json.NewEncoder(os.Stdout).Encode(effs)
+		}
+		return cmdLog(s)
+	})
+}
+
 func cmdLog(s *session.Session) error {
 	effs, err := effects.Read(s.EffectsPath())
 	out := term.Safe(os.Stdout)
 	defer out.Flush()
 	for _, e := range effs {
 		fmt.Fprintf(out, "%s  %-16s %-6s %s %s\n", e.Time.Format("15:04:05"), e.Kind, e.Verdict, e.Target, e.Reason)
+		if e.Source != "" {
+			fmt.Fprintf(out, "          source=%s pid=%d detail=%s argv=%q\n", e.Source, e.PID, e.Detail, e.Argv)
+		}
 	}
 	return err
 }

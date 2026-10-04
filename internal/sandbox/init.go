@@ -21,6 +21,8 @@ import (
 
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/control"
+	"github.com/getjump/airbag/internal/policyfs"
+	"github.com/getjump/airbag/internal/runtimepolicy"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/shim"
@@ -45,7 +47,16 @@ func Init(dir string, tty bool) {
 	if err != nil {
 		fatal("load session", err)
 	}
-	if err := buildWorld(s); err != nil {
+	// Raw backing fds and the private policy channel must not be accessible
+	// through /proc/1/fd, ptrace or process_vm_readv from an agent.
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		fatal("protect supervisor", err)
+	}
+	client, err := runtimeClient()
+	if err != nil {
+		fatal("runtime channel", err)
+	}
+	if err := buildWorld(s, client); err != nil {
 		fatal("build sandbox", err)
 	}
 	if err := loopbackUp(); err != nil {
@@ -62,7 +73,7 @@ func Init(dir string, tty bool) {
 		syscall.CloseOnExec(ttyCtlFd)
 		ctl = os.NewFile(ttyCtlFd, "tty-ctl")
 	}
-	os.Exit(runAgent(s, ctl))
+	os.Exit(runAgent(s, ctl, client))
 }
 
 func fatal(what string, err error) {
@@ -76,7 +87,7 @@ func fatal(what string, err error) {
 //   - agent state in $HOME passes through, credentials are hidden;
 //   - /run, /tmp, /var/tmp and /dev/shm are private, so host sockets
 //     (docker.sock, D-Bus, ssh-agent, X11, Wayland) are out of reach.
-func buildWorld(s *session.Session) error {
+func buildWorld(s *session.Session, client *runtimepolicy.Client) error {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("make mounts private: %w", err)
 	}
@@ -163,6 +174,50 @@ func buildWorld(s *session.Session) error {
 			fmt.Fprintf(os.Stderr, "airbag: warning: %d secret files are hidden from the agent: reads cannot be tracked (%v)\n", len(secrets), err)
 		}
 	}
+	if s.FilePolicy {
+		if os.Getenv("AIRBAG_NO_FUSE") != "" {
+			return errors.New("--fs-policy requires FUSE; AIRBAG_NO_FUSE is set")
+		}
+		report := secretReadReporter(func(name, exe string, pid uint32) error {
+			return client.Check(runtimepolicy.Request{Source: "fuse", Kind: "secret.read", Target: name, Detail: exe, PID: pid, Secret: true})
+		})
+		// Match the actual opened backing inode, not just its name: renaming a
+		// parent or linking an alias must not lose the original secret's taint.
+		type identity struct{ dev, ino uint64 }
+		secretInodes := map[identity]string{}
+		for _, f := range secrets {
+			var st syscall.Stat_t
+			if err := syscall.Stat(filepath.Join(s.Workspace, f.Rel), &st); err != nil {
+				return err
+			}
+			secretInodes[identity{uint64(st.Dev), st.Ino}] = f.Rel
+		}
+		beforeRead := func(_ string, pid uint32, fd int) error {
+			var st syscall.Stat_t
+			if err := syscall.Fstat(fd, &st); err != nil {
+				return err
+			}
+			if rel, ok := secretInodes[identity{uint64(st.Dev), st.Ino}]; ok {
+				return report(rel, pid)
+			}
+			return nil
+		}
+		// Capture BOTH ready views before overmounting either. In particular,
+		// workspace commonly lives under HOME. HOME first, workspace last.
+		var views []*policyfs.View
+		for _, path := range []string{s.Home, s.Workspace} {
+			view, err := policyfs.Capture(path, client.Check, beforeRead)
+			if err != nil {
+				return fmt.Errorf("capture policy view %s: %w", path, err)
+			}
+			views = append(views, view)
+		}
+		for _, view := range views {
+			if _, err := view.Mount(); err != nil {
+				return fmt.Errorf("mount file policy: %w", err)
+			}
+		}
+	}
 	for _, d := range []string{"/tmp", "/var/tmp", "/dev/shm"} {
 		if _, err := os.Stat(d); err == nil {
 			if err := unix.Mount("tmpfs", d, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777"); err != nil {
@@ -230,29 +285,9 @@ func serveSecrets(s *session.Session, files []secretfs.File) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	self, _ := os.Stat("/proc/self/exe")
-	// The open waits until the host has recorded the taint and cut the
-	// connections a tainted session may not keep. Reads by one program
-	// are reported once; the lock keeps a second reader from slipping
-	// through while the first report is in flight.
-	var mu sync.Mutex
-	reported := map[string]bool{}
-	onRead := func(name string, pid uint32) error {
-		exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
-		if st, err := os.Stat(fmt.Sprintf("/proc/%d/exe", pid)); err == nil && self != nil && os.SameFile(st, self) {
-			return nil // the shell shim reads values to mask them
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if reported[name+exe] {
-			return nil
-		}
-		if err := control.ReportTaint(control.Taint{File: name, Exe: exe}); err != nil {
-			return err
-		}
-		reported[name+exe] = true
-		return nil
-	}
+	onRead := secretReadReporter(func(name, exe string, _ uint32) error {
+		return control.ReportTaint(control.Taint{File: name, Exe: exe})
+	})
 	if _, err := secretfs.Mount(dir, files, onRead); err != nil {
 		return err
 	}
@@ -262,6 +297,32 @@ func serveSecrets(s *session.Session, files []secretfs.File) error {
 		}
 	}
 	return nil
+}
+
+func secretReadReporter(report func(string, string, uint32) error) secretfs.OnRead {
+	self, _ := os.Stat("/proc/self/exe")
+	// The open waits until the host has recorded the taint and cut the
+	// connections a tainted session may not keep. Reads by one program
+	// are reported once; the lock keeps a second reader from slipping
+	// through while the first report is in flight.
+	var mu sync.Mutex
+	reported := map[string]bool{}
+	return func(name string, pid uint32) error {
+		exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+		if st, err := os.Stat(fmt.Sprintf("/proc/%d/exe", pid)); err == nil && self != nil && os.SameFile(st, self) {
+			return nil // the shell shim reads values to mask them
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if reported[name+exe] {
+			return nil
+		}
+		if err := report(name, exe, pid); err != nil {
+			return err
+		}
+		reported[name+exe] = true
+		return nil
+	}
 }
 
 // privateRun mounts an empty /run with airbag's sockets and shims.
@@ -457,7 +518,7 @@ func startForwards(s *session.Session) error {
 //
 // The agent leads a process group of its own, the foreground one on its
 // pseudo-terminal, so Ctrl-C and Ctrl-Z reach it and not PID 1.
-func runAgent(s *session.Session, ctl *os.File) int {
+func runAgent(s *session.Session, ctl *os.File, client *runtimepolicy.Client) int {
 	if s.Strict {
 		if err := os.WriteFile("/proc/sys/user/max_user_namespaces", []byte("1"), 0); err != nil {
 			fmt.Fprintf(os.Stderr, "airbag: warning: the agent can create user namespaces: %v\n", err)
@@ -475,6 +536,19 @@ func runAgent(s *session.Session, ctl *os.File) int {
 	}
 	cmd := exec.Command(path, s.Argv[1:]...)
 	cmd.Args[0] = s.Argv[0]
+	var execHost, execChild *os.File
+	if s.ExecPolicy {
+		var err error
+		execHost, execChild, err = socketPair()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "airbag: exec controller:", err)
+			return 125
+		}
+		defer execHost.Close()
+		defer execChild.Close()
+		cmd = exec.Command(airbagBinInside, append([]string{ExecInitArg, path}, s.Argv...)...)
+		cmd.ExtraFiles = []*os.File{execChild} // private startup channel, fd 3
+	}
 	cmd.Env = env
 	cmd.Dir = s.Cwd
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -497,6 +571,22 @@ func runAgent(s *session.Session, ctl *os.File) int {
 		return 126
 	}
 	pgrp := -cmd.Process.Pid
+	if s.ExecPolicy {
+		execChild.Close()
+		listener, err := receiveListener(execHost)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "airbag: exec controller:", err)
+			_ = syscall.Kill(pgrp, syscall.SIGKILL)
+			return 125
+		}
+		defer unix.Close(listener)
+		go func() {
+			if err := serveExec(listener, client.Check); err != nil {
+				fmt.Fprintln(os.Stderr, "airbag: exec controller stopped:", err)
+				_ = syscall.Kill(pgrp, syscall.SIGKILL)
+			}
+		}()
+	}
 	// Signals airbag forwards from outside go to the agent's group, as
 	// a terminal would send them.
 	sigs := make(chan os.Signal, 8)

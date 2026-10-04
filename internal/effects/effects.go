@@ -25,6 +25,10 @@ type Effect struct {
 	Reason  string    `json:"reason,omitempty"`
 	// Predict: what a command model expects this command to do.
 	Predict []string `json:"predict,omitempty"`
+	Source  string   `json:"source,omitempty"`
+	PID     uint32   `json:"pid,omitempty"`
+	Detail  string   `json:"detail,omitempty"`
+	Argv    []string `json:"argv,omitempty"`
 }
 
 const schema = `
@@ -37,6 +41,14 @@ CREATE TABLE IF NOT EXISTS events (
 	reason  TEXT NOT NULL DEFAULT '',
 	predict TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS event_context (
+ id INTEGER PRIMARY KEY REFERENCES events(id),
+ data TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS context_no_update BEFORE UPDATE ON event_context
+ BEGIN SELECT RAISE(ABORT, 'effect log is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS context_no_delete BEFORE DELETE ON event_context
+ BEGIN SELECT RAISE(ABORT, 'effect log is append-only'); END;
 CREATE INDEX IF NOT EXISTS events_kind ON events(kind);
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 	BEGIN SELECT RAISE(ABORT, 'effect log is append-only'); END;
@@ -62,7 +74,11 @@ func Open(path string) (*Log, error) {
 	return &Log{db: db}, nil
 }
 
-func (l *Log) Add(e Effect) {
+func (l *Log) Add(e Effect) { _ = l.AddChecked(e) }
+
+// AddChecked commits the event and runtime context before an intercepted
+// operation is released. Logging failures must not turn into unaudited allows.
+func (l *Log) AddChecked(e Effect) error {
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}
@@ -72,8 +88,30 @@ func (l *Log) Add(e Effect) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, _ = l.db.Exec(`INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
+	tx, err := l.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
 		e.Time.UTC().Format(time.RFC3339Nano), e.Kind, e.Target, e.Verdict, e.Reason, string(pred))
+	if err != nil {
+		return err
+	}
+	if e.Source != "" {
+		id, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		ctx, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec("INSERT INTO event_context (id, data) VALUES (?, ?)", id, string(ctx)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (l *Log) Close() error { return l.db.Close() }
@@ -89,7 +127,15 @@ func Read(path string) ([]Effect, error) {
 		return nil, err
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT t, kind, target, verdict, reason, predict FROM events ORDER BY id`)
+	var hasContext int
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='event_context'").Scan(&hasContext); err != nil {
+		return nil, err
+	}
+	query := `SELECT t, kind, target, verdict, reason, predict, '' FROM events ORDER BY id`
+	if hasContext != 0 {
+		query = `SELECT e.t, e.kind, e.target, e.verdict, e.reason, e.predict, coalesce(c.data, '') FROM events e LEFT JOIN event_context c ON c.id=e.id ORDER BY e.id`
+	}
+	rows, err := db.Query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -97,9 +143,14 @@ func Read(path string) ([]Effect, error) {
 	var out []Effect
 	for rows.Next() {
 		var e Effect
-		var t, pred string
-		if err := rows.Scan(&t, &e.Kind, &e.Target, &e.Verdict, &e.Reason, &pred); err != nil {
+		var t, pred, ctx string
+		if err := rows.Scan(&t, &e.Kind, &e.Target, &e.Verdict, &e.Reason, &pred, &ctx); err != nil {
 			return out, err
+		}
+		if ctx != "" {
+			if err := json.Unmarshal([]byte(ctx), &e); err != nil {
+				return out, err
+			}
 		}
 		e.Time, _ = time.Parse(time.RFC3339Nano, t)
 		_ = json.Unmarshal([]byte(pred), &e.Predict)
