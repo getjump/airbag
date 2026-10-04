@@ -468,6 +468,8 @@ func checkTLS(p *probe) Result {
 		return fail(r, err)
 	}
 	defer px.Close()
+	env, removed := platformTrust(viaProxy(os.Environ(), px.Port()))
+	env = append(env, "TMPDIR="+p.dir)
 	// attempt runs the TLS client through the proxy, inside prof, or
 	// outside any profile when prof is nil.
 	attempt := func(prof *Profile) tlsTry {
@@ -476,12 +478,15 @@ func checkTLS(p *probe) Result {
 			args = append([]string{"/usr/bin/sandbox-exec", "-p", prof.String()}, args...)
 		}
 		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Env = append(viaProxy(os.Environ(), px.Port()), "TMPDIR="+p.dir)
+		cmd.Env = env
 		out, _ := cmd.CombinedOutput()
 		return tlsTry{ok: strings.Contains(string(out), "tls=ok"), out: strings.TrimSpace(string(out))}
 	}
 	control := attempt(nil)
-	r.Detail = "control, outside the profile: " + control.out
+	if len(removed) > 0 {
+		r.Detail = "the client ran without " + strings.Join(removed, " and ") + ", so that it uses the platform verifier\n"
+	}
+	r.Detail += "control, outside the profile: " + control.out
 	var without, with tlsTry
 	if control.ok {
 		without = attempt(&Profile{Write: []string{p.dir}, Ports: []int{px.Port()}})

@@ -58,6 +58,46 @@ func TestDenyIsLogged(t *testing.T) {
 	}
 }
 
+// Request lines whose host is malformed (a bracketed IPv4 address, two
+// ports) are refused by net/http's parser before ServeHTTP, so they are
+// not logged and never dialled. This pins that behaviour of Go 1.27; the
+// proxy's own checks deny or canonicalize them too, should it change.
+func TestMalformedHostRefusedByServer(t *testing.T) {
+	log, path := newLog(t)
+	p := New(Allowlist{"127.0.0.1:*", "h:*", "1.2.3.4:*"}, log)
+	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() { _ = p.Serve(l) }()
+	for _, line := range []string{
+		"CONNECT [127.0.0.1]:443 HTTP/1.1\r\nHost: [127.0.0.1]:443",
+		"CONNECT h:443:443 HTTP/1.1\r\nHost: h:443:443",
+		"GET http://h:80:80/ HTTP/1.1\r\nHost: h:80:80",
+		"GET http://[1.2.3.4]/ HTTP/1.1\r\nHost: [1.2.3.4]",
+	} {
+		c, err := net.Dial("tcp", l.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(c, line+"\r\n\r\n")
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err == nil {
+			resp.Body.Close()
+		}
+		c.Close()
+		if err != nil || resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%q: %v %v, want 400", line, resp, err)
+		}
+	}
+	effs, err := effects.Read(path)
+	if err != nil || len(effs) != 0 {
+		t.Fatalf("effects = %+v, %v, want none", effs, err)
+	}
+}
+
 // A CONNECT to an allowed host is tunnelled byte for byte.
 func TestConnectTunnel(t *testing.T) {
 	echo, err := net.Listen("tcp", "127.0.0.1:0")
