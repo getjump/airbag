@@ -210,12 +210,16 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			continue
 		}
 		// A replaced directory goes only once it is empty: by now the
-		// entries inside it that the apply made are gone, so whatever
-		// is left was added or kept after the apply, and is not ours to
-		// remove.
-		if e.Type == fs.ModeDir && e.Saved != "" && !emptyOrAbsent(e.Path) {
-			keep(e, "holds files added or changed after the apply")
-			continue
+		// entries inside it that the apply made are gone, and so are
+		// the directories it made there that nothing is left in, so
+		// whatever is left was added or kept after the apply, and is
+		// not ours to remove.
+		if e.Type == fs.ModeDir && e.Saved != "" {
+			dirs = removeInside(dirs, e.Path)
+			if !emptyOrAbsent(e.Path) {
+				keep(e, "holds files added or changed after the apply")
+				continue
+			}
 		}
 		if e.After != "" {
 			if err := giveBack(e, g.Clone); err != nil {
@@ -251,6 +255,21 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	}
 	g.Entries, g.Complete, g.Partial = kept, true, true
 	return left, g.save()
+}
+
+// removeInside removes the directories of dirs that lie inside dir,
+// deepest first, and returns the others.
+func removeInside(dirs []string, dir string) []string {
+	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	rest := dirs[:0]
+	for _, d := range dirs {
+		if d != dir && within(d, dir) {
+			_ = os.Remove(d) // only if empty: a file the user added keeps it
+			continue
+		}
+		rest = append(rest, d)
+	}
+	return rest
 }
 
 // emptyOrAbsent: nothing at p, or an empty directory.
