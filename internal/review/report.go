@@ -137,7 +137,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	seenU, seenPkg := map[string]bool{}, map[string]bool{}
 	for _, e := range effs {
 		switch {
-		case e.Kind == "net.egress":
+		case e.Kind == "net.egress" || e.Kind == "net.tcp":
 			host, _, err := net.SplitHostPort(e.Target)
 			if err != nil {
 				host = e.Target

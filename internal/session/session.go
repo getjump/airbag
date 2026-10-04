@@ -8,9 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -53,6 +56,9 @@ type Meta struct {
 	// Branch: the workspace result went to this branch of the real
 	// repository (apply --branch) instead of the working tree.
 	Branch string `json:"branch,omitempty"`
+	// Forwards: TCP ports the agent reaches on its own loopback
+	// (tcp://HOST:PORT in allow), each relayed by airbag to HOST:PORT.
+	Forwards []Forward `json:"forwards,omitempty"`
 	// Clone: the workspace branch is a full copy (an APFS clone on
 	// macOS) at CloneDir, not an overlayfs upper layer.
 	Clone bool `json:"clone,omitempty"`
@@ -119,6 +125,44 @@ func (s *Session) EtcWork() string             { return filepath.Join(s.Dir, "et
 func (s *Session) MountDir(name string) string { return filepath.Join(s.Dir, "mnt", name) }
 func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "run") }
 func (s *Session) CloneDir() string            { return filepath.Join(s.Dir, "ws", "clone") }
+func (s *Session) ForwardSock(i int) string {
+	return filepath.Join(s.RunDir(), fmt.Sprintf("fwd-%d.sock", i))
+}
+
+// Forward is one tcp:// entry: the agent connects to 127.0.0.1:Port in
+// the sandbox, airbag connects to Host:Port.
+type Forward struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+func (f Forward) String() string {
+	return fmt.Sprintf("tcp://%s", net.JoinHostPort(f.Host, strconv.Itoa(f.Port)))
+}
+
+// ParseForwards splits tcp:// entries off an allowlist.
+func ParseForwards(allow []string) (hosts []string, fw []Forward, err error) {
+	for _, a := range allow {
+		rest, ok := strings.CutPrefix(a, "tcp://")
+		if !ok {
+			hosts = append(hosts, a)
+			continue
+		}
+		h, p, err := net.SplitHostPort(rest)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: want tcp://HOST:PORT", a)
+		}
+		port, err := strconv.Atoi(p)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, nil, fmt.Errorf("%s: bad port", a)
+		}
+		f := Forward{Host: h, Port: port}
+		if !slices.Contains(fw, f) {
+			fw = append(fw, f)
+		}
+	}
+	return hosts, fw, nil
+}
 
 // WSBranch is where the agent's version of the workspace lives: the
 // clone, or the overlayfs upper layer (changes only).
@@ -128,8 +172,8 @@ func (s *Session) WSBranch() string {
 	}
 	return s.WSUpper()
 }
-func (s *Session) ProxySock() string           { return filepath.Join(s.RunDir(), "proxy.sock") }
-func (s *Session) ControlSock() string         { return filepath.Join(s.RunDir(), "ctl.sock") }
+func (s *Session) ProxySock() string   { return filepath.Join(s.RunDir(), "proxy.sock") }
+func (s *Session) ControlSock() string { return filepath.Join(s.RunDir(), "ctl.sock") }
 
 // EffectsPath is the session database: the effect log and the outbox.
 func (s *Session) EffectsPath() string { return filepath.Join(s.Dir, "effects.db") }

@@ -103,6 +103,12 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   allowed name that resolves to this machine, loopback, link-local (cloud
   metadata) or multicast is refused: the address is checked as the proxy
   connects, so a DNS answer cannot change between check and use.
+- **Local services, by name.** `--allow tcp://127.0.0.1:5432` (or `allow:` in
+  `airbag.yaml`) gives the agent `127.0.0.1:5432` in the sandbox, relayed by airbag
+  to that address: a dev database, a cache, a service from `docker compose`. Each
+  connection is checked by policy (as a `net.connect` effect) and logged as
+  `net.tcp`. After a secret read, forwards to other machines are refused and cut;
+  forwards to this machine stay. The Docker socket itself stays hidden.
 - **A package mirror.** Go, npm, pip, uv and yarn go through
   `http://airbag.mirror`, a read-only caching mirror of proxy.golang.org, npm and
   PyPI. Review lists every package and version the agent pulled; artifacts are

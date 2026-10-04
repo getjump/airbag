@@ -53,11 +53,28 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	mr.Tainted = gate.Tainted
 	mr.Pinned = mirror.FindPins(s.Workspace) // read from the real workspace, before the agent starts
 	px.Mirror = mr
+	// tcp:// forwards: one unix socket each, bridged inside the sandbox
+	// to 127.0.0.1:PORT (startForwards).
+	var fws []*forwarder
+	for i, f := range s.Forwards {
+		_ = os.Remove(s.ForwardSock(i))
+		fl, err := net.Listen("unix", s.ForwardSock(i))
+		if err != nil {
+			return 1, err
+		}
+		defer fl.Close()
+		fw := newForwarder(f, gate, log)
+		fws = append(fws, fw)
+		go fw.serve(fl)
+	}
 	// Once the session reads a secret, connections it opened earlier to
 	// hosts outside the core set close before the read returns.
 	gate.Labels().OnAdd(func(l taint.Label, _ string) {
 		if l == taint.Secret {
 			px.Cut(proxy.DefaultAllow, "secret-taint")
+			for _, fw := range fws {
+				fw.cut()
+			}
 		}
 	})
 	go func() { _ = px.Serve(pl) }()

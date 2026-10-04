@@ -92,7 +92,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 
 	allowed, denied, cut := map[string]int{}, map[string]int{}, map[string]int{}
 	for _, e := range effs {
-		if e.Kind != "net.egress" {
+		if e.Kind != "net.egress" && e.Kind != "net.tcp" {
 			continue
 		}
 		host, _, err := net.SplitHostPort(e.Target)

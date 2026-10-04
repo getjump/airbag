@@ -152,6 +152,10 @@ func cmdRun(args []string) (int, error) {
 		return 1, fmt.Errorf("policy: %w", err)
 	}
 	allow = append(allow, pol.Allow...)
+	allow, forwards, err := session.ParseForwards(allow)
+	if err != nil {
+		return 1, err
+	}
 	hidden := append(append([]string{}, sandbox.DefaultHidden...), pol.Hide...)
 	var hiddenHost []string
 	for _, p := range sandbox.HostSockets {
@@ -192,6 +196,11 @@ func cmdRun(args []string) (int, error) {
 			}
 		}
 		s.Strict = s.Strict || *strict
+		for _, f := range forwards {
+			if !slices.Contains(s.Forwards, f) {
+				s.Forwards = append(s.Forwards, f)
+			}
+		}
 		if err := s.Save(); err != nil {
 			return 1, err
 		}
@@ -202,7 +211,7 @@ func cmdRun(args []string) (int, error) {
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
 			Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
-			PassEnv: passEnv, Strict: *strict,
+			PassEnv: passEnv, Strict: *strict, Forwards: forwards,
 		}
 		if runtime.GOOS == "darwin" {
 			// The macOS prototype: the workspace branch is a clone, $HOME

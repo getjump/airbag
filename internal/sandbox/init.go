@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -52,6 +53,9 @@ func Init(dir string, tty bool) {
 	}
 	if err := startBridge(); err != nil {
 		fatal("proxy bridge", err)
+	}
+	if err := startForwards(s); err != nil {
+		fatal("tcp forward", err)
 	}
 	var ctl *os.File
 	if tty {
@@ -268,11 +272,15 @@ func privateRun(s *session.Session) error {
 	if err := os.MkdirAll(shim.BinDir, 0o755); err != nil {
 		return err
 	}
-	for src, dst := range map[string]string{
+	socks := map[string]string{
 		s.ProxySock():    proxySockInside,
 		s.ControlSock():  control.SocketInSandbox,
 		"/proc/self/exe": airbagBinInside,
-	} {
+	}
+	for i := range s.Forwards {
+		socks[s.ForwardSock(i)] = forwardSockInside(i)
+	}
+	for src, dst := range socks {
 		if err := os.WriteFile(dst, nil, 0o600); err != nil {
 			return err
 		}
@@ -385,6 +393,44 @@ func startBridge() error {
 			}()
 		}
 	}()
+	return nil
+}
+
+func forwardSockInside(i int) string { return fmt.Sprintf("/run/airbag/fwd-%d.sock", i) }
+
+// startForwards listens on 127.0.0.1:PORT in the sandbox for each
+// tcp:// forward and relays to airbag outside, which connects on.
+func startForwards(s *session.Session) error {
+	for i, f := range s.Forwards {
+		if strconv.Itoa(f.Port) == strings.TrimPrefix(ProxyAddr, "127.0.0.1:") {
+			return fmt.Errorf("%s: port %d is airbag's proxy inside the sandbox", f, f.Port)
+		}
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", f.Port))
+		if err != nil {
+			return fmt.Errorf("%s: %w", f, err)
+		}
+		sock := forwardSockInside(i)
+		go func() {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				go func() {
+					defer c.Close()
+					up, err := net.Dial("unix", sock)
+					if err != nil {
+						return
+					}
+					defer up.Close()
+					done := make(chan struct{}, 2)
+					go func() { _, _ = io.Copy(up, c); done <- struct{}{} }()
+					go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
+					<-done
+				}()
+			}
+		}()
+	}
 	return nil
 }
 

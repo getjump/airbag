@@ -40,6 +40,13 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 		Ports:   []int{port},
 		Sockets: []string{real(s.ControlSock())},
 	}
+	// tcp:// forwards to this machine: on macOS the agent reaches them
+	// directly, the profile only has to let it.
+	for _, f := range s.Forwards {
+		if f.Host == "localhost" || f.Host == "127.0.0.1" || f.Host == "::1" {
+			p.Ports = append(p.Ports, f.Port)
+		}
+	}
 	for _, d := range stateDirs {
 		_ = os.MkdirAll(filepath.Join(s.Home, d), 0o700)
 		p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(d, "/")))
