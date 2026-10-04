@@ -251,6 +251,37 @@ func WriteBackConfigs(s *session.Session) []string {
 	return msgs
 }
 
+// SnapshotConfigs records, before a run, what each jsonConfig file holds
+// in the real $HOME, as the base of WriteBackConfigs' three-way merge:
+// only a key the agent changed from the base is written back, so a key
+// the host changed meanwhile keeps the host's value. The base is taken
+// while the branch has no copy of the file yet (an overlay copies it up
+// on the agent's first write), and kept while it has one.
+func SnapshotConfigs(s *session.Session) {
+	if !s.OverHome {
+		return
+	}
+	for i := range jsonConfigs {
+		cf := &jsonConfigs[i]
+		if _, err := os.Lstat(filepath.Join(s.HomeUpper(), cf.path)); err == nil {
+			continue // the branch has its copy; its base stays
+		}
+		base := basePath(s, cf)
+		raw, err := readRegular(filepath.Join(s.Home, cf.path))
+		if err != nil {
+			_ = os.Remove(base) // no readable real file: the base is empty
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(base), 0o700); err == nil {
+			_ = os.WriteFile(base, raw, 0o600)
+		}
+	}
+}
+
+func basePath(s *session.Session, cf *jsonConfig) string {
+	return filepath.Join(s.Dir, "base", cf.path)
+}
+
 // errChanged: the real file changed between reading it and replacing it.
 var errChanged = errors.New("changed while being written back")
 
@@ -270,6 +301,16 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		return "", false // malformed in the branch: leave it there for review
 	}
 	realPath := filepath.Join(s.Home, cf.path)
+	// The base: what the real file held when the branch took its copy.
+	// A session from before bases were kept has none; the real file
+	// stands in, as a two-way merge.
+	baseRaw, err := readRegular(basePath(s, cf))
+	haveBase := err == nil
+	if haveBase {
+		if _, err := topLevel(baseRaw); err != nil {
+			return "", false
+		}
+	}
 	for range 3 {
 		before, exists, err := fileState(realPath)
 		if err != nil {
@@ -291,7 +332,12 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		prev, had := s.WroteBack[realPath]
 		hostEdited := exists && before.ctime > since.UnixNano() &&
 			!(had && prev.SHA256 == digest(realRaw) && prev.Ctime == before.ctime)
+		base := real
+		if haveBase {
+			base, _ = topLevel(baseRaw) // parsed afresh on every attempt
+		}
 		var wrote []string
+		rebased := false
 		for _, ch := range cf.diff(nil, realRaw, branchRaw) {
 			if ch.class != classWriteBack {
 				continue
@@ -300,8 +346,30 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 			if !ok {
 				continue // a removed key is a change for review, not a write
 			}
+			bv, _ := getPath(base, ch.path)
+			if canon(v) == canon(bv) {
+				// The agent did not change it; the host did. The host's
+				// value stays, and the branch copy takes it, so review
+				// shows only what the agent changed.
+				if rv, ok := getPath(real, ch.path); ok && setPath(branch, ch.path, rv) == nil {
+					rebased = true
+				}
+				continue
+			}
+			if rv, _ := getPath(real, ch.path); canon(rv) != canon(bv) {
+				continue // both changed it: the agent's value waits for review
+			}
 			if err := setPath(real, ch.path, v); err == nil {
 				wrote = append(wrote, ch.String())
+				_ = setPath(base, ch.path, v)
+			}
+		}
+		if rebased {
+			if out, err := marshalJSON(branch, "  "); err == nil {
+				out = append(out, '\n')
+				if err := os.WriteFile(branchPath, out, 0o600); err == nil {
+					branchRaw = out
+				}
 			}
 		}
 		if len(wrote) == 0 {
@@ -322,6 +390,13 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		}
 		if err != nil {
 			return fmt.Sprintf("could not write ~/%s back: %v", cf.path, err), false
+		}
+		// The base now holds what was written back, so a later run does
+		// not take it for the agent's change again.
+		if out, err := marshalJSON(base, "  "); err == nil {
+			if err := os.MkdirAll(filepath.Dir(basePath(s, cf)), 0o700); err == nil {
+				_ = os.WriteFile(basePath(s, cf), append(out, '\n'), 0o600)
+			}
 		}
 		// Record the write: the bytes airbag wrote and the change time
 		// right after, unless the host had edited the file too, or wrote

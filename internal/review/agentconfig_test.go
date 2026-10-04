@@ -510,3 +510,46 @@ func TestOwnWriteRecordsOnlyAirbagsWrite(t *testing.T) {
 		t.Fatal("a file the host also edited is recorded as airbag's write")
 	}
 }
+
+// A benign key the host changed during the session and the agent did not
+// keeps the host's value: the write-back merges three ways, from the base
+// taken before the run.
+func TestWriteBackKeepsHostChangeToUntouchedKey(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1,"tipsHistory":{"a":1}}`)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"numStartups":2,"tipsHistory":{"a":1}}`) // the agent's copy
+	writeCfg(t, realPath, `{"numStartups":1,"tipsHistory":{"a":5}}`)   // a host session meanwhile
+	WriteBackConfigs(s)
+	got := readCfg(t, realPath)
+	if got["numStartups"] != float64(2) || got["tipsHistory"].(map[string]any)["a"] != float64(5) {
+		t.Fatalf("real file = %v, want the agent's counter and the host's tips", got)
+	}
+	if _, err := os.Stat(branchPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("branch copy kept (%v), want it dropped: nothing is left to review", err)
+	}
+	// A later run takes neither value for the agent's change again.
+	writeCfg(t, branchPath, `{"numStartups":2,"tipsHistory":{"a":5}}`)
+	writeCfg(t, realPath, `{"numStartups":7,"tipsHistory":{"a":5}}`)
+	WriteBackConfigs(s)
+	if got := readCfg(t, realPath); got["numStartups"] != float64(7) {
+		t.Fatalf("real file = %v, the host's newer counter was overwritten", got)
+	}
+}
+
+// When both changed a benign key, the agent's value is not written over
+// the host's: it waits in the branch for review.
+func TestWriteBackBothChangedWaitsForReview(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1}`)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"numStartups":2}`)
+	writeCfg(t, realPath, `{"numStartups":3}`)
+	WriteBackConfigs(s)
+	if got := readCfg(t, realPath); got["numStartups"] != float64(3) {
+		t.Fatalf("real file = %v, want the host's value kept", got)
+	}
+	if _, err := os.Stat(branchPath); err != nil {
+		t.Fatalf("branch copy dropped: %v", err)
+	}
+}

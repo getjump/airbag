@@ -278,6 +278,8 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 	}
+	// The base of the config write-back's three-way merge (agentconfig.go).
+	review.SnapshotConfigs(s)
 	code, err := sandbox.Run(s, proxy.Allowlist(s.Allow), pol)
 	if err != nil {
 		return code, err
