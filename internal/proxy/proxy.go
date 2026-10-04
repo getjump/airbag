@@ -88,12 +88,19 @@ type Proxy struct {
 	forbid func(netip.Addr) string
 }
 
-// track registers a connection the agent opens through the proxy,
-// until done is called.
-func (p *Proxy) track(host, target string) (f *flow, done func()) {
+// admit registers a connection the agent opens through the proxy,
+// until done is called. Past Limits.MaxFlows it is refused: it answers
+// 503, logs the refusal and returns a nil flow.
+func (p *Proxy) admit(w http.ResponseWriter, host, target string) (f *flow, done func()) {
 	p.mu.Lock()
 	if p.flows == nil {
 		p.flows = map[*flow]bool{}
+	}
+	if n := p.Limits.MaxFlows; n > 0 && len(p.flows) >= n {
+		p.mu.Unlock()
+		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "too many open connections"})
+		http.Error(w, "airbag: this session has "+strconv.Itoa(n)+" connections open through the proxy, the most it may; close some and retry", http.StatusServiceUnavailable)
+		return nil, nil
 	}
 	f = newFlow(p.Limits.Idle, p.Limits.Drain)
 	f.host, f.target = host, target
@@ -257,7 +264,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	f, done := p.track(host, target)
+	f, done := p.admit(w, host, target)
+	if f == nil {
+		return
+	}
 	defer done()
 	p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "allow"})
 	// Talking to a host that is neither a model API nor a registry

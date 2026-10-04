@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/getjump/airbag/internal/effects"
 )
 
 // The bounds on what the agent can hold open on the host side, each
@@ -26,7 +28,7 @@ import (
 // file descriptors are back where they started.
 
 // testLimits are short enough for a test: the defaults are minutes.
-var testLimits = Limits{Idle: 5 * time.Second, Drain: 200 * time.Millisecond, KeepAlive: 200 * time.Millisecond}
+var testLimits = Limits{Idle: 5 * time.Second, Drain: 200 * time.Millisecond, KeepAlive: 200 * time.Millisecond, MaxFlows: MaxFlows}
 
 // usage is the test binary's goroutines and open file descriptors.
 func usage() (goroutines, fds int) {
@@ -358,5 +360,49 @@ func TestForwardBrokenBodyAborts(t *testing.T) {
 	resp.Body.Close()
 	if err == nil {
 		t.Fatalf("the body (%d bytes) ended cleanly; it was cut off", len(b))
+	}
+}
+
+// Past MaxFlows a connection is refused with 503 and logged; once one
+// closes, another is let through.
+func TestMaxFlows(t *testing.T) {
+	target := listenTCP(t, echoConn)
+	lim := testLimits
+	lim.MaxFlows = 2
+	p, pa, path := boundedProxy(t, lim)
+	a, _, codeA := connectVia(t, pa, target)
+	defer a.Close()
+	b, _, codeB := connectVia(t, pa, target)
+	defer b.Close()
+	c, _, codeC := connectVia(t, pa, target)
+	c.Close()
+	if codeA != http.StatusOK || codeB != http.StatusOK || codeC != http.StatusServiceUnavailable {
+		t.Fatalf("CONNECTs: %d %d %d, want 200 200 503", codeA, codeB, codeC)
+	}
+	a.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.mu.Lock()
+		n := len(p.flows)
+		p.mu.Unlock()
+		if n < 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	d, _, codeD := connectVia(t, pa, target)
+	d.Close()
+	if codeD != http.StatusOK {
+		t.Fatalf("CONNECT after one closed: %d", codeD)
+	}
+	effs, _ := effects.Read(path)
+	var refused int
+	for _, e := range effs {
+		if e.Verdict == "deny" && e.Reason == "too many open connections" {
+			refused++
+		}
+	}
+	if refused != 1 {
+		t.Fatalf("%d refusals logged, want 1: %+v", refused, effs)
 	}
 }

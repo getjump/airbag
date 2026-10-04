@@ -13,7 +13,8 @@ import (
 // The proxy and the tcp:// forwards run on the host side: their
 // goroutines, file descriptors and memory are the host's, and the agent
 // decides how many connections it opens and how long it keeps them. So
-// each connection is closed once it stops carrying data.
+// each connection is closed once it stops carrying data, and the number
+// open at once is capped.
 const (
 	// TunnelIdle closes a CONNECT tunnel or an intercepted connection on
 	// which no byte has moved either way for this long, and a forwarded
@@ -35,17 +36,23 @@ const (
 	// intercepted, that has waited this long for its next request, as
 	// Squid's client_idle_pconn_timeout. Clients open a new one.
 	KeepAliveIdle = 2 * time.Minute
+	// MaxFlows caps the connections one session holds open through the
+	// proxy at once: tunnels, intercepted connections and forwarded
+	// requests. A browser keeps at most 32 to one proxy; package
+	// managers fetch through the mirror, which is not counted.
+	MaxFlows = 512
 )
 
 // Limits are the bounds a Proxy applies; New sets the defaults above,
 // tests shorten them.
 type Limits struct {
 	Idle, Drain, KeepAlive time.Duration
+	MaxFlows               int
 }
 
 // DefaultLimits are the limits New gives a Proxy.
 func DefaultLimits() Limits {
-	return Limits{Idle: TunnelIdle, Drain: Drain, KeepAlive: KeepAliveIdle}
+	return Limits{Idle: TunnelIdle, Drain: Drain, KeepAlive: KeepAliveIdle, MaxFlows: MaxFlows}
 }
 
 // A flow is one connection relayed for the agent, with the
