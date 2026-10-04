@@ -7,9 +7,27 @@ import (
 	"strings"
 
 	"github.com/getjump/airbag/internal/creds"
+	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/proxy"
+	"github.com/getjump/airbag/internal/secrets"
 	"github.com/getjump/airbag/internal/session"
 )
+
+// registerSecrets builds the session's registry of secret values on the
+// host, before the agent starts, and says which names it holds. The
+// values stay in this process.
+func registerSecrets(s *session.Session, pol *policy.Policy, live creds.Set) *secrets.Registry {
+	reg := secrets.ForSession(s.Workspace, s.Home, pol, live, os.Stderr)
+	if names := reg.Names(); len(names) > 0 {
+		more := ""
+		if len(names) > 8 {
+			more = fmt.Sprintf(" and %d more", len(names)-8)
+			names = names[:8]
+		}
+		fmt.Fprintf(os.Stderr, "airbag: secret values registered: %s%s\n", strings.Join(names, ", "), more)
+	}
+	return reg
+}
 
 // setupCredentials reads each bound credential's value on the host,
 // keeps or makes its placeholder, and makes the session CA, whose

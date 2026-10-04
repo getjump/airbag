@@ -13,6 +13,7 @@ import (
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/outbox"
+	"github.com/getjump/airbag/internal/secrets"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/steps"
 )
@@ -172,10 +173,10 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			r.Attention = append(r.Attention, ReportItem{What: "blocked", Target: e.Target, Why: e.Verdict + " by " + orUnnamed(e.Reason)})
 		}
 	}
-	secrets := knownSecrets(s.Workspace)
+	reg := secrets.Load(s.Workspace, s.Home)
 	for _, in := range intents {
 		r.Outbox = append(r.Outbox, ReportIntent{ID: in.ID, Kind: in.Kind, Argv: in.Argv, Status: in.Status, Files: in.Files})
-		if in.Status == outbox.Pending && intentHasSecret(in, secrets) {
+		if in.Status == outbox.Pending && intentHasSecret(in, reg) {
 			r.Attention = append(r.Attention, ReportItem{What: "secret", Target: in.ID, Why: "`" + outbox.Line(in.Argv) + "` carries a value from a secret file"})
 		}
 		switch in.Status {

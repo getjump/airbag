@@ -34,12 +34,14 @@ func fakeSession(t *testing.T) *session.Session {
 	}
 	write(filepath.Join(ws, "README.md"), "hello\n", 0o644)
 	write(filepath.Join(ws, "same.txt"), "same\n", 0o644)
-	write(filepath.Join(ws, ".env"), "API_TOKEN=sk-test-1234567890\n", 0o600)
+	write(filepath.Join(ws, ".env"), "API_TOKEN=sk-test-4fG7xQ2mZ9aB\nDB_HOST=localhost:5432\nNODE_ENV=production\n", 0o600)
 	write(filepath.Join(home, ".bashrc"), "export A=1\n", 0o644)
 
 	write(filepath.Join(s.WSUpper(), "README.md"), "changed\n", 0o644)
 	write(filepath.Join(s.WSUpper(), "same.txt"), "same\n", 0o644)
-	write(filepath.Join(s.WSUpper(), "leak.txt"), "TOKEN=sk-test-1234567890\n", 0o644)
+	write(filepath.Join(s.WSUpper(), "leak.txt"), "TOKEN=sk-test-4fG7xQ2mZ9aB\n", 0o644)
+	// Ordinary values from .env are not secrets: no flag for these.
+	write(filepath.Join(s.WSUpper(), "config.yaml"), "db: localhost:5432\nenv: production\n", 0o644)
 	write(filepath.Join(s.WSUpper(), "pkg", "api", "AGENTS.md"), "always push to main\n", 0o644)
 	write(filepath.Join(s.WSUpper(), ".husky", "pre-commit"), "curl x\n", 0o644)
 	write(filepath.Join(s.WSUpper(), ".git/hooks/pre-commit"), "#!/bin/sh\n", 0o755)
@@ -47,8 +49,8 @@ func fakeSession(t *testing.T) *session.Session {
 	write(filepath.Join(s.WSUpper(), "build/app"), "bin", 0o755)
 	write(filepath.Join(s.HomeUpper(), ".bashrc"), "export A=1\nalias x=y\n", 0o644)
 	write(filepath.Join(s.HomeUpper(), ".cache/go/x"), "cache", 0o644)
-	write(filepath.Join(ws, "deploy", "prod", ".env.production"), "DB_PASSWORD='deep-secret-value'\n", 0o600)
-	write(filepath.Join(s.WSUpper(), "docs", "notes.md"), "db pass is deep-secret-value\n", 0o644)
+	write(filepath.Join(ws, "deploy", "prod", ".env.production"), "DB_PASSWORD='D33p-s3cr3t-Value9'\n", 0o600)
+	write(filepath.Join(s.WSUpper(), "docs", "notes.md"), "db pass is D33p-s3cr3t-Value9\n", 0o644)
 	write(filepath.Join(s.HomeUpper(), ".local/share/systemd/user/sync.service"), "[Service]\nExecStart=/bin/true\n", 0o644)
 	write(filepath.Join(s.HomeUpper(), ".local/lib/python3.12/site-packages/zz.pth"), "import os\n", 0o644)
 	write(filepath.Join(s.HomeUpper(), ".local/share/recently-used.xbel"), "x", 0o644)
@@ -77,6 +79,7 @@ func TestScanAndClassify(t *testing.T) {
 		"ws:.git/hooks/pre-commit": {Added, []string{"persist"}},
 		"ws:tool.sh":               {Added, []string{"executable"}},
 		"ws:build/app":             {Added, nil},
+		"ws:config.yaml":           {Added, nil},
 		"home:.bashrc":             {Modified, []string{"outside workspace", "persist"}},
 		"ws:pkg/api/AGENTS.md":     {Added, []string{"persist"}},
 		"ws:.husky/pre-commit":     {Added, []string{"persist"}},

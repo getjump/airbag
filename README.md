@@ -176,8 +176,8 @@ the whole review as data for editors and CI, with a versioned schema
 (`airbag.review/v1`; fields are only added within a version).
 
 It flags persistence (git hooks, shell rc files, CI config, agent settings), new
-executables, changes outside the workspace and values from your `.env` files that
-ended up in the diff. `apply` refuses to overwrite files you changed on the host
+executables, changes outside the workspace and secret values
+([below](#secret-values)) that ended up in the diff. `apply` refuses to overwrite files you changed on the host
 while the agent worked. `apply -i` goes through the changes one by one (git
 internals and caches come as one piece each) and keeps the rejected ones in the
 session; `apply --only PATH` takes just part of the branch.
@@ -333,6 +333,41 @@ that is not a model API. Not covered: tokens in request bodies (OAuth flows),
 tools that pin certificates or keep their own trust store (Java), Go programs on
 macOS (they ignore `SSL_CERT_FILE`), and Node's built-in `fetch`, which ignores
 `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` (Node 22.21 and later).
+
+### Secret values
+
+When a session starts, airbag registers the values of what it already treats
+as secret, on the host, before the agent runs. Each has a name that says where
+it came from, and only the name is shown, logged or stored:
+
+- each value in the workspace's `.env` files, as `FILE#KEY` (`.env#API_TOKEN`);
+  for a URL with a password, the password;
+- the other secret files (keys, cloud credentials, `.npmrc`, ...) as a whole, as
+  `FILE`, and the pieces of their lines that pass the rule below (the body lines
+  of a PEM key, a token after `=`), as `FILE:LINE`;
+- bound credentials and the values you mark yourself, as `credential NAME` and
+  `secret NAME`, whatever the rule says.
+
+The rule keeps ordinary values out, since a registered value is treated as a
+secret wherever it shows up: at least 12 characters, no spaces, not a file path,
+letters and digits both, and at least four changes between lower case, upper
+case and digits from one letter or digit to the next. Random tokens, hex and
+base64 strings pass; `true`, `3000`, `production`, `localhost:5432`,
+`us-east-1`, `my-bucket-2024` and `http://localhost:3000` do not, and neither
+do short passwords or passphrases of words. Mark those in your own
+`~/.config/airbag/airbag.yaml` (a repository's file cannot: a source may run a
+command on your machine):
+
+```yaml
+secrets:
+  - name: db
+    source: env:DB_PASSWORD     # or file:PATH, command:PROGRAM ARGS
+```
+
+A marked value needs 6 characters at least. `airbag run` lists the names it
+registered. Review flags a changed file that holds a registered value. Review
+and apply read the files and sources again, except `command:` sources, which run
+only when the session starts.
 
 Which tools an agent may call is the agent's own setting (Claude Code's
 permissions, Codex's configuration), and airbag does not duplicate it. airbag

@@ -67,25 +67,38 @@ func (b Binding) Validate() error {
 			return fmt.Errorf("%s: port in %q", b.Name, h)
 		}
 	}
-	if _, _, ok := strings.Cut(b.Source, ":"); !ok {
-		return fmt.Errorf("%s: source %q: want env:NAME, file:PATH or command:PROGRAM ARGS", b.Name, b.Source)
-	}
-	switch kind, rest, _ := strings.Cut(b.Source, ":"); kind {
-	case "env":
-		if !envRe.MatchString(rest) {
-			return fmt.Errorf("%s: source %q", b.Name, b.Source)
-		}
-	case "file", "command":
-		if strings.TrimSpace(rest) == "" {
-			return fmt.Errorf("%s: source %q", b.Name, b.Source)
-		}
-	default:
-		return fmt.Errorf("%s: source %q: want env:, file: or command:", b.Name, b.Source)
+	if err := ValidSource(b.Source); err != nil {
+		return fmt.Errorf("%s: %w", b.Name, err)
 	}
 	for _, e := range b.Env {
 		if !envRe.MatchString(e) {
 			return fmt.Errorf("%s: env %q", b.Name, e)
 		}
+	}
+	return nil
+}
+
+// ValidName reports whether name can name a credential or a secret.
+func ValidName(name string) bool { return nameRe.MatchString(name) }
+
+// ValidSource checks a source of a value: env:NAME, file:PATH or
+// command:PROGRAM ARGS.
+func ValidSource(source string) error {
+	kind, rest, ok := strings.Cut(source, ":")
+	if !ok {
+		return fmt.Errorf("source %q: want env:NAME, file:PATH or command:PROGRAM ARGS", source)
+	}
+	switch kind {
+	case "env":
+		if !envRe.MatchString(rest) {
+			return fmt.Errorf("source %q", source)
+		}
+	case "file", "command":
+		if strings.TrimSpace(rest) == "" {
+			return fmt.Errorf("source %q", source)
+		}
+	default:
+		return fmt.Errorf("source %q: want env:, file: or command:", source)
 	}
 	return nil
 }
@@ -102,10 +115,23 @@ func SplitHost(h string) (host, port string) {
 	return strings.Trim(h, "[]"), "443"
 }
 
-// Resolve reads the real value on the host: from the environment, a
-// file, or a command's output (run without a shell, ten seconds at
-// most). Surrounding whitespace is trimmed.
+// Resolve reads a credential's real value on the host (Read); a
+// credential is one token, so a value that spans lines is refused.
 func Resolve(source, home string) (string, error) {
+	v, err := Read(source, home)
+	if err != nil {
+		return "", err
+	}
+	if strings.ContainsAny(v, "\r\n") {
+		return "", errors.New("the value spans lines; a credential is one token")
+	}
+	return v, nil
+}
+
+// Read reads a value on the host: from the environment, a file, or a
+// command's output (run without a shell, ten seconds at most).
+// Surrounding whitespace is trimmed.
+func Read(source, home string) (string, error) {
 	kind, rest, _ := strings.Cut(source, ":")
 	var v string
 	switch kind {
@@ -141,9 +167,6 @@ func Resolve(source, home string) (string, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return "", errors.New("empty value")
-	}
-	if strings.ContainsAny(v, "\r\n") {
-		return "", errors.New("the value spans lines; a credential is one token")
 	}
 	return v, nil
 }

@@ -57,7 +57,18 @@ type File struct {
 	// Credentials: tokens the agent uses without holding them. Only the
 	// user's own file may name them, never a repository's.
 	Credentials []creds.Binding `yaml:"credentials"`
-	Rules       []Rule          `yaml:"rules"`
+	// Secrets: values the user marks as secret although the registry's
+	// rule would not take them (internal/secrets). Only the user's own
+	// file may name them: a source can run a command on the host.
+	Secrets []Secret `yaml:"secrets"`
+	Rules   []Rule   `yaml:"rules"`
+}
+
+// Secret is one entry of `secrets:`: a name and where its value is
+// read, as for a credential (env:, file:, command:).
+type Secret struct {
+	Name   string `yaml:"name"`
+	Source string `yaml:"source"`
 }
 
 type Policy struct {
@@ -65,6 +76,7 @@ type Policy struct {
 	Hide        []string
 	Defer       []Pattern
 	Credentials []creds.Binding
+	Secrets     []Secret
 	Rules       []Rule
 	Sources     []string
 }
@@ -145,6 +157,18 @@ func Load(workspace, home string) (*Policy, error) {
 		p.Sources = append(p.Sources, path)
 		if len(f.Credentials) > 0 && path != userFile {
 			return nil, fmt.Errorf("%s: credentials can only be set in %s: a repository must not decide which hosts get your tokens", path, userFile)
+		}
+		if len(f.Secrets) > 0 && path != userFile {
+			return nil, fmt.Errorf("%s: secrets can only be set in %s: their sources run on your machine", path, userFile)
+		}
+		for _, e := range f.Secrets {
+			if !creds.ValidName(e.Name) {
+				return nil, fmt.Errorf("%s: secrets: name %q: lowercase letters, digits, - and _", path, e.Name)
+			}
+			if err := creds.ValidSource(e.Source); err != nil {
+				return nil, fmt.Errorf("%s: secrets: %s: %w", path, e.Name, err)
+			}
+			p.Secrets = append(p.Secrets, e)
 		}
 		for _, b := range f.Credentials {
 			if err := b.Validate(); err != nil {

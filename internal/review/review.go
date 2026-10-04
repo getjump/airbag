@@ -3,7 +3,6 @@
 package review
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -18,7 +17,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/getjump/airbag/internal/secretfs"
+	"github.com/getjump/airbag/internal/secrets"
 	"github.com/getjump/airbag/internal/session"
 )
 
@@ -180,7 +179,7 @@ func sameContent(a, b string) bool {
 var buildDirs = []string{"bin/", "build/", "dist/", "target/", "out/", "node_modules/", ".venv/", "vendor/"}
 
 func classify(s *session.Session, cs []Change) {
-	secrets := knownSecrets(s.Workspace)
+	reg := secrets.Load(s.Workspace, s.Home)
 	for i := range cs {
 		c := &cs[i]
 		rel := filepath.ToSlash(c.Rel)
@@ -198,7 +197,7 @@ func classify(s *session.Session, cs []Change) {
 		if c.Kind != Deleted && c.Type == 0 && c.Mode&0o111 != 0 && !hasPrefix(rel, buildDirs) && !strings.HasPrefix(rel, ".git/") {
 			c.Flags = append(c.Flags, "executable")
 		}
-		if c.Kind != Deleted && c.Type == 0 && len(secrets) > 0 && containsSecret(c.Upper, secrets) {
+		if c.Kind != Deleted && c.Type == 0 && reg.Len() > 0 && len(foundIn(c.Upper, reg)) > 0 {
 			c.Flags = append(c.Flags, "secret in diff")
 		}
 	}
@@ -213,63 +212,18 @@ func hasPrefix(rel string, patterns []string) bool {
 	return false
 }
 
-// knownSecrets reads values from the workspace's real secret files, the
-// same ones secretfs serves (.env at any depth, keys, credentials,
-// *.tfvars). A value of 8+ characters that shows up in the agent's
-// changes is reported: the branch is about to put a secret into the
-// repo. Values are what follows "=" or ":" on a line; a long line with
-// no spaces (the body of a PEM key) counts as a whole.
-func knownSecrets(ws string) []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(v string) {
-		v = strings.Trim(strings.TrimSpace(v), `"',;`)
-		if len(v) >= 8 && !strings.ContainsAny(v, " \t") && !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	for _, rel := range secretfs.Find(ws) {
-		f := filepath.Join(ws, rel)
-		if st, err := os.Stat(f); err != nil || st.Size() > 1<<20 {
-			continue
-		}
-		fh, err := os.Open(f)
-		if err != nil {
-			continue
-		}
-		sc := bufio.NewScanner(fh)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-----") {
-				continue
-			}
-			if i := strings.IndexAny(line, "=:"); i >= 0 {
-				add(line[i+1:])
-			} else if len(line) >= 32 {
-				add(line)
-			}
-		}
-		fh.Close()
-	}
-	return out
-}
-
-func containsSecret(path string, secrets []string) bool {
+// foundIn returns the names of the registered values a file holds:
+// the branch is about to put a secret into the repository.
+func foundIn(path string, reg *secrets.Registry) []string {
 	st, err := os.Stat(path)
 	if err != nil || st.Size() > 5<<20 {
-		return false
+		return nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return nil
 	}
-	for _, s := range secrets {
-		if bytes.Contains(b, []byte(s)) {
-			return true
-		}
-	}
-	return false
+	return reg.Found(b)
 }
 
 // Attention returns the changes a human should look at, sorted.

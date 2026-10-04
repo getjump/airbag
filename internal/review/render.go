@@ -13,6 +13,7 @@ import (
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/outbox"
+	"github.com/getjump/airbag/internal/secrets"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/steps"
 )
@@ -173,13 +174,13 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	}
 
 	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))
-	secrets := knownSecrets(s.Workspace)
+	reg := secrets.Load(s.Workspace, s.Home)
 	for _, in := range intents {
 		fmt.Fprintf(w, "  %-4s %-44s %s\n", in.ID, outbox.Line(in.Argv), in.Status)
 		if len(in.Files) > 0 {
 			fmt.Fprintf(w, "       runs only on these as queued: %s\n", strings.Join(fileNames(in.Files), ", "))
 		}
-		if intentHasSecret(in, secrets) {
+		if intentHasSecret(in, reg) {
 			fmt.Fprintf(w, "       ! carries a value from a secret file\n")
 		}
 	}
@@ -461,14 +462,8 @@ func fileNames(m map[string]string) []string {
 
 // intentHasSecret: an intent runs on the host and sends what its
 // command line says, so a secret value in it leaves when it runs.
-func intentHasSecret(in outbox.Intent, secrets []string) bool {
-	line := strings.Join(in.Argv, " ")
-	for _, v := range secrets {
-		if strings.Contains(line, v) {
-			return true
-		}
-	}
-	return false
+func intentHasSecret(in outbox.Intent, reg *secrets.Registry) bool {
+	return len(reg.Found([]byte(strings.Join(in.Argv, " ")))) > 0
 }
 
 // renderRequests lists the requests to hosts a credential is bound to:
