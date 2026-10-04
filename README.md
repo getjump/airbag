@@ -253,9 +253,13 @@ governs the effects any tool has: files, network, processes and secrets.
 ## Install
 
 ```console
-$ go install github.com/getjump/airbag/cmd/airbag@latest
+$ curl -fsSL https://raw.githubusercontent.com/getjump/airbag/main/install.sh | sh
 $ airbag doctor
 ```
+
+The script installs the latest release for Linux or macOS (amd64, arm64) into
+`~/.local/bin` after checking its SHA-256 against the release. Or from source:
+`go install github.com/getjump/airbag/cmd/airbag@latest`.
 
 With Nix: `nix run github:getjump/airbag -- doctor`, or add the flake's
 `packages.<system>.airbag` to your configuration. `nix flake check` runs the unit

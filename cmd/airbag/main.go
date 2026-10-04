@@ -28,6 +28,9 @@ import (
 	"github.com/getjump/airbag/internal/term"
 )
 
+// version is set at release: -ldflags "-X main.version=v0.1.0".
+var version = "dev"
+
 const usage = `airbag — approve outcomes, not commands
 
   airbag run [--allow HOST]... [--no-home] [--session ID|last] -- AGENT [ARGS...]
@@ -97,6 +100,8 @@ func main() {
 		err = cmdDoctor()
 	case "approve":
 		err = cmdApprove(args)
+	case "version", "--version":
+		fmt.Println("airbag", version)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
