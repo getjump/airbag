@@ -256,9 +256,14 @@ func checkNFSMount(p *probe) Result {
 	} else {
 		_ = srv.Close() // and every connection it took: no session outlives a mount that did not come up
 	}
-	r.Detail = strings.Join(tried, "\n")
+	late, other := srv.Refused()
+	r.Detail = strings.Join(append(tried, refusedNote(late, other)), "\n")
 	if !p.mounted {
 		r.Status, r.Reason = Fail, "mount_nfs refused as a regular user (see detail)"
+		if late+other > 0 {
+			// The refusal may be the server's, not the system's.
+			r.Reason = "not mounted; " + refusedNote(late, other) + " (see detail)"
+		}
 		return r
 	}
 	b, err := os.ReadFile(filepath.Join(p.mnt, "hello.txt"))

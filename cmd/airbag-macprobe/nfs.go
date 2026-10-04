@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -51,6 +52,10 @@ func (s *nfsServer) Port() int { return s.l.Addr().(*net.TCPAddr).Port }
 // that was granted it and did not come up is the last one.
 func (s *nfsServer) Arm() (string, error) { return s.gate.arm() }
 
+// Refused counts the MOUNT requests the server refused: those that
+// named the armed path after its grant (late), and the rest (other).
+func (s *nfsServer) Refused() (late, other int) { return s.gate.counts() }
+
 // Seal stops taking new connections; the ones already open go on, the
 // mount's among them. It is for after the probe's mount is up: the one
 // grant has gone to it, so the other connections taken before Seal get
@@ -66,17 +71,21 @@ func (s *nfsServer) Close() error {
 }
 
 // mountGate grants the export to one MOUNT request: the first that
-// names the armed path. Every other request gets an access error, and
+// names the armed path, with at most one trailing "/" (the random part
+// is what has to match). Every other request gets an access error, and
 // an empty in-memory filesystem rather than nil: go-nfs makes a root
 // handle even for a refused mount (it does not send it), and a nil
-// filesystem would crash the probe there.
+// filesystem would crash the probe there. The refusals are counted, not
+// their paths.
 type mountGate struct {
 	nfs.Handler
 	refused billy.Filesystem
 
 	mu      sync.Mutex
-	path    []byte // the armed path; nil when no request is to be granted
-	granted bool
+	path    []byte // the armed path; nil when none is
+	granted bool   // the one grant has gone
+	late    int    // refused: named the armed path after its grant
+	other   int    // refused: named another path, or no path was armed
 }
 
 func (g *mountGate) arm() (string, error) {
@@ -96,17 +105,42 @@ func (g *mountGate) disarm() {
 	g.mu.Unlock()
 }
 
+func (g *mountGate) counts() (late, other int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.late, g.other
+}
+
 func (g *mountGate) Mount(ctx context.Context, c net.Conn, req nfs.MountRequest) (nfs.MountStatus, billy.Filesystem, []nfs.AuthFlavor) {
 	g.mu.Lock()
-	ok := g.path != nil && subtle.ConstantTimeCompare(req.Dirpath, g.path) == 1
-	if ok {
-		g.path, g.granted = nil, true
+	named := g.path != nil && namesPath(req.Dirpath, g.path)
+	ok := named && !g.granted
+	switch {
+	case ok:
+		g.granted = true
+	case named:
+		g.late++
+	default:
+		g.other++
 	}
 	g.mu.Unlock()
 	if !ok {
 		return nfs.MountStatusErrAcces, g.refused, nil
 	}
 	return g.Handler.Mount(ctx, c, req)
+}
+
+// namesPath reports whether dirpath is p, or p and one "/".
+func namesPath(dirpath, p []byte) bool {
+	if n := len(dirpath); n == len(p)+1 && dirpath[n-1] == '/' {
+		dirpath = dirpath[:n-1]
+	}
+	return subtle.ConstantTimeCompare(dirpath, p) == 1
+}
+
+// refusedNote says how many MOUNT requests the server refused, for N1.
+func refusedNote(late, other int) string {
+	return fmt.Sprintf("the probe's NFS server refused %d mount request(s) that named the armed path after its grant, and %d that named another path", late, other)
 }
 
 // connListener keeps the connections it accepted, so that closeAll can

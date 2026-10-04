@@ -294,10 +294,11 @@ func refused(t *testing.T, what string, err error) {
 	}
 }
 
-// The server grants one MOUNT: the first for the armed path. It refuses
-// one before Arm, one for any other path, a second one for the armed
-// path, and one from a connection opened before Arm; and it does not
-// arm again after the grant.
+// The server grants one MOUNT: the first for the armed path, which may
+// end in one "/". It refuses one before Arm, one for any other path, a
+// later one for the armed path, and one from a connection opened before
+// Arm; it counts those refusals apart; and it does not arm again after
+// the grant.
 func TestNFSGrantsOneMount(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hi\n"), 0o644); err != nil {
@@ -319,24 +320,30 @@ func TestNFSGrantsOneMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"/wrong", "/", path + "/", path[:len(path)-1], strings.ToLower(path)} {
+	others := []string{"/wrong", "/", path + "//", path[:len(path)-1], path[:len(path)-1] + "/", strings.ToLower(path)}
+	for _, p := range others {
 		_, err := nfsMount(t, srv, p)
 		refused(t, "Mount("+p+")", err)
 	}
-	target, err := nfsMount(t, srv, path)
+	target, err := nfsMount(t, srv, path+"/")
 	if err != nil {
-		t.Fatalf("the armed path was refused: %v", err)
+		t.Fatalf("the armed path with one trailing / was refused: %v", err)
 	}
 	if b := readNFS(t, target, "/hello.txt"); b != "hi\n" {
 		t.Fatalf("read %q", b)
 	}
 	_, err = nfsMount(t, srv, path)
 	refused(t, "a second Mount of the armed path", err)
+	_, err = nfsMount(t, srv, path+"/")
+	refused(t, "a second Mount of the armed path with a trailing /", err)
 	m := nfsc.Mount{Client: early}
 	_, err = m.Mount(path, rpc.AuthNull)
 	refused(t, "Mount of the armed path on a connection opened before Arm", err)
 	if p, err := srv.Arm(); err == nil {
 		t.Errorf("Arm after the grant gave %q", p)
+	}
+	if late, other := srv.Refused(); late != 3 || other != 1+len(others) {
+		t.Errorf("Refused() = %d late, %d other; want 3, %d", late, other, 1+len(others))
 	}
 }
 
