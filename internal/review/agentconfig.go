@@ -25,41 +25,68 @@ import (
 // not care about.
 //
 // jsonConfigs resolves that without any agent-specific logic in the code
-// path: for each named file, changes confined to WriteBack keys are
-// copied to the real file at session end and then drop out of review,
-// while any other key stays in the branch, and Persist keys (which start
-// commands or change trust) are flagged. The agent name appears only
+// path. Each entry names a file and lists key PATHS in two classes:
+//
+//   - writeBack: benign keys the CLI rewrites on its own every run. A
+//     change confined to them is copied to the real file at session end
+//     and then drops out of review.
+//   - persist: keys that start commands or change trust. A change to one
+//     stays in the branch and is flagged "persist".
+//
+// Any other changed key is unknown: it stays in the branch and review
+// lists it by name. A path is dot-separated top-level keys, and one
+// segment may be "*", which matches any key at that level, so
+// "projects.*.lastCost" covers every project's entry. A key whose
+// sub-keys are listed (projects) is compared sub-key by sub-key; a key
+// with no listed sub-keys is compared whole. The agent name appears only
 // here, as data, like the persist tables.
 //
-// WriteBack is an ALLOWLIST, built from what Claude Code was observed to
-// write on its own in a non-interactive run plus account metadata from a
-// login. An unknown key is not on it, so it stays in the branch for
-// review: that costs a review entry, never a silent write.
+// writeBack is an ALLOWLIST, built from what Claude Code 2.1.x was
+// observed to write on its own, in a non-interactive run and in
+// interactive runs driven through a pseudo-terminal: an unknown key is
+// not on it, so it costs a review entry, never a silent write.
 type jsonConfig struct {
 	path      string   // relative to $HOME
-	writeBack []string // benign top-level keys copied back to the real file
-	persist   []string // top-level keys that run code or change trust
+	writeBack []string // benign key paths copied back to the real file
+	persist   []string // key paths that run code or change trust
 }
 
 var jsonConfigs = []jsonConfig{
 	{
 		path: ".claude.json",
-		// Observed written by `claude -p` 2.1.x on its own, plus
-		// numStartups (a startup counter of the same family) and
-		// oauthAccount (account metadata recorded by a login inside the
-		// session). Interactive sessions may write more; those keys stay
-		// in the branch until added here (see the PR notes).
 		writeBack: []string{
+			// Written by a non-interactive `claude -p` run on its own.
 			"firstStartTime", "firstStartVersion", "machineID", "userID",
 			"migrationVersion", "opusProMigrationComplete", "sonnet1m45MigrationComplete",
-			"seenNotifications", "hasResetAutoModeOptInForDefaultOffer",
-			"pluginUsage", "numStartups", "oauthAccount",
+			"seenNotifications", "hasResetAutoModeOptInForDefaultOffer", "pluginUsage",
+			// Written by interactive sessions: startup, onboarding and tip
+			// counters, and markers of what was already shown.
+			"numStartups", "hasCompletedOnboarding", "lastOnboardingVersion",
+			"tipsHistory", "tipLifetimeShownCounts", "tipsHistoryByCommand",
+			"lastReleaseNotesSeen", "lastClawdEntranceVersion",
+			// Account metadata recorded by a login inside the session.
+			"oauthAccount",
+			// Per-project counters an interactive session rewrites on exit.
+			"projects.*.lastSessionId", "projects.*.lastStartTime", "projects.*.lastVersionBase",
+			"projects.*.lastGracefulShutdown", "projects.*.lastCost", "projects.*.lastDuration",
+			"projects.*.lastAPIDuration", "projects.*.lastAPIDurationWithoutRetries",
+			"projects.*.lastToolDuration", "projects.*.lastFpsAverage", "projects.*.lastFpsLow1Pct",
+			"projects.*.lastLinesAdded", "projects.*.lastLinesRemoved",
+			"projects.*.lastTotalInputTokens", "projects.*.lastTotalOutputTokens",
+			"projects.*.lastTotalCacheCreationInputTokens", "projects.*.lastTotalCacheReadInputTokens",
+			"projects.*.lastTotalWebSearchRequests", "projects.*.lastModelUsage",
+			"projects.*.lastSessionMetrics",
 		},
-		// Keys that name commands to run or change what is trusted. A
-		// change to any of these is flagged "persist" in review.
 		persist: []string{
 			"mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "mcpContextUris",
-			"permissions", "allowedTools", "hooks", "env", "projects", "apiKeyHelper",
+			"permissions", "allowedTools", "hooks", "env", "apiKeyHelper",
+			// Answers to "use this API key from the environment?".
+			"customApiKeyResponses",
+			// Per project: tool permissions, MCP servers, folder trust, and
+			// approval of CLAUDE.md imports from outside the project.
+			"projects.*.allowedTools", "projects.*.mcpServers", "projects.*.mcpContextUris",
+			"projects.*.enabledMcpjsonServers", "projects.*.disabledMcpjsonServers",
+			"projects.*.hasTrustDialogAccepted", "projects.*.hasClaudeMdExternalIncludesApproved",
 		},
 	},
 }
@@ -73,11 +100,116 @@ func configFor(rel string) *jsonConfig {
 	return nil
 }
 
-// WriteBackConfigs copies the agent's benign changes to allowlisted keys
-// of each jsonConfig back to the real file, atomically, at session end.
-// It runs only when $HOME was branched (otherwise there is no branch copy
-// to read, and nothing reached the real file to begin with). Any other
-// change is left in the branch for review; a malformed file on either
+type keyClass int
+
+const (
+	classUnknown keyClass = iota
+	classWriteBack
+	classPersist
+)
+
+// keyChange is one changed key path, at the depth the table describes.
+type keyChange struct {
+	path  []string // concrete keys from the top level down
+	class keyClass
+}
+
+// String renders a path for review: keys that are plain identifiers
+// joined with dots, any other key in brackets, since project keys are
+// paths (projects[/home/me/api].allowedTools). Names only, never values.
+func (k keyChange) String() string {
+	if len(k.path) == 0 {
+		return "(whole file)"
+	}
+	var b strings.Builder
+	for i, seg := range k.path {
+		switch {
+		case i == 0:
+			b.WriteString(seg)
+		case plainKey(seg):
+			b.WriteString("." + seg)
+		default:
+			b.WriteString("[" + seg + "]")
+		}
+	}
+	return b.String()
+}
+
+func plainKey(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !(r == '_' || r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
+func patternMatch(pat []string, path []string) bool {
+	if len(pat) != len(path) {
+		return false
+	}
+	for i := range pat {
+		if pat[i] != "*" && pat[i] != path[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// class returns the class of an exact path, and whether the table lists
+// any path below it (so it is compared key by key).
+func (cf *jsonConfig) class(path []string) (c keyClass, listed, below bool) {
+	for _, set := range []struct {
+		pats []string
+		c    keyClass
+	}{{cf.writeBack, classWriteBack}, {cf.persist, classPersist}} {
+		for _, p := range set.pats {
+			pat := strings.Split(p, ".")
+			if patternMatch(pat, path) {
+				c, listed = set.c, true
+			}
+			if len(pat) > len(path) && patternMatch(pat[:len(path)], path) {
+				below = true
+			}
+		}
+	}
+	return c, listed, below
+}
+
+// diff lists the changed key paths between a (the real file) and b (the
+// branch), at the depth the table describes: a listed path is one change,
+// a path with listed sub-paths is compared key by key, anything else is
+// one unknown change.
+func (cf *jsonConfig) diff(prefix []string, a, b json.RawMessage) []keyChange {
+	if canon(a) == canon(b) {
+		return nil
+	}
+	c, listed, below := cf.class(prefix)
+	if listed {
+		return []keyChange{{prefix, c}}
+	}
+	if len(prefix) == 0 || below {
+		am, aok := object(a)
+		bm, bok := object(b)
+		if aok && bok {
+			var out []keyChange
+			for _, k := range unionKeys(am, bm) {
+				out = append(out, cf.diff(append(slices.Clip(prefix), k), am[k], bm[k])...)
+			}
+			return out
+		}
+	}
+	return []keyChange{{prefix, classUnknown}}
+}
+
+// WriteBackConfigs copies the agent's changes to writeBack paths of each
+// jsonConfig to the real file, atomically, at session end. It runs only
+// when $HOME was branched (otherwise there is no branch copy to read, and
+// nothing reached the real file to begin with). Any other change is left
+// in the branch for review; a malformed or non-regular file on either
 // side is left untouched. It returns one human-readable line per file it
 // wrote, for the caller to print. It never changes a key the agent did
 // not, and re-reads the real file so a concurrent host edit to a
@@ -108,16 +240,22 @@ func WriteBackConfigs(s *session.Session) []string {
 			}
 		case !errors.Is(rerr, fs.ErrNotExist):
 			continue // a symlink or other non-regular file: leave it alone
+		default:
+			realRaw = []byte("{}")
 		}
 		var wrote []string
-		for _, k := range cf.writeBack {
-			bv, ok := branch[k]
-			if !ok {
+		for _, ch := range cf.diff(nil, realRaw, branchRaw) {
+			if ch.class != classWriteBack {
 				continue
 			}
-			if rv, ok := real[k]; !ok || canon(rv) != canon(bv) {
-				real[k] = bv
-				wrote = append(wrote, k)
+			var err error
+			if v, ok := getPath(branch, ch.path); ok {
+				err = setPath(real, ch.path, v)
+			} else {
+				err = deletePath(real, ch.path)
+			}
+			if err == nil {
+				wrote = append(wrote, ch.String())
 			}
 		}
 		if len(wrote) > 0 {
@@ -125,26 +263,21 @@ func WriteBackConfigs(s *session.Session) []string {
 				msgs = append(msgs, fmt.Sprintf("could not write %s back: %v", cf.path, err))
 				continue
 			}
-			sort.Strings(wrote)
 			msgs = append(msgs, fmt.Sprintf("~/%s: wrote back %d benign key(s): %s", cf.path, len(wrote), strings.Join(wrote, ", ")))
 		}
 		// If the branch copy now matches the real file, only benign keys
 		// differed, so drop it: review shows nothing for this file.
-		if after, err := readRegular(realPath); err == nil {
-			if afterTop, err := topLevel(after); err == nil && sameTopLevel(branch, afterTop) {
-				_ = os.Remove(branchPath)
-			}
+		if after, err := readRegular(realPath); err == nil && len(cf.diff(nil, after, branchRaw)) == 0 {
+			_ = os.Remove(branchPath)
 		}
 	}
 	return msgs
 }
 
-// configKeyChange describes a change to a jsonConfig file for review: the
-// top-level keys that differ (names only, never values), and whether any
-// of them is a persist key. ok is false when the change is not a config
-// file. Used so review shows "keys: mcpServers" rather than a diff that
-// could print tokens.
-func configKeyChange(c Change) (keys []string, persist bool, ok bool) {
+// configChanges lists a config file's changed key paths for review (names
+// only, never values). ok is false when the change is not a config file;
+// readable is false when either side is not a readable regular JSON file.
+func configChanges(c Change) (changes []keyChange, readable, ok bool) {
 	if c.Layer != "home" || c.IsDir() {
 		return nil, false, false
 	}
@@ -152,18 +285,33 @@ func configKeyChange(c Change) (keys []string, persist bool, ok bool) {
 	if cf == nil {
 		return nil, false, false
 	}
-	branch, berr := topLevelFile(c.Upper)
-	if berr != nil {
-		return nil, false, true // malformed: a change, but no readable keys
+	branchRaw, err := readRegular(c.Upper)
+	if err != nil {
+		return nil, false, true
 	}
-	real, _ := topLevelFile(c.Path)
-	keys = changedKeys(real, branch)
-	for _, k := range keys {
-		if slices.Contains(cf.persist, k) {
+	if _, err := topLevel(branchRaw); err != nil {
+		return nil, false, true
+	}
+	realRaw, err := readRegular(c.Path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		realRaw = []byte("{}")
+	case err != nil:
+		return nil, false, true
+	}
+	return cf.diff(nil, realRaw, branchRaw), true, true
+}
+
+// configKeyChange is configChanges as names, and whether any is persist.
+func configKeyChange(c Change) (keys []string, persist bool, ok bool) {
+	changes, _, ok := configChanges(c)
+	for _, ch := range changes {
+		keys = append(keys, ch.String())
+		if ch.class == classPersist {
 			persist = true
 		}
 	}
-	return keys, persist, true
+	return keys, persist, ok
 }
 
 func topLevel(b []byte) (map[string]json.RawMessage, error) {
@@ -210,28 +358,110 @@ func readRegular(path string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, 16<<20))
 }
 
-// changedKeys is the sorted set of top-level keys whose value differs
-// between two configs (present in one side only counts as changed).
-func changedKeys(a, b map[string]json.RawMessage) []string {
+// object parses an object value; an absent value counts as an empty
+// object, so a key added or removed on one side is compared by sub-key.
+func object(b json.RawMessage) (map[string]json.RawMessage, bool) {
+	m := map[string]json.RawMessage{}
+	if len(b) == 0 {
+		return m, true
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, false
+	}
+	if m == nil { // JSON null
+		m = map[string]json.RawMessage{}
+	}
+	return m, true
+}
+
+func unionKeys(a, b map[string]json.RawMessage) []string {
 	seen := map[string]bool{}
 	var out []string
-	for k := range a {
-		seen[k] = true
-	}
-	for k := range b {
-		seen[k] = true
-	}
-	for k := range seen {
-		if canon(a[k]) != canon(b[k]) {
-			out = append(out, k)
+	for _, m := range []map[string]json.RawMessage{a, b} {
+		for k := range m {
+			if !seen[k] {
+				seen[k] = true
+				out = append(out, k)
+			}
 		}
 	}
 	sort.Strings(out)
 	return out
 }
 
-func sameTopLevel(a, b map[string]json.RawMessage) bool {
-	return len(changedKeys(a, b)) == 0
+var errNotObject = errors.New("not an object")
+
+func getPath(m map[string]json.RawMessage, path []string) (json.RawMessage, bool) {
+	v, ok := m[path[0]]
+	if !ok || len(path) == 1 {
+		return v, ok
+	}
+	child, isObj := object(v)
+	if !isObj {
+		return nil, false
+	}
+	return getPath(child, path[1:])
+}
+
+// setPath sets a value at path, creating objects on the way; it refuses
+// to replace a non-object on the way.
+func setPath(m map[string]json.RawMessage, path []string, v json.RawMessage) error {
+	if len(path) == 1 {
+		m[path[0]] = v
+		return nil
+	}
+	child, ok := object(m[path[0]])
+	if !ok {
+		return errNotObject
+	}
+	if err := setPath(child, path[1:], v); err != nil {
+		return err
+	}
+	b, err := marshalJSON(child, "")
+	if err != nil {
+		return err
+	}
+	m[path[0]] = b
+	return nil
+}
+
+func deletePath(m map[string]json.RawMessage, path []string) error {
+	if len(path) == 1 {
+		delete(m, path[0])
+		return nil
+	}
+	cur, present := m[path[0]]
+	if !present {
+		return nil
+	}
+	child, ok := object(cur)
+	if !ok {
+		return errNotObject
+	}
+	if err := deletePath(child, path[1:]); err != nil {
+		return err
+	}
+	b, err := marshalJSON(child, "")
+	if err != nil {
+		return err
+	}
+	m[path[0]] = b
+	return nil
+}
+
+// marshalJSON encodes without HTML escaping, so values carried through
+// as json.RawMessage keep their characters; indent "" is compact.
+func marshalJSON(v any, indent string) ([]byte, error) {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if indent != "" {
+		enc.SetIndent("", indent)
+	}
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return []byte(strings.TrimSuffix(b.String(), "\n")), nil
 }
 
 // canon returns a value's canonical form (object keys sorted), so two
@@ -258,7 +488,7 @@ func canon(b []byte) string {
 // their exact values (they ride along as json.RawMessage); only the key
 // order is normalized.
 func writeJSONAtomic(path string, obj map[string]json.RawMessage) error {
-	out, err := json.MarshalIndent(obj, "", "  ")
+	out, err := marshalJSON(obj, "  ")
 	if err != nil {
 		return err
 	}

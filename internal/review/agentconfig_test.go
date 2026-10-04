@@ -221,3 +221,97 @@ func TestWriteBackRefusesRealSymlink(t *testing.T) {
 		t.Errorf("real symlink replaced: %v", err)
 	}
 }
+
+// An ordinary interactive run, as observed: counters change at the top
+// level and under the current project's entry. All of it is benign, so
+// all of it is written back and nothing is left for review.
+func TestWriteBackProjectCounters(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1,"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.1,"lastSessionId":"a"}}}`)
+	writeCfg(t, branchPath, `{"numStartups":2,"tipsHistory":{"x":1},"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.2,"lastSessionId":"b","lastDuration":5}}}`)
+
+	WriteBackConfigs(s)
+
+	real := readCfg(t, realPath)
+	p := real["projects"].(map[string]any)["/home/me/api"].(map[string]any)
+	if real["numStartups"] != float64(2) || p["lastCost"] != 0.2 || p["lastSessionId"] != "b" || p["lastDuration"] != float64(5) {
+		t.Errorf("counters not written back: %v", real)
+	}
+	if p["hasTrustDialogAccepted"] != true {
+		t.Errorf("trust lost: %v", p)
+	}
+	if _, err := os.Stat(branchPath); !os.IsNotExist(err) {
+		t.Errorf("an ordinary run left the config in review: %v", err)
+	}
+}
+
+// Next to the counters, the session granted a tool and wrote a sub-key
+// the table does not know: those stay in the branch, by name.
+func TestProjectPersistAndUnknownSubKeys(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.1}}}`)
+	writeCfg(t, branchPath, `{"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":["Bash(*)"],"lastCost":0.2,"somethingNew":1}}}`)
+
+	WriteBackConfigs(s)
+
+	p := readCfg(t, realPath)["projects"].(map[string]any)["/home/me/api"].(map[string]any)
+	if p["lastCost"] != 0.2 {
+		t.Errorf("benign sub-key not written back: %v", p)
+	}
+	if len(p["allowedTools"].([]any)) != 0 || p["somethingNew"] != nil {
+		t.Errorf("non-benign sub-keys reached the real file: %v", p)
+	}
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+	changes, readable, ok := configChanges(c)
+	if !ok || !readable {
+		t.Fatalf("configChanges ok=%v readable=%v", ok, readable)
+	}
+	got := map[string]keyClass{}
+	for _, ch := range changes {
+		got[ch.String()] = ch.class
+	}
+	want := map[string]keyClass{
+		"projects[/home/me/api].allowedTools": classPersist,
+		"projects[/home/me/api].somethingNew": classUnknown,
+	}
+	if len(got) != len(want) {
+		t.Errorf("changes = %v, want %v", got, want)
+	}
+	for k, c := range want {
+		if got[k] != c {
+			t.Errorf("%s: class %v, want %v (all: %v)", k, got[k], c, got)
+		}
+	}
+}
+
+// A session in a new project: its counters may go back, its trust
+// decision may not.
+func TestNewProjectEntryKeepsTrustInBranch(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":3}`)
+	writeCfg(t, branchPath, `{"numStartups":3,"projects":{"/home/me/new":{"hasTrustDialogAccepted":true,"lastCost":0.3}}}`)
+
+	WriteBackConfigs(s)
+
+	p := readCfg(t, realPath)["projects"].(map[string]any)["/home/me/new"].(map[string]any)
+	if p["lastCost"] != 0.3 || p["hasTrustDialogAccepted"] != nil {
+		t.Errorf("real project entry = %v, want only the counter", p)
+	}
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+	keys, persist, _ := configKeyChange(c)
+	if !persist || !slices.Equal(keys, []string{"projects[/home/me/new].hasTrustDialogAccepted"}) {
+		t.Errorf("review: keys=%v persist=%v", keys, persist)
+	}
+}
+
+func TestKeyPathString(t *testing.T) {
+	for path, want := range map[string]string{
+		"mcpServers":                           "mcpServers",
+		"projects\x00/home/me/a.b\x00lastCost": "projects[/home/me/a.b].lastCost",
+		"tipsHistory\x00new-user-warmup":       "tipsHistory.new-user-warmup",
+	} {
+		if got := (keyChange{path: strings.Split(path, "\x00")}).String(); got != want {
+			t.Errorf("%q: %q, want %q", path, got, want)
+		}
+	}
+}
