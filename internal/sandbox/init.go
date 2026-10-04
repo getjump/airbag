@@ -47,10 +47,12 @@ func Init(dir string, tty bool) {
 		fatal("load session", err)
 	}
 	// PID 1 is the supervisor: it holds the raw proxy, control and
-	// forward sockets and the FUSE backing fds. Make it non-dumpable so
-	// the agent, which shares this pid namespace, can neither ptrace it
-	// nor read /proc/1/mem or /proc/1/environ, even where
-	// yama.ptrace_scope=0.
+	// forward sockets and the FUSE backing fds. The agent cannot ptrace
+	// it or read /proc/1/mem mainly because the agent's own user
+	// namespace has no CAP_SYS_PTRACE over PID 1, which lives in the
+	// parent namespace. Setting PR_SET_DUMPABLE=0 is defense in depth:
+	// it also blocks the same access where the agent shares the user
+	// namespace, and keeps /proc/1 owned by root so hidepid can hide it.
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		fatal("protect supervisor", err)
 	}
@@ -149,6 +151,16 @@ func buildWorld(s *session.Session) error {
 			return fmt.Errorf("hide %s: %w", p, err)
 		}
 	}
+	// Device nodes that are a read into the kernel the filter does not
+	// cover: /dev/kmsg is the kernel log (syslog() is refused, but the
+	// log is also a readable device), and /dev/userfaultfd opens a
+	// userfaultfd without the userfaultfd() syscall. hide() is a no-op
+	// when the node is absent.
+	for _, p := range []string{"/dev/kmsg", "/dev/userfaultfd"} {
+		if err := hide(p); err != nil {
+			return fmt.Errorf("hide %s: %w", p, err)
+		}
+	}
 
 	if err := agentConfig(s); err != nil {
 		fmt.Fprintf(os.Stderr, "airbag: warning: agent hooks not installed: %v\n", err)
@@ -195,10 +207,10 @@ func buildWorld(s *session.Session) error {
 	// plain mount.
 	flags := uintptr(unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC)
 	if err := unix.Mount("proc", "/proc", "proc", flags, "hidepid=2"); err != nil {
-		if err := unix.Mount("proc", "/proc", "proc", flags, ""); err != nil {
-			fmt.Fprintf(os.Stderr, "airbag: warning: private /proc unavailable (%v); host processes stay visible\n", err)
+		if err2 := unix.Mount("proc", "/proc", "proc", flags, ""); err2 != nil {
+			fmt.Fprintf(os.Stderr, "airbag: warning: private /proc unavailable (%v); host processes stay visible\n", err2)
 		} else {
-			fmt.Fprintf(os.Stderr, "airbag: warning: /proc without hidepid; other processes stay visible to the agent\n")
+			fmt.Fprintf(os.Stderr, "airbag: warning: /proc without hidepid (%v); other processes stay visible to the agent\n", err)
 		}
 	}
 	return nil
@@ -536,10 +548,18 @@ func runAgent(s *session.Session, ctl *os.File) int {
 		cmd.SysProcAttr.Foreground = true
 		cmd.SysProcAttr.Ctty = 0
 	}
-	// A crash must not write a core dump: it could hold secrets the
-	// agent had in memory. The limit is inherited across fork and exec.
-	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0}); err != nil {
-		fmt.Fprintf(os.Stderr, "airbag: warning: could not disable core dumps: %v\n", err)
+	// A crash must not write a core dump: it could hold secrets the agent
+	// had in memory. The limit (soft and hard) is set to 1, not 0,
+	// because 0 does not stop a core_pattern that pipes to a handler
+	// (systemd-coredump, apport), which the kernel runs regardless of
+	// RLIMIT_CORE; dumpable=0 does not carry over either, since exec
+	// resets it for the agent. A limit of exactly 1 blocks both kinds:
+	// fs/coredump.c coredump_pipe() aborts a pipe dump when
+	// cprm->limit == 1 ("RLIMIT_CORE is set to 1, aborting core"), and
+	// the file path is skipped because 1 < binfmt->min_coredump (a page).
+	// (Linux v6.18.) The limit is inherited across fork and exec.
+	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 1, Max: 1}); err != nil {
+		fmt.Fprintf(os.Stderr, "airbag: warning: could not limit core dumps: %v\n", err)
 	}
 	// Close every inherited fd above stdio before the agent starts, so
 	// a descriptor leaked from airbag's caller cannot reach it (the runc
@@ -551,6 +571,12 @@ func runAgent(s *session.Session, ctl *os.File) int {
 	// already close-on-exec; the agent inherits none of them.
 	closeInheritedFDs()
 	if err := restrictAgent(s.Strict); err != nil {
+		// In --strict mode the filter is part of what the user asked for,
+		// so a failure to install it stops the run rather than silently
+		// leaving the surface open; by default it is best effort.
+		if s.Strict {
+			fatal("install seccomp filter", err)
+		}
 		fmt.Fprintf(os.Stderr, "airbag: warning: %v\n", err)
 	}
 	if err := cmd.Start(); err != nil {

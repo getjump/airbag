@@ -73,18 +73,18 @@ func cmdDoctor() error {
 }
 
 // reportKernelSysctls prints, for information only, host sysctls that
-// bear on the kernel surface. airbag's in-process seccomp filter and
-// /proc hardening already defend each of these inside the sandbox; a
-// hardened host is defense in depth, not a requirement, so none of this
-// fails the check.
+// bear on the kernel surface. airbag already narrows most of this inside
+// the sandbox; a hardened host is defense in depth, not a requirement,
+// so none of this fails the check. Each line says whether airbag also
+// covers it in the sandbox or whether it is host-only.
 func reportKernelSysctls() {
 	sysctls := []struct{ path, reason string }{
 		{"/proc/sys/kernel/unprivileged_bpf_disabled", "1/2 blocks unprivileged bpf() host-wide; airbag refuses bpf in the sandbox"},
 		{"/proc/sys/kernel/io_uring_disabled", "2 disables io_uring host-wide; airbag refuses it in the sandbox"},
 		{"/proc/sys/kernel/perf_event_paranoid", "higher limits perf_event_open; airbag refuses it in the sandbox"},
-		{"/proc/sys/kernel/yama/ptrace_scope", "1+ limits ptrace across processes; airbag relies on dumpable=0 and pid isolation"},
-		{"/proc/sys/kernel/kptr_restrict", "1/2 hides kernel pointers in /proc"},
-		{"/proc/sys/kernel/dmesg_restrict", "1 keeps the kernel log from unprivileged readers"},
+		{"/proc/sys/kernel/yama/ptrace_scope", "1+ limits ptrace across processes; airbag relies on the user-namespace boundary and dumpable=0"},
+		{"/proc/sys/kernel/kptr_restrict", "1/2 hides kernel pointers in /proc (host-wide; not changed inside the sandbox)"},
+		{"/proc/sys/kernel/dmesg_restrict", "1 keeps the kernel log from unprivileged readers; airbag also refuses syslog() and hides /dev/kmsg in the sandbox"},
 		{"/proc/sys/dev/tty/legacy_tiocsti", "0 disables TIOCSTI host-wide; airbag refuses it in the sandbox"},
 	}
 	printed := false
@@ -94,7 +94,7 @@ func reportKernelSysctls() {
 			continue // not present on this kernel
 		}
 		if !printed {
-			fmt.Println("host kernel sysctls (informational; airbag defends these inside the sandbox):")
+			fmt.Println("host kernel sysctls (informational; airbag narrows most of this inside the sandbox):")
 			printed = true
 		}
 		name := strings.TrimPrefix(s.path, "/proc/sys/")
