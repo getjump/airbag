@@ -46,6 +46,31 @@ executables, changes outside the workspace and values from your `.env` files tha
 ended up in the diff. `apply` refuses to overwrite files you changed on the host
 while the agent worked.
 
+## Policies
+
+`airbag.yaml` in the repository (and `~/.config/airbag/airbag.yaml`) adds hosts and
+rules. Rules are [CEL](https://cel.dev) expressions over effects, not over command
+strings, so `bash -c` or a different spelling does not slip past them:
+
+```yaml
+allow: [api.github.com]
+rules:
+  - name: ask-before-sending
+    when: effect.kind == "net.egress"        # curl -d, scp, npm publish, ...
+    verdict: ask
+    message: data leaves the machine
+  - name: never-prod
+    when: command.line.contains("--context prod")
+    verdict: deny
+```
+
+Verdicts are `allow`, `deny` and `ask`; a deny anywhere wins. An `ask` blocks the
+command and tells the agent to have you run `airbag approve a-N`; after that the
+retry passes. For Claude Code the answer arrives through a PreToolUse hook, before
+the command runs. The repository's file is read from the real workspace, so the
+agent cannot loosen its own rules, and a change to it shows up in review as
+`persist`.
+
 ## Install
 
 ```console
@@ -67,13 +92,12 @@ against a model of its effects (`rm -rf` deletes, `curl -d` sends data out, `git
 config core.hooksPath` persists), and known secret values (from `.env` and
 credential-like variables) are masked in output that goes back to the agent.
 
-Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `python3 test/ctrlc.py`
-and `test/claude-e2e.sh` (the real Claude Code binary against a scripted mock of the
+Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `test/policy-e2e.sh`,
+`python3 test/ctrlc.py` and `test/claude-e2e.sh` (the real Claude Code binary against a scripted mock of the
 Messages API). With a real login, follow [docs/manual-test.md](docs/manual-test.md).
 
-Not yet: CEL policies in `airbag.yaml` (predictions are reported, not enforced),
-a local registry mirror, secret handles in files, an interactive review with
-partial apply, Codex hooks.
+Not yet: a local registry mirror, secret handles in files, an interactive review
+with partial apply, Codex hooks.
 
 ## Threat model
 

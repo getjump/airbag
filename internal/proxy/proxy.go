@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/models"
+	"github.com/getjump/airbag/internal/policy"
 )
 
 // DefaultAllow covers model APIs and package registries.
@@ -41,6 +43,8 @@ func (a Allowlist) Allows(host string) bool {
 type Proxy struct {
 	Allow Allowlist
 	Log   *effects.Log
+	// Gate applies policy rules on top of the allowlist (optional).
+	Gate *policy.Gate
 	// Upstream returns the host's own proxy for a target, if any, so
 	// airbag works behind a corporate or sandbox proxy.
 	Upstream func(*url.URL) (*url.URL, error)
@@ -63,10 +67,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		host, _, _ = net.SplitHostPort(r.Host)
 	}
 	target := r.Host
-	if !p.Allow.Allows(host) {
+	if !p.Allow.Allows(host) && (p.Gate == nil || !p.Gate.AllowsHost(host)) {
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "host not in allowlist"})
 		http.Error(w, "airbag: egress to "+host+" denied by policy (host not in allowlist)", http.StatusForbidden)
 		return
+	}
+	if p.Gate != nil {
+		_, port, _ := net.SplitHostPort(target)
+		if d, id := p.Gate.Check(policy.Input{Effect: models.Effect{Kind: "net.connect", Target: host, Detail: port}}); d.Verdict != policy.Allow {
+			p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: d.Verdict, Reason: d.Rule})
+			http.Error(w, policy.Explain(d, id), http.StatusForbidden)
+			return
+		}
 	}
 	p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "allow"})
 	if r.Method == http.MethodConnect {

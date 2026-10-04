@@ -17,6 +17,7 @@ import (
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
 	"github.com/getjump/airbag/internal/outbox"
+	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/steps"
 )
 
@@ -27,6 +28,7 @@ type Server struct {
 	Box   *outbox.Box
 	Log   *effects.Log
 	Steps *steps.Tracker
+	Gate  *policy.Gate
 }
 
 func (s *Server) Serve(l net.Listener) error {
@@ -79,6 +81,25 @@ func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 			s.Steps.Between()
 		}
 		s.Log.Add(effects.Effect{Kind: "tool.call", Target: p.ToolName + ": " + summary, Verdict: "allow", Reason: agent + " " + p.ToolUseID})
+		// Tell the agent before the command runs; the shell shim checks
+		// again for agents without hooks.
+		if p.ToolName == "Bash" && agent == "claude" {
+			var in struct {
+				Command string `json:"command"`
+			}
+			_ = json.Unmarshal(p.ToolInput, &in)
+			cmds, _ := models.Analyze(in.Command)
+			for _, c := range cmds {
+				if d, id := s.judge(c); d.Verdict != policy.Allow {
+					_ = json.NewEncoder(w).Encode(map[string]any{"hookSpecificOutput": map[string]any{
+						"hookEventName":            "PreToolUse",
+						"permissionDecision":       "deny",
+						"permissionDecisionReason": policy.Explain(d, id),
+					}})
+					return
+				}
+			}
+		}
 	case "PostToolUse", "PostToolUseFailure":
 		if s.Steps != nil {
 			s.Steps.Record(p.ToolName, summary, p.ToolUseID)
@@ -104,14 +125,42 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	if e.ParseError != "" {
 		s.Log.Add(effects.Effect{Kind: "proc.exec", Target: clip(e.Script, 200), Verdict: "allow", Reason: "unparsed: " + e.ParseError})
 	}
+	verdict := Verdict{Verdict: policy.Allow}
 	for _, c := range e.Commands {
+		d, id := s.judge(c)
 		var pred []string
 		for _, ef := range c.Effects {
 			pred = append(pred, ef.String())
 		}
-		s.Log.Add(effects.Effect{Kind: "proc.exec", Target: clip(strings.Join(c.Argv, " "), 200), Verdict: "allow", Predict: pred})
+		s.Log.Add(effects.Effect{Kind: "proc.exec", Target: clip(strings.Join(c.Argv, " "), 200), Verdict: d.Verdict, Reason: d.Rule, Predict: pred})
+		if d.Verdict != policy.Allow && verdict.Verdict == policy.Allow {
+			verdict = Verdict{Verdict: d.Verdict, Message: policy.Explain(d, id)}
+		}
 	}
-	_, _ = w.Write([]byte("{}"))
+	_ = json.NewEncoder(w).Encode(verdict)
+}
+
+// Verdict is the answer to the shell shim and to PreToolUse hooks.
+type Verdict struct {
+	Verdict string `json:"verdict"`
+	Message string `json:"message,omitempty"`
+}
+
+// judge runs every predicted effect of a command through the policy.
+// The command itself is an effect too, so rules can match command lines.
+func (s *Server) judge(c models.Command) (policy.Decision, string) {
+	best, bestID := policy.Decision{Verdict: policy.Allow}, ""
+	if s.Gate == nil || len(c.Argv) == 0 {
+		return best, ""
+	}
+	all := append([]models.Effect{{Kind: "proc.exec", Target: c.Argv[0]}}, c.Effects...)
+	for _, ef := range all {
+		d, id := s.Gate.Check(policy.Input{Effect: ef, Argv: c.Argv})
+		if d.Verdict == policy.Deny || (d.Verdict == policy.Ask && best.Verdict == policy.Allow) {
+			best, bestID = d, id
+		}
+	}
+	return best, bestID
 }
 
 func clip(s string, n int) string {
@@ -121,15 +170,18 @@ func clip(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// ReportExec is called by the shell shim inside the sandbox.
-func ReportExec(e Exec) ([]byte, error) {
+// ReportExec is called by the shell shim inside the sandbox. Transport
+// errors count as allow: the shim is a guide, the sandbox is the wall.
+func ReportExec(e Exec) Verdict {
 	body, _ := json.Marshal(e)
+	v := Verdict{Verdict: policy.Allow}
 	resp, err := client(3*time.Second).Post("http://airbag/exec", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return v
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = json.NewDecoder(resp.Body).Decode(&v)
+	return v
 }
 
 // Hook forwards a hook event from inside the sandbox.

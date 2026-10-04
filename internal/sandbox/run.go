@@ -21,6 +21,7 @@ import (
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/outbox"
+	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/steps"
@@ -48,7 +49,8 @@ var DefaultHidden = []string{
 	".config/hub", ".terraform.d/credentials.tfrc.json",
 }
 
-func Run(s *session.Session, allow proxy.Allowlist) (int, error) {
+func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
+	gate := policy.NewGate(pol, s.Dir)
 	log, err := effects.Open(s.EffectsPath())
 	if err != nil {
 		return 1, err
@@ -60,14 +62,16 @@ func Run(s *session.Session, allow proxy.Allowlist) (int, error) {
 		return 1, err
 	}
 	defer pl.Close()
-	go func() { _ = proxy.New(allow, log).Serve(pl) }()
+	px := proxy.New(allow, log)
+	px.Gate = gate
+	go func() { _ = px.Serve(pl) }()
 
 	cl, err := net.Listen("unix", s.ControlSock())
 	if err != nil {
 		return 1, err
 	}
 	defer cl.Close()
-	ctl := &control.Server{Box: outbox.Open(s.OutboxPath()), Log: log, Steps: steps.NewTracker(s)}
+	ctl := &control.Server{Box: outbox.Open(s.OutboxPath()), Log: log, Steps: steps.NewTracker(s), Gate: gate}
 	go func() { _ = ctl.Serve(cl) }()
 
 	// Pass-through dirs must exist on the host, or the agent would

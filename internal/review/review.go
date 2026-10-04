@@ -159,7 +159,7 @@ func sameContent(a, b string) bool {
 // Persistence: files that run code later, outside the sandbox.
 var persistWS = []string{
 	".git/hooks/", ".git/config", ".github/workflows/", ".gitlab-ci.yml", ".envrc",
-	".claude/", ".mcp.json", ".codex/", ".vscode/tasks.json", ".devcontainer/",
+	".claude/", ".mcp.json", ".codex/", ".vscode/tasks.json", ".devcontainer/", "airbag.yaml",
 }
 
 var persistHome = []string{

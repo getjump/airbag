@@ -42,7 +42,10 @@ func Shell(name string, args []string) {
 	if perr != nil {
 		report.ParseError = perr.Error()
 	}
-	_, _ = control.ReportExec(report)
+	if v := control.ReportExec(report); v.Verdict != "allow" && v.Verdict != "" {
+		fmt.Fprintln(os.Stderr, v.Message)
+		os.Exit(126)
+	}
 
 	// Masking needs a pipe; background jobs would hold it open, so such
 	// scripts run unfiltered.

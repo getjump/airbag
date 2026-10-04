@@ -99,6 +99,18 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		renderSteps(w, sts)
 	}
 	renderShell(w, effs)
+	var blocked []effects.Effect
+	for _, e := range effs {
+		if (e.Verdict == "deny" || e.Verdict == "ask") && e.Kind != "net.egress" {
+			blocked = append(blocked, e)
+		}
+	}
+	if len(blocked) > 0 {
+		fmt.Fprintf(w, "\nBlocked    %d by policy\n", len(blocked))
+		for _, e := range blocked {
+			fmt.Fprintf(w, "  %-4s %-40s %s\n", e.Verdict, clip(e.Target, 40), e.Reason)
+		}
+	}
 
 	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))
 	for _, in := range intents {
@@ -237,13 +249,16 @@ func renderSteps(w io.Writer, sts []steps.Step) {
 			changed = append(changed, st)
 		}
 	}
-	calls := 0
+	calls, changing := 0, 0
 	for _, st := range sts {
 		if st.Tool != "-" {
 			calls++
+			if len(st.Changes) > 0 {
+				changing++
+			}
 		}
 	}
-	fmt.Fprintf(w, "\nSteps      %d tool calls, %d of them changed files\n", calls, len(changed))
+	fmt.Fprintf(w, "\nSteps      %d tool calls, %d of them changed files\n", calls, changing)
 	for i, st := range changed {
 		if i == maxListed {
 			fmt.Fprintf(w, "  … and %d more\n", len(changed)-maxListed)

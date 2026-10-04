@@ -16,6 +16,7 @@ import (
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/outbox"
+	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/review"
 	"github.com/getjump/airbag/internal/sandbox"
@@ -35,6 +36,7 @@ const usage = `airbag — approve outcomes, not commands
   airbag discard [ID] [--yes] throw the branch away
   airbag ls                   list sessions
   airbag log [ID]             raw effect log
+  airbag approve [ID]         list or approve requests blocked by an "ask" rule
   airbag doctor               check that this machine can run airbag
 
 ID defaults to the newest open session of the current workspace.
@@ -80,6 +82,8 @@ func main() {
 		err = withSession(args, cmdLog)
 	case "doctor":
 		err = cmdDoctor()
+	case "approve":
+		err = cmdApprove(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -125,6 +129,11 @@ func cmdRun(args []string) (int, error) {
 	if ws == home || ws == "/" {
 		return 1, fmt.Errorf("refusing to use %s as the workspace; cd into a project", ws)
 	}
+	pol, err := policy.Load(ws, home)
+	if err != nil {
+		return 1, fmt.Errorf("policy: %w", err)
+	}
+	allow = append(allow, pol.Allow...)
 	s, err := session.Create(session.Meta{
 		Workspace: ws, Home: home, OverHome: !*noHome,
 		UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
@@ -136,7 +145,10 @@ func cmdRun(args []string) (int, error) {
 	}
 	fmt.Fprintf(os.Stderr, "airbag: session %s · branch of %s%s · network: allowlist only\n",
 		s.ID, ws, map[bool]string{true: " and ~", false: ""}[s.OverHome])
-	code, err := sandbox.Run(s, proxy.Allowlist(s.Allow))
+	if len(pol.Sources) > 1 {
+		fmt.Fprintf(os.Stderr, "airbag: policy: %s\n", strings.Join(pol.Sources, " + "))
+	}
+	code, err := sandbox.Run(s, proxy.Allowlist(s.Allow), pol)
 	if err != nil {
 		return code, err
 	}
@@ -160,7 +172,9 @@ func cmdRun(args []string) (int, error) {
 // live in hooks anyway.
 func cmdHook(agent, event string) {
 	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, 4<<20))
-	_, _ = control.Hook(agent, event, payload)
+	if out, err := control.Hook(agent, event, payload); err == nil && len(out) > 0 && string(out) != "{}" {
+		_, _ = os.Stdout.Write(out)
+	}
 	os.Exit(0)
 }
 
@@ -306,6 +320,43 @@ func cmdDiscard(args []string) error {
 	}
 	fmt.Printf("Discarded %s. Nothing happened.\n", s.ID)
 	return nil
+}
+
+// cmdApprove lets a running agent continue past an "ask" rule:
+// `airbag approve` lists pending requests, `airbag approve a-3` (or
+// `all`) approves.
+func cmdApprove(args []string) error {
+	var id, sid string
+	for _, a := range args {
+		if strings.HasPrefix(a, "s-") {
+			sid = a
+		} else {
+			id = a
+		}
+	}
+	s, err := findSession(sid)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		asks, _ := policy.ReadAsks(s.Dir)
+		n := 0
+		for _, a := range asks {
+			if !a.Approved {
+				fmt.Printf("%-5s %-24s %s  %s\n", a.ID, a.Rule, a.What, a.Message)
+				n++
+			}
+		}
+		if n == 0 {
+			fmt.Println("No pending requests.")
+		}
+		return nil
+	}
+	done, err := policy.Approve(s.Dir, id)
+	for _, a := range done {
+		fmt.Printf("Approved %s: %s (%s). The agent can retry.\n", a.ID, a.What, a.Rule)
+	}
+	return err
 }
 
 // withPendingIntents finds an applied session of this workspace whose
