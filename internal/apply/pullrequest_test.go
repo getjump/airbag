@@ -201,3 +201,25 @@ func TestPreapprovedRequestStillRequiresCurrentProof(t *testing.T) {
 		t.Fatal("stored approval bypassed preflight")
 	}
 }
+
+func TestLiveExecutorCannotBeMarkedUnknown(t *testing.T) {
+	s, b, it := prFixture(t)
+	if err := b.Approve(it.ID, it.RequestDigest); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Claim(it.ID, it.RequestDigest); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := b.LockExecution()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Close() }()
+	var out bytes.Buffer
+	if err := runIntents(s, b, false, nil, Options{Yes: true, Out: &out}); err == nil {
+		t.Fatal("ran recovery alongside a live executor")
+	}
+	if status(t, b, it.ID) != outbox.Running {
+		t.Fatal("recovered the live executor as crashed")
+	}
+}

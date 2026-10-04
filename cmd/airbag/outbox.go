@@ -16,6 +16,7 @@ type outboxPreview struct {
 	ID      string             `json:"id"`
 	Status  string             `json:"status"`
 	Preview *operation.Preview `json:"preview,omitempty"`
+	Result  *operation.Result  `json:"result,omitempty"`
 	Argv    []string           `json:"argv,omitempty"` // legacy commands have no typed preview
 }
 
@@ -49,6 +50,9 @@ func cmdOutbox(args []string) error {
 		for _, row := range rows {
 			if row.Preview != nil {
 				outbox.WritePreview(safe, row.ID, row.Status, *row.Preview)
+				if row.Result != nil {
+					fmt.Fprintf(safe, "  outcome: %s %s\n", row.Result.Outcome, row.Result.Value)
+				}
 			} else {
 				fmt.Fprintf(safe, "%s [%s] %s (legacy command; no typed preview)\n", row.ID, row.Status, outbox.Line(row.Argv))
 			}
@@ -60,7 +64,7 @@ func cmdOutbox(args []string) error {
 func previewOutbox(intents []outbox.Intent) ([]outboxPreview, error) {
 	rows := make([]outboxPreview, 0, len(intents))
 	for _, it := range intents {
-		row := outboxPreview{ID: it.ID, Status: it.Status}
+		row := outboxPreview{ID: it.ID, Status: it.Status, Result: it.TypedResult()}
 		if it.Request != nil {
 			p, err := it.Request.Preview()
 			if err != nil {

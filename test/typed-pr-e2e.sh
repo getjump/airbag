@@ -84,6 +84,8 @@ assert p['body'] == 'reviewed body\n' and p['head'] == 'work' and p['draft']
 assert not p['maintainer_can_modify']
 r = json.load(open(sys.argv[2]))
 assert r['outbox'][0]['status'] == 'done'
+assert r['outbox'][0]['result']['outcome'] == 'completed'
+assert r['outbox'][0]['result']['value'] == 'https://github.com/getjump/airbag/pull/7'
 PY
 "$AIRBAG" apply "$s1" --yes >/dev/null
 [ "$(grep -c -- '--method POST' "$L/calls")" = 1 ] || fail "published twice"

@@ -27,6 +27,36 @@ func decodeRequest(encoded, digest, kind string, request *operation.Request) err
 	return nil
 }
 
+// TypedResult exposes execution evidence separately from the proposed request.
+// An old/absent result is not invented into a success or a remote URL.
+func (in Intent) TypedResult() *operation.Result {
+	if in.Request == nil {
+		return nil
+	}
+	r := operation.Result{Ticket: in.ID, RequestDigest: in.RequestDigest}
+	switch in.Status {
+	case Pending, string(operation.Approved):
+		r.Outcome = operation.Queued
+		return &r
+	case Rejected:
+		r.Outcome, r.Value = operation.Denied, in.Output
+		return &r
+	case Done, Unknown, Failed:
+		if err := json.Unmarshal([]byte(in.Output), &r); err != nil {
+			if in.Status == Unknown {
+				return &operation.Result{Ticket: in.ID, RequestDigest: in.RequestDigest, Outcome: operation.Uncertain, Value: in.Output}
+			}
+			return nil
+		}
+		expected := map[string]operation.Outcome{Done: operation.Succeeded, Unknown: operation.Uncertain, Failed: operation.Failure}[in.Status]
+		if r.Ticket != in.ID || r.RequestDigest != in.RequestDigest || r.Outcome != expected {
+			return nil
+		}
+		return &r
+	}
+	return nil
+}
+
 // Approve binds a human decision to exactly the stored request. It cannot
 // authorize different payload bytes, a different commit, or a terminal intent.
 func (b *Box) Approve(id, digest string) error {

@@ -33,6 +33,10 @@ alongside the usual stderr notice. It has not created a PR and returns no PR
 URL. Missing flags, unsupported options and capture errors are refused rather
 than downgraded to a generic host command.
 
+`airbag review --json` and `airbag outbox --json` expose the typed `result`
+separately from the request: `queued` has a ticket, `completed` carries the
+confirmed PR URL, and `unknown` carries uncertainty, never an invented success.
+
 On the host:
 
 ```sh
