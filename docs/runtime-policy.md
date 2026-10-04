@@ -117,8 +117,10 @@ approve different arguments to the same executable.
 
 The private runtime socketpair is inherited by PID 1, not mounted into the
 agent view. The agent-facing shim/control socket cannot forge runtime events.
-The host commits each decision to the append-only SQLite log before releasing
-the operation. Transport timeout/loss and audit commit failures deny access.
+Checks for one operation use one RPC and transaction. Independent in-flight
+operations can share a commit without a fixed batching delay. The host commits
+every evaluated decision to the append-only SQLite log (WAL, synchronous=FULL)
+before releasing any operation in that commit group. Transport timeout/loss and audit commit failures deny access.
 Audit records have source, PID, target, detail, and exec argv; they contain
 attempts/entry-point decisions, not proof an operation completed successfully.
 The ordinary log continues to read old sessions. `log --json` exposes context;
@@ -137,9 +139,29 @@ CI runs it on Ubuntu 24.04 alongside all existing E2E tests.
 `sh test/runtime-policy-bench.sh` reports median wall times for a small C build
 and a Python filesystem workload with the original sandbox, file policy, exec
 policy, and both flags. CI records those measurements as a diagnostic, not a
-performance guarantee or a fixed pass/fail threshold. Durable per-entry audit
-and synchronous CEL checks necessarily add latency; measure cold and warm
-builds of your actual project before changing the default.
+performance guarantee or a fixed pass/fail threshold. The filesystem uses a
+100 ms positive metadata/name cache, no negative cache and no cached policy
+verdicts. Mutations are handled through go-fuse's normal inode updates; backing
+changes made outside FUSE can remain visible with stale metadata for up to that
+TTL. Open and mutation callbacks still check policy, even on a cached inode.
+Directory listings stream getdents entries without an eager stat per child.
+Rename moves a tree of stable path identities instead of scanning all known
+inodes; successful deletion releases that identity subtree.
+
+`test/runtime-build-bench.py` measures real builds of Airbag, with a fixed source
+snapshot and pre/post-optimization binaries paired on the same runner. CI runs
+`go build -p 1` and `-p 2` independently, two trials per condition, with three
+unchanged and three incremental builds after each empty-cache build. Modes are
+the original sandbox, exec only, FUSE only, and both; pre-optimization FUSE/both
+are also measured. Incremental changes affect one package in `cmd/airbag`.
+Module downloads happen beforehand, network fetching is disabled, CGO is off,
+and VCS stamping is disabled consistently. Cold means empty Go build cache,
+not empty OS page cache; compiler temporary files use the private `/tmp`. Phase
+wall times exclude mount/setup and the final review scan; session wall and CPU
+times include those costs. JSONL artifacts preserve every sample and audit
+counts. These results describe this Go project and runner, not npm installs or
+large C++ builds. Durable audit and synchronous CEL checks still add latency;
+measure your actual project before changing the default.
 
 Networking continues to use the existing isolated network namespace and forced
 proxy. There is no direct egress interface to monitor with an additional eBPF

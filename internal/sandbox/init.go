@@ -206,7 +206,7 @@ func buildWorld(s *session.Session, client *runtimepolicy.Client) error {
 		// workspace commonly lives under HOME. HOME first, workspace last.
 		var views []*policyfs.View
 		for _, path := range []string{s.Home, s.Workspace} {
-			view, err := policyfs.Capture(path, client.Check, beforeRead)
+			view, err := policyfs.Capture(path, client.CheckBatch, beforeRead)
 			if err != nil {
 				return fmt.Errorf("capture policy view %s: %w", path, err)
 			}

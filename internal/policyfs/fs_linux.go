@@ -8,7 +8,6 @@ package policyfs
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,17 +20,40 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type Check func(runtimepolicy.Request) error
+type Check func([]runtimepolicy.Request) error
 type BeforeRead func(path string, pid uint32, fd int) error
 
-type inodeKey struct {
-	rel      string
-	dev, ino uint64
+type backingKey struct{ dev, ino uint64 }
+type inodeTree struct {
+	children   map[string]*inodeTree
+	identities map[backingKey]uint64
+}
+
+func (t *inodeTree) child(name string, create bool) *inodeTree {
+	if t.children == nil && create {
+		t.children = make(map[string]*inodeTree)
+	}
+	if t.children[name] == nil && create {
+		t.children[name] = &inodeTree{}
+	}
+	return t.children[name]
+}
+func (t *inodeTree) path(rel string, create bool) *inodeTree {
+	if rel == "." {
+		return t
+	}
+	for _, name := range strings.Split(rel, "/") {
+		t = t.child(name, create)
+		if t == nil {
+			return nil
+		}
+	}
+	return t
 }
 
 type View struct {
 	mu         sync.Mutex
-	inodes     map[inodeKey]uint64
+	inodes     inodeTree
 	nextInode  uint64
 	fd         int
 	path       string
@@ -46,7 +68,7 @@ func Capture(path string, check Check, beforeRead BeforeRead) (*View, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &View{fd: fd, path: filepath.Clean(path), check: check, beforeRead: beforeRead, inodes: map[inodeKey]uint64{}, nextInode: 1 << 40}, nil
+	return &View{fd: fd, path: filepath.Clean(path), check: check, beforeRead: beforeRead, nextInode: 1 << 40}, nil
 }
 
 // Stable identities are essential: dentry revalidation must not detach the
@@ -55,34 +77,46 @@ func Capture(path string, check Check, beforeRead BeforeRead) (*View, error) {
 func (v *View) inode(rel string, dev, ino uint64) uint64 {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	key := inodeKey{rel, dev, ino}
-	if id := v.inodes[key]; id != 0 {
+	t := v.inodes.path(rel, true)
+	key := backingKey{dev, ino}
+	if id := t.identities[key]; id != 0 {
 		return id
 	}
+	if t.identities == nil {
+		t.identities = make(map[backingKey]uint64)
+	}
 	v.nextInode++
-	v.inodes[key] = v.nextInode
+	t.identities[key] = v.nextInode
 	return v.nextInode
 }
-func under(path, dir string) bool { return path == dir || strings.HasPrefix(path, dir+"/") }
+
+// Move the identity subtree by its parent links: O(path depth), independent of
+// the number of unrelated files or descendants. Keep aliases path-specific.
 func (v *View) renamed(src, dst string, exchange bool) {
+	if src == dst {
+		return
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	moved := map[inodeKey]uint64{}
-	for key, id := range v.inodes {
-		if under(key.rel, src) {
-			delete(v.inodes, key)
-			key.rel = dst + strings.TrimPrefix(key.rel, src)
-			moved[key] = id
-		} else if under(key.rel, dst) {
-			delete(v.inodes, key)
-			if exchange {
-				key.rel = src + strings.TrimPrefix(key.rel, dst)
-				moved[key] = id
-			}
-		}
+	a := v.inodes.path(filepath.Dir(src), true)
+	b := v.inodes.path(filepath.Dir(dst), true)
+	x, y := a.child(filepath.Base(src), false), b.child(filepath.Base(dst), false)
+	delete(a.children, filepath.Base(src))
+	delete(b.children, filepath.Base(dst))
+	if x != nil {
+		b.child(filepath.Base(dst), true)
+		b.children[filepath.Base(dst)] = x
 	}
-	for key, id := range moved {
-		v.inodes[key] = id
+	if exchange && y != nil {
+		a.child(filepath.Base(src), true)
+		a.children[filepath.Base(src)] = y
+	}
+}
+func (v *View) removed(rel string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if p := v.inodes.path(filepath.Dir(rel), false); p != nil {
+		delete(p.children, filepath.Base(rel))
 	}
 }
 
@@ -90,9 +124,10 @@ func (v *View) Close() error { return unix.Close(v.fd) }
 
 func (v *View) Mount() (*fuse.Server, error) {
 	zero := time.Duration(0)
+	metadataTTL := 100 * time.Millisecond
 	server, err := fs.Mount(v.path, &node{view: v}, &fs.Options{
 		MountOptions: fuse.MountOptions{DirectMount: true, DirectMountStrict: true, FsName: "airbag-policy", Name: "airbag", Options: []string{"default_permissions"}, EnableLocks: true},
-		AttrTimeout:  &zero, EntryTimeout: &zero, NegativeTimeout: &zero,
+		AttrTimeout:  &metadataTTL, EntryTimeout: &metadataTTL, NegativeTimeout: &zero,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", v.path, err)
@@ -121,14 +156,20 @@ func callerPID(ctx context.Context) uint32 {
 	}
 	return c.Pid
 }
-func (n *node) gate(ctx context.Context, rel, kind, detail string) syscall.Errno {
+func (n *node) request(ctx context.Context, rel, kind, detail string) runtimepolicy.Request {
+	return runtimepolicy.Request{Source: "fuse", Kind: kind, Target: n.absolute(rel), Detail: detail, PID: callerPID(ctx)}
+}
+func (n *node) gates(requests []runtimepolicy.Request) syscall.Errno {
 	if n.view.check == nil {
 		return syscall.EACCES
 	}
-	if err := n.view.check(runtimepolicy.Request{Source: "fuse", Kind: kind, Target: n.absolute(rel), Detail: detail, PID: callerPID(ctx)}); err != nil {
+	if err := n.view.check(requests); err != nil {
 		return syscall.EACCES
 	}
 	return 0
+}
+func (n *node) gate(ctx context.Context, rel, kind, detail string) syscall.Errno {
+	return n.gates([]runtimepolicy.Request{n.request(ctx, rel, kind, detail)})
 }
 
 func validName(name string) bool {
@@ -199,22 +240,68 @@ func (n *node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	f := os.NewFile(uintptr(fd), "policy-dir")
-	defer f.Close()
-	entries, err := f.ReadDir(-1)
-	if err != nil {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
 		return nil, fs.ToErrno(err)
 	}
-	var out []fuse.DirEntry
-	for _, entry := range entries {
-		var st unix.Stat_t
-		if err := unix.Fstatat(fd, entry.Name(), &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			continue
-		}
-		out = append(out, fuse.DirEntry{Name: entry.Name(), Mode: st.Mode, Ino: n.view.inode(n.child(entry.Name()), uint64(st.Dev), st.Ino)})
-	}
-	return fs.NewListDirStream(out), 0
+	return &dirStream{fd: fd, view: n.view, rel: rel, dev: uint64(st.Dev), buf: make([]byte, 8192)}, 0
 }
+
+// getdents supplies names, types and backing inode numbers without one stat per
+// child. Lookup still fetches authoritative attributes (including mount roots).
+// The descriptor is CLOEXEC and is pinned inside the captured view.
+type dirStream struct {
+	fd        int
+	view      *View
+	rel       string
+	dev       uint64
+	buf, todo []byte
+	errno     syscall.Errno
+	eof       bool
+}
+
+func (d *dirStream) HasNext() bool {
+	if len(d.todo) == 0 && d.errno == 0 && !d.eof {
+		n, err := unix.Getdents(d.fd, d.buf)
+		d.errno = fs.ToErrno(err)
+		if n > 0 {
+			d.todo = d.buf[:n]
+		} else {
+			d.eof = true
+		}
+	}
+	return len(d.todo) != 0 || d.errno != 0
+}
+func (d *dirStream) Next() (fuse.DirEntry, syscall.Errno) {
+	if !d.HasNext() {
+		return fuse.DirEntry{}, 0
+	}
+	if d.errno != 0 {
+		e := d.errno
+		d.errno = 0
+		return fuse.DirEntry{}, e
+	}
+	var entry fuse.DirEntry
+	n := entry.Parse(d.todo)
+	if n <= 0 || n > len(d.todo) {
+		d.eof = true
+		d.todo = nil
+		return entry, syscall.EIO
+	}
+	d.todo = d.todo[n:]
+	entry.Ino = d.view.inode(filepath.Join(d.rel, entry.Name), d.dev, entry.Ino)
+	return entry, 0
+}
+func (d *dirStream) Close() {
+	if d.fd >= 0 {
+		unix.Close(d.fd)
+		d.fd = -1
+	}
+	d.eof = true
+	d.todo = nil
+}
+
 func (n *node) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 	rel := n.rel()
 	if e := n.gate(ctx, rel, "fs.read", "readlink"); e != 0 {
@@ -232,19 +319,15 @@ func (n *node) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 	}
 	return buf[:count], 0
 }
-func (n *node) openCheck(ctx context.Context, rel string, flags uint32) syscall.Errno {
+func (n *node) openChecks(ctx context.Context, rel string, flags uint32) []runtimepolicy.Request {
+	var requests []runtimepolicy.Request
 	if flags&syscall.O_ACCMODE != syscall.O_WRONLY {
-		if e := n.gate(ctx, rel, "fs.read", "open"); e != 0 {
-			return e
-		}
-
+		requests = append(requests, n.request(ctx, rel, "fs.read", "open"))
 	}
 	if flags&syscall.O_ACCMODE != syscall.O_RDONLY || flags&(syscall.O_TRUNC|syscall.O_CREAT) != 0 {
-		if e := n.gate(ctx, rel, "fs.write", "open"); e != 0 {
-			return e
-		}
+		requests = append(requests, n.request(ctx, rel, "fs.write", "open"))
 	}
-	return 0
+	return requests
 }
 func (n *node) open(ctx context.Context, rel string, flags uint32, mode uint32) (fs.FileHandle, syscall.Errno) {
 	fd, name, err := n.parent(rel)
@@ -266,7 +349,7 @@ func (n *node) open(ctx context.Context, rel string, flags uint32, mode uint32) 
 }
 func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	rel := n.rel()
-	if e := n.openCheck(ctx, rel, flags); e != 0 {
+	if e := n.gates(n.openChecks(ctx, rel, flags)); e != 0 {
 		return nil, 0, e
 	}
 	f, e := n.open(ctx, rel, flags, 0)
@@ -277,13 +360,12 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 		return nil, nil, 0, syscall.EINVAL
 	}
 	rel := n.child(name)
-	if e := n.openCheck(ctx, rel, flags|syscall.O_CREAT); e != 0 {
-		return nil, nil, 0, e
-	}
+	requests := n.openChecks(ctx, rel, flags|syscall.O_CREAT)
 	if mode&0o111 != 0 {
-		if e := n.gate(ctx, rel, "fs.exec_bit", "create"); e != 0 {
-			return nil, nil, 0, e
-		}
+		requests = append(requests, n.request(ctx, rel, "fs.exec_bit", "create"))
+	}
+	if e := n.gates(requests); e != 0 {
+		return nil, nil, 0, e
 	}
 	f, e := n.open(ctx, rel, flags|syscall.O_CREAT, mode)
 	if e != 0 {
@@ -353,7 +435,11 @@ func (n *node) remove(ctx context.Context, name string, flags int) syscall.Errno
 		return fs.ToErrno(err)
 	}
 	defer unix.Close(fd)
-	return fs.ToErrno(unix.Unlinkat(fd, name, flags))
+	if err := unix.Unlinkat(fd, name, flags); err != nil {
+		return fs.ToErrno(err)
+	}
+	n.view.removed(n.child(name))
+	return 0
 }
 func (n *node) Unlink(ctx context.Context, name string) syscall.Errno { return n.remove(ctx, name, 0) }
 func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
@@ -372,10 +458,12 @@ func (n *node) Rename(ctx context.Context, name string, newparent fs.InodeEmbedd
 	if flags&unix.RENAME_EXCHANGE != 0 {
 		checks = append(checks, [3]string{src, "fs.write", "rename-exchange"})
 	}
+	requests := make([]runtimepolicy.Request, 0, len(checks))
 	for _, c := range checks {
-		if e := n.gate(ctx, c[0], c[1], c[2]); e != 0 {
-			return e
-		}
+		requests = append(requests, n.request(ctx, c[0], c[1], c[2]))
+	}
+	if e := n.gates(requests); e != 0 {
+		return e
 	}
 	a, err := n.view.dir(n.rel())
 	if err != nil {
@@ -418,13 +506,11 @@ func (n *node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 	if !validName(name) {
 		return nil, syscall.EINVAL
 	}
-	if e := n.gate(ctx, t.rel(), "fs.read", "link-source"); e != 0 {
-		return nil, e
-	}
-	if e := n.gate(ctx, t.rel(), "fs.write", "link-source"); e != 0 {
-		return nil, e
-	}
-	if e := n.gate(ctx, n.child(name), "fs.write", "link"); e != 0 {
+	if e := n.gates([]runtimepolicy.Request{
+		n.request(ctx, t.rel(), "fs.read", "link-source"),
+		n.request(ctx, t.rel(), "fs.write", "link-source"),
+		n.request(ctx, n.child(name), "fs.write", "link"),
+	}); e != 0 {
 		return nil, e
 	}
 	a, oldname, err := n.parent(t.rel())
@@ -444,13 +530,12 @@ func (n *node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 }
 func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	rel := n.rel()
-	if e := n.gate(ctx, rel, "fs.write", "setattr"); e != 0 {
-		return e
-	}
+	requests := []runtimepolicy.Request{n.request(ctx, rel, "fs.write", "setattr")}
 	if mode, ok := in.GetMode(); ok && mode&0o111 != 0 {
-		if e := n.gate(ctx, rel, "fs.exec_bit", "chmod"); e != 0 {
-			return e
-		}
+		requests = append(requests, n.request(ctx, rel, "fs.exec_bit", "chmod"))
+	}
+	if e := n.gates(requests); e != 0 {
+		return e
 	}
 	if f, ok := fh.(fs.FileSetattrer); ok {
 		return f.Setattr(ctx, in, out)

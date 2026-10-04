@@ -38,3 +38,44 @@ jobs:
           python3 test/ctrlc.py
       - name: runtime policy build cost (diagnostic)
         run: sh test/runtime-policy-bench.sh
+
+  runtime-build-bench:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        parallelism: [1, 2]
+    env:
+      BENCH_BEFORE_SHA: 543fe189b85a0e85870ee9d92244eb2d89385280
+      BENCH_SOURCE_SHA: 543fe189b85a0e85870ee9d92244eb2d89385280
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build paired binaries and fixed source snapshot
+        run: |
+          mkdir "$RUNNER_TEMP/airbag-bench-source"
+          git archive "$BENCH_SOURCE_SHA" | tar -x -C "$RUNNER_TEMP/airbag-bench-source"
+          (cd "$RUNNER_TEMP/airbag-bench-source" && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag-before" ./cmd/airbag)
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag-after" ./cmd/airbag
+          sudo install -m 755 "$RUNNER_TEMP/airbag-after" /usr/local/bin/airbag
+          go mod download
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo chmod 666 /dev/fuse
+      - name: cold, unchanged, and incremental builds (paired)
+        run: |
+          python3 test/runtime-build-bench.py \
+            --before "$RUNNER_TEMP/airbag-before" --after "$RUNNER_TEMP/airbag-after" \
+            --source "$RUNNER_TEMP/airbag-bench-source" \
+            --parallelism ${{ matrix.parallelism }} --trials 2 \
+            --output "$RUNNER_TEMP/build-bench-p${{ matrix.parallelism }}.jsonl"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runtime-build-p${{ matrix.parallelism }}
+          path: ${{ runner.temp }}/build-bench-p${{ matrix.parallelism }}.jsonl

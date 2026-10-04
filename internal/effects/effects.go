@@ -1,5 +1,5 @@
 // Package effects is the append-only effect log of a session, a SQLite
-// database with one table. Triggers refuse updates and deletes, so the
+// database. Triggers refuse updates and deletes, so the
 // log is the source of truth for review and audit:
 //
 //	sqlite3 /var/tmp/airbag-$UID/s-…/effects.db 'select kind, count(*) from events group by 1'
@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Effect is a fact: something changed or something left the machine.
+// Effect records an observed attempt, outcome, or command prediction.
 type Effect struct {
 	Time    time.Time `json:"t"`
 	Kind    string    `json:"kind"`              // net.egress, intent.git_push, ...
@@ -57,12 +57,13 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 `
 
 type Log struct {
-	mu sync.Mutex
-	db *sql.DB
+	mu             sync.Mutex
+	db             *sql.DB
+	event, context *sql.Stmt
 }
 
 func Open(path string) (*Log, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +72,18 @@ func Open(path string) (*Log, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Log{db: db}, nil
+	event, err := db.Prepare(`INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	context, err := db.Prepare(`INSERT INTO event_context (id, data) VALUES (?, ?)`)
+	if err != nil {
+		event.Close()
+		db.Close()
+		return nil, err
+	}
+	return &Log{db: db, event: event, context: context}, nil
 }
 
 func (l *Log) Add(e Effect) { _ = l.AddChecked(e) }
@@ -79,12 +91,14 @@ func (l *Log) Add(e Effect) { _ = l.AddChecked(e) }
 // AddChecked commits the event and runtime context before an intercepted
 // operation is released. Logging failures must not turn into unaudited allows.
 func (l *Log) AddChecked(e Effect) error {
-	if e.Time.IsZero() {
-		e.Time = time.Now()
-	}
-	pred, _ := json.Marshal(e.Predict)
-	if e.Predict == nil {
-		pred = []byte("[]")
+	return l.AddBatchChecked([]Effect{e})
+}
+
+// AddBatchChecked commits all events atomically, with WAL synchronous=FULL.
+// Callers must withhold every corresponding allow until this returns nil.
+func (l *Log) AddBatchChecked(batch []Effect) error {
+	if len(batch) == 0 {
+		return nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -93,22 +107,40 @@ func (l *Log) AddChecked(e Effect) error {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
-		e.Time.UTC().Format(time.RFC3339Nano), e.Kind, e.Target, e.Verdict, e.Reason, string(pred))
-	if err != nil {
-		return err
-	}
-	if e.Source != "" {
-		id, err := result.LastInsertId()
+	events, contexts := tx.Stmt(l.event), tx.Stmt(l.context)
+	defer events.Close()
+	defer contexts.Close()
+	for _, e := range batch {
+		if e.Time.IsZero() {
+			e.Time = time.Now()
+		}
+		pred, _ := json.Marshal(e.Predict)
+		if e.Predict == nil {
+			pred = []byte("[]")
+		}
+		result, err := events.Exec(
+			e.Time.UTC().Format(time.RFC3339Nano), e.Kind, e.Target, e.Verdict, e.Reason, string(pred))
 		if err != nil {
 			return err
 		}
-		ctx, err := json.Marshal(e)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec("INSERT INTO event_context (id, data) VALUES (?, ?)", id, string(ctx)); err != nil {
-			return err
+		if e.Source != "" {
+			id, err := result.LastInsertId()
+			if err != nil {
+				return err
+			}
+			// Store only extra fields; the event row already holds the rest.
+			ctx, err := json.Marshal(struct {
+				Source string   `json:"source"`
+				PID    uint32   `json:"pid,omitempty"`
+				Detail string   `json:"detail,omitempty"`
+				Argv   []string `json:"argv,omitempty"`
+			}{e.Source, e.PID, e.Detail, e.Argv})
+			if err != nil {
+				return err
+			}
+			if _, err := contexts.Exec(id, string(ctx)); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()

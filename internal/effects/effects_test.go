@@ -69,3 +69,40 @@ func TestLegacyLogAndRuntimeContext(t *testing.T) {
 		}
 	}
 }
+
+func TestBatchAtomicAndFullDurability(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	var syncMode int
+	if err := l.db.QueryRow("PRAGMA synchronous").Scan(&syncMode); err != nil || syncMode != 2 {
+		t.Fatalf("synchronous=%d err=%v", syncMode, err)
+	}
+	// Fail the second insert after the first event/context were written.
+	if _, err := l.db.Exec(`CREATE TRIGGER reject_test BEFORE INSERT ON events WHEN NEW.target='reject' BEGIN SELECT RAISE(ABORT, 'test failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	batch := []Effect{{Kind: "fs.read", Target: "first", Source: "fuse", PID: 12}, {Kind: "fs.write", Target: "reject", Source: "fuse", PID: 13}}
+	if err := l.AddBatchChecked(batch); err == nil {
+		t.Fatal("partial batch accepted")
+	}
+	got, err := Read(path)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("partial commit: %+v %v", got, err)
+	}
+	var contexts int
+	if err := l.db.QueryRow("SELECT count(*) FROM event_context").Scan(&contexts); err != nil || contexts != 0 {
+		t.Fatalf("orphan context: %d %v", contexts, err)
+	}
+	batch[1].Target = "second"
+	if err := l.AddBatchChecked(batch); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Read(path)
+	if err != nil || len(got) != 2 || got[0].Target != "first" || got[1].PID != 13 {
+		t.Fatalf("batch roundtrip: %+v %v", got, err)
+	}
+}

@@ -4,6 +4,7 @@ package policyfs
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -14,9 +15,16 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-func testRoot(t *testing.T, dir string, check Check) *node {
+func testRoot(t *testing.T, dir string, check func(runtimepolicy.Request) error) *node {
 	t.Helper()
-	v, err := Capture(dir, check, nil)
+	v, err := Capture(dir, func(rs []runtimepolicy.Request) error {
+		for _, r := range rs {
+			if err := check(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,5 +145,62 @@ func TestLookupIdentityStableAndRenameKeepsIdentity(t *testing.T) {
 	f, e := moved.Operations().(*node).Lookup(ctx, "file", &entry)
 	if e != 0 || f.StableAttr().Ino != file.StableAttr().Ino {
 		t.Fatal("renamed descendant lost identity")
+	}
+}
+
+func TestIdentityTreeExchangeAndRemoval(t *testing.T) {
+	v := &View{nextInode: 1 << 40}
+	a := v.inode("a/sub/file", 1, 2)
+	b := v.inode("b/file", 1, 3)
+	unrelated := v.inode("unrelated/file", 1, 4)
+	v.renamed("a", "b", true)
+	if v.inode("b/sub/file", 1, 2) != a || v.inode("a/file", 1, 3) != b || v.inode("unrelated/file", 1, 4) != unrelated {
+		t.Fatal("exchange damaged identities")
+	}
+	v.removed("b")
+	if v.inode("b/sub/file", 1, 2) == a {
+		t.Fatal("removed subtree kept stale identity")
+	}
+	// A directory entry on a mount may name the underlying mountpoint inode.
+	// It must not change the identity previously learned from authoritative stat.
+	id := v.inode("mount", 10, 20)
+	v.inode("mount", 1, 99)
+	if v.inode("mount", 10, 20) != id {
+		t.Fatal("readdir changed mount identity")
+	}
+}
+
+func TestLazyReaddirUsesPinnedDescriptor(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 600; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprint(i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := testRoot(t, dir, func(runtimepolicy.Request) error { return nil })
+	stream, e := root.Readdir(context.Background())
+	if e != 0 {
+		t.Fatal(e)
+	}
+	defer stream.Close()
+	if len(root.view.inodes.children) != 0 {
+		t.Fatal("readdir eagerly populated every inode")
+	}
+	seen := map[string]bool{}
+	for stream.HasNext() {
+		entry, e := stream.Next()
+		if e != 0 {
+			t.Fatal(e)
+		}
+		if entry.Name == "." || entry.Name == ".." {
+			continue
+		}
+		if entry.Mode&syscall.S_IFMT != syscall.S_IFREG || entry.Ino == 0 || seen[entry.Name] {
+			t.Fatalf("invalid entry: %+v", entry)
+		}
+		seen[entry.Name] = true
+	}
+	if len(seen) != 600 {
+		t.Fatalf("missing entries: %d", len(seen))
 	}
 }
