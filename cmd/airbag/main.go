@@ -27,12 +27,12 @@ import (
 	"github.com/getjump/airbag/internal/term"
 )
 
-const usage = `airbag — approve outcomes, not commands
+const usage = `airbag â€” approve outcomes, not commands
 
   airbag run [--allow HOST]... [--no-home] [--session ID|last] -- AGENT [ARGS...]
       run the agent in a branch of the workspace and $HOME (--session: on the
       branch of a stopped session, with its outbox and labels)
-  airbag review [ID]          what the agent changed, sent and queued
+  airbag review [ID] [--json] what the agent changed, sent and queued
   airbag diff [ID] [PATH...]  unified diff of changed files
   airbag apply [ID] [-i] [--only PATH]... [--yes] [--force] [--trust-git]
                               write the branch (or part of it) to the real files,
@@ -77,7 +77,7 @@ func main() {
 	case "run":
 		code, err = cmdRun(args)
 	case "review", "status":
-		err = withSession(args, cmdReview)
+		err = cmdReview(args)
 	case "diff":
 		err = cmdDiff(args)
 	case "apply":
@@ -208,7 +208,7 @@ func cmdRun(args []string) (int, error) {
 			fmt.Fprintln(os.Stderr, "airbag: tip: Codex's own sandbox asks per command and cuts the network; airbag already branches the machine, so --dangerously-bypass-approvals-and-sandbox leaves the review to the end")
 		}
 	}
-	fmt.Fprintf(os.Stderr, "airbag: session %s · branch of %s%s · network: allowlist only\n",
+	fmt.Fprintf(os.Stderr, "airbag: session %s Â· branch of %s%s Â· network: allowlist only\n",
 		s.ID, ws, map[bool]string{true: " and ~", false: ""}[s.OverHome])
 	var hiddenEnv []string
 	for _, kv := range os.Environ() {
@@ -281,7 +281,23 @@ func withSession(args []string, f func(*session.Session) error) error {
 	return f(s)
 }
 
-func cmdReview(s *session.Session) error {
+func cmdReview(args []string) error {
+	fs := flag.NewFlagSet("review", flag.ContinueOnError)
+	jsonOutput := fs.Bool("json", false, "write the review as JSON")
+	if err := fs.Parse(reorder(args)); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("review accepts at most one session ID")
+	}
+	id := ""
+	if fs.NArg() == 1 {
+		id = fs.Arg(0)
+	}
+	s, err := findSession(id)
+	if err != nil {
+		return err
+	}
 	cs, err := review.Scan(s)
 	if err != nil {
 		return err
@@ -289,6 +305,9 @@ func cmdReview(s *session.Session) error {
 	effs, _ := effects.Read(s.EffectsPath())
 	intents := listIntents(s)
 	sts, _ := steps.Read(s)
+	if *jsonOutput {
+		return review.WriteJSON(os.Stdout, review.Collect(s, cs, effs, intents, sts))
+	}
 	out := term.Safe(os.Stdout)
 	defer out.Flush()
 	review.Render(out, s, cs, effs, intents, sts)

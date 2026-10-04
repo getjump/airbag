@@ -3,13 +3,11 @@ package review
 import (
 	"fmt"
 	"io"
-	"net"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/outbox"
@@ -36,11 +34,11 @@ var homeNoise = []struct{ match, group, kind string }{
 const maxListed = 40
 
 func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect, intents []outbox.Intent, sts []steps.Step) {
-	dur := "running"
-	if !s.Ended.IsZero() {
-		dur = s.Ended.Sub(s.Created).Round(time.Second).String()
-	}
-	fmt.Fprintf(w, "Session %s · %s · %s · exit %d · %s\n\n", s.ID, strings.Join(s.Argv, " "), dur, s.ExitCode, s.Status)
+	report := Collect(s, cs, effs, intents, sts)
+	cs = report.Changes
+	sts = report.Steps
+	dur := report.Session.Duration
+	fmt.Fprintf(w, "Session %s · %s · %s · exit %d · %s\n\n", report.Session.ID, strings.Join(report.Session.Argv, " "), dur, report.Session.ExitCode, report.Session.Status)
 
 	var ws, home []Change
 	for _, c := range cs {
@@ -75,75 +73,49 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		var shown []Change
 		for _, c := range home {
 			if group, kind := Noise(c.Rel); group != "" && !flagged(c) {
-				folded[group+"… ("+kind+")"]++
+				folded[group+"â€¦ ("+kind+")"]++
 				continue
 			}
 			if repo := GitDir(c.Rel); repo != "" && !flagged(c) {
-				folded[repo+"… (git internals)"]++
+				folded[repo+"â€¦ (git internals)"]++
 				continue
 			}
 			shown = append(shown, c)
 		}
 		list(w, shown, "~/")
 		for _, dir := range sortedKeys(folded) {
-			fmt.Fprintf(w, "  · ~/%s %d files\n", dir, folded[dir])
+			fmt.Fprintf(w, "  Â· ~/%s %d files\n", dir, folded[dir])
 		}
 	}
 
-	allowed, denied, cut := map[string]int{}, map[string]int{}, map[string]int{}
-	for _, e := range effs {
-		if e.Kind != "net.egress" {
-			continue
-		}
-		host, _, err := net.SplitHostPort(e.Target)
-		if err != nil {
-			host = e.Target
-		}
-		switch e.Verdict {
-		case "deny":
-			denied[e.Target]++
-		case "cut":
-			cut[e.Target]++
-		default:
-			allowed[host]++
-		}
-	}
+	allowed := report.Network.Allowed.Hosts
+	denied := report.Network.Denied.Hosts
+	cut := report.Network.Cut.Hosts
 	var reads []string
-	for _, e := range effs {
-		if e.Kind == "secret.read" {
-			reads = append(reads, fmt.Sprintf("%s by %s", e.Target, e.Reason))
-		}
+	for _, read := range report.SecretsRead {
+		reads = append(reads, fmt.Sprintf("%s by %s", read.File, read.Program))
 	}
 	if len(reads) > 0 {
-		fmt.Fprintf(w, "\nSecrets    read: %s\n           egress was limited to model APIs and cached packages from then on\n", strings.Join(reads, ", "))
+		fmt.Fprintf(w, "\nSecrets read: %s\n             egress was limited to model APIs and cached packages from then on\n", strings.Join(reads, ", "))
 	}
 	var untrusted []string
-	seenU := map[string]bool{}
-	for _, e := range effs {
-		if e.Kind == "label" && e.Verdict == "untrusted" && !seenU[e.Target] {
-			seenU[e.Target] = true
-			untrusted = append(untrusted, e.Target)
+	for _, label := range report.Labels {
+		if label.Label == "untrusted" {
+			untrusted = append(untrusted, label.Source)
 		}
 	}
 	if len(untrusted) > 0 {
-		fmt.Fprintf(w, "\nUntrusted  input pulled from: %s\n", strings.Join(untrusted, ", "))
+		fmt.Fprintf(w, "\nUntrusted input pulled from: %s\n", strings.Join(untrusted, ", "))
 	}
-	var pkgs []string
-	seenPkg := map[string]bool{}
-	for _, e := range effs {
-		if e.Kind == "pkg.fetch" && !seenPkg[e.Target] {
-			seenPkg[e.Target] = true
-			pkgs = append(pkgs, e.Target)
-		}
-	}
+	pkgs := report.Packages
 	if len(pkgs) > 0 {
 		fmt.Fprintf(w, "\nPackages   %d fetched through the mirror\n", len(pkgs))
-		for i, p := range pkgs {
+		for i, pkg := range pkgs {
 			if i == maxListed {
 				fmt.Fprintf(w, "  … and %d more\n", len(pkgs)-maxListed)
 				break
 			}
-			fmt.Fprintf(w, "  %s\n", p)
+			fmt.Fprintf(w, "  %s\n", pkg)
 		}
 	}
 	fmt.Fprintf(w, "\nNetwork    %d allowed%s\n", total(allowed), hostList(allowed))
@@ -158,22 +130,16 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		renderSteps(w, sts)
 	}
 	renderShell(w, effs)
-	var blocked []effects.Effect
-	for _, e := range effs {
-		if (e.Verdict == "deny" || e.Verdict == "ask") && e.Kind != "net.egress" {
-			blocked = append(blocked, e)
-		}
-	}
-	if len(blocked) > 0 {
-		fmt.Fprintf(w, "\nBlocked    %d by policy\n", len(blocked))
-		for _, e := range blocked {
-			fmt.Fprintf(w, "  %-4s %-40s %s\n", e.Verdict, clip(e.Target, 40), e.Reason)
+	if len(report.BlockedEffects) > 0 {
+		fmt.Fprintf(w, "\nBlocked    %d by policy\n", len(report.BlockedEffects))
+		for _, event := range report.BlockedEffects {
+			fmt.Fprintf(w, "  %-4s %-40s %s\n", event.Verdict, clip(event.Target, 40), event.Rule)
 		}
 	}
 
-	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))
-	for _, in := range intents {
-		fmt.Fprintf(w, "  %-4s %-44s %s\n", in.ID, strings.Join(in.Argv, " "), in.Status)
+	fmt.Fprintf(w, "\nOutbox     %d\n", len(report.Outbox))
+	for _, intent := range report.Outbox {
+		fmt.Fprintf(w, "  %-4s %-44s %s\n", intent.ID, strings.Join(intent.Argv, " "), intent.Status)
 	}
 
 	if att := Attention(cs); len(att) > 0 {
@@ -185,7 +151,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	if d > 50 {
 		fmt.Fprintf(w, "  ! %d files deleted in the workspace\n", d)
 	}
-	fmt.Fprintf(w, "\nNext: airbag diff [path] · airbag apply [-i] · airbag discard\n")
+	fmt.Fprintf(w, "\nNext: airbag diff [path] Â· airbag apply [-i] Â· airbag discard\n")
 }
 
 func counts(cs []Change) (a, m, d int) {
@@ -215,7 +181,7 @@ func list(w io.Writer, all []Change, prefix string) {
 	}
 	for i, c := range cs {
 		if i == maxListed {
-			fmt.Fprintf(w, "  … and %d more\n", len(cs)-maxListed)
+			fmt.Fprintf(w, "  â€¦ and %d more\n", len(cs)-maxListed)
 			return
 		}
 		mark := map[string]string{Added: "+", Modified: "~", Deleted: "-", Replaced: "!"}[c.Kind]
@@ -297,7 +263,7 @@ func hostList(m map[string]int) string {
 	sort.SliceStable(keys, func(i, j int) bool { return m[keys[i]] > m[keys[j]] })
 	var parts []string
 	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf("%s ×%d", k, m[k]))
+		parts = append(parts, fmt.Sprintf("%s Ã—%d", k, m[k]))
 	}
 	return ": " + strings.Join(parts, ", ")
 }
@@ -339,7 +305,7 @@ func renderSteps(w io.Writer, sts []steps.Step) {
 	fmt.Fprintf(w, "\nSteps      %d tool calls, %d of them changed files\n", calls, changing)
 	for i, st := range changed {
 		if i == maxListed {
-			fmt.Fprintf(w, "  … and %d more\n", len(changed)-maxListed)
+			fmt.Fprintf(w, "  â€¦ and %d more\n", len(changed)-maxListed)
 			return
 		}
 		var shown []string
@@ -374,7 +340,7 @@ func renderSteps(w io.Writer, sts []steps.Step) {
 		for _, kind := range sortedKeys(noise) {
 			shown = append(shown, fmt.Sprintf("(%s: %d files)", kind, noise[kind]))
 		}
-		fmt.Fprintf(w, "  #%-3d %-6s %-38s → %s\n", st.N, st.Tool, clip(st.Summary, 38), strings.Join(shown, " "))
+		fmt.Fprintf(w, "  #%-3d %-6s %-38s â†’ %s\n", st.N, st.Tool, clip(st.Summary, 38), strings.Join(shown, " "))
 	}
 }
 
@@ -382,7 +348,7 @@ func clip(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	return s[:n-1] + "â€¦"
 }
 
 // Predicted effects worth a look before applying.
@@ -417,10 +383,10 @@ func renderShell(w io.Writer, effs []effects.Effect) {
 	fmt.Fprintf(w, "\nShell      %d commands, %d worth a look\n", total, len(rows))
 	for i, r := range rows {
 		if i == maxListed {
-			fmt.Fprintf(w, "  … and %d more\n", len(rows)-maxListed)
+			fmt.Fprintf(w, "  â€¦ and %d more\n", len(rows)-maxListed)
 			return
 		}
-		fmt.Fprintf(w, "  $ %-40s → %s\n", clip(r.cmd, 40), r.pred)
+		fmt.Fprintf(w, "  $ %-40s â†’ %s\n", clip(r.cmd, 40), r.pred)
 	}
 }
 

@@ -30,14 +30,14 @@ const (
 )
 
 type Change struct {
-	Layer string // "ws" or "home"
-	Rel   string // path inside the layer
-	Path  string // real path on the host
-	Upper string // path of the new version in the session
-	Kind  string
-	Type  fs.FileMode // fs.ModeDir, fs.ModeSymlink or 0 for files
-	Mode  fs.FileMode
-	Flags []string
+	Layer string      `json:"layer"` // "ws" or "home"
+	Rel   string      `json:"path"`  // path inside the layer
+	Path  string      `json:"-"`     // real path on the host
+	Upper string      `json:"-"`     // path of the new version in the session
+	Kind  string      `json:"kind"`
+	Type  fs.FileMode `json:"-"` // fs.ModeDir, fs.ModeSymlink or 0 for files
+	Mode  fs.FileMode `json:"-"`
+	Flags []string    `json:"flags"`
 }
 
 func (c Change) IsDir() bool { return c.Type == fs.ModeDir }
