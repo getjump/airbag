@@ -424,6 +424,12 @@ func TestOwnWriteRecordsOnlyAirbagsWrite(t *testing.T) {
 	if re, err := session.Load(s.Dir); err != nil || !OwnWrite(re, realPath) {
 		t.Fatalf("the record is not saved with the session: %v", err)
 	}
+	if err := os.Chmod(realPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if OwnWrite(s, realPath) {
+		t.Fatal("a later host chmod counts as airbag's write")
+	}
 	writeCfg(t, realPath, `{"numStartups":3}`)
 	if OwnWrite(s, realPath) {
 		t.Fatal("a later host edit counts as airbag's write")

@@ -128,7 +128,19 @@ func buildWorld(s *session.Session) error {
 		views := make([]string, len(s.BranchHoles))
 		for i, h := range s.BranchHoles {
 			src := filepath.Join(s.Home, h)
-			if st, err := os.Lstat(src); err != nil || !st.IsDir() {
+			st, err := os.Lstat(src)
+			if errors.Is(err, os.ErrNotExist) {
+				// An earlier run of this session deleted the hole or its
+				// parent (a project directory that was not passed through
+				// then): a whiteout hides the real directory. New
+				// directories there are opaque, so the deletion of what
+				// was in them stands and the view has a mountpoint again.
+				if err := os.MkdirAll(src, 0o700); err != nil {
+					return fmt.Errorf("branch hole ~/%s: %w", h, err)
+				}
+				st, err = os.Lstat(src)
+			}
+			if err != nil || !st.IsDir() {
 				return fmt.Errorf("branch hole ~/%s: not a directory", h)
 			}
 			view := s.MountDir(fmt.Sprintf("hole-%d", i))

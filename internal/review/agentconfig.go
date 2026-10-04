@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/getjump/airbag/internal/session"
 )
 
@@ -259,7 +261,7 @@ func WriteBackConfigs(s *session.Session) []string {
 		// in an earlier run of this session.
 		hostEdited := false
 		if rerr == nil {
-			if fi, err := os.Lstat(realPath); err == nil && fi.ModTime().After(since) && s.WroteBack[realPath] != digest(realRaw) {
+			if fi, err := os.Lstat(realPath); err == nil && fi.ModTime().After(since) && s.WroteBack[realPath].SHA256 != digest(realRaw) {
 				hostEdited = true
 			}
 		}
@@ -283,13 +285,12 @@ func WriteBackConfigs(s *session.Session) []string {
 			}
 			msgs = append(msgs, fmt.Sprintf("~/%s: wrote back %d benign key(s): %s", cf.path, len(wrote), strings.Join(wrote, ", ")))
 			if s.WroteBack == nil {
-				s.WroteBack = map[string]string{}
+				s.WroteBack = map[string]session.WriteStamp{}
 			}
-			after, err := readRegular(realPath)
-			if hostEdited || err != nil {
-				delete(s.WroteBack, realPath)
+			if st, ok := stamp(realPath); ok && !hostEdited {
+				s.WroteBack[realPath] = st
 			} else {
-				s.WroteBack[realPath] = digest(after)
+				delete(s.WroteBack, realPath)
 			}
 			saved = true
 		}
@@ -313,16 +314,30 @@ func digest(b []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// OwnWrite reports whether the file at path holds exactly what
-// WriteBackConfigs wrote there in this session, so its change time is
-// airbag's and not a host edit.
+// stamp reads a regular file's content digest and change time.
+func stamp(path string) (session.WriteStamp, bool) {
+	b, err := readRegular(path)
+	if err != nil {
+		return session.WriteStamp{}, false
+	}
+	var st unix.Stat_t
+	if err := unix.Lstat(path, &st); err != nil {
+		return session.WriteStamp{}, false
+	}
+	return session.WriteStamp{SHA256: digest(b), Ctime: st.Ctim.Nano()}, true
+}
+
+// OwnWrite reports whether the file at path is exactly as
+// WriteBackConfigs left it in this session: the same content and the
+// same change time, so no host edit since, a chmod included. Its newer
+// change time is then airbag's and not a host edit.
 func OwnWrite(s *session.Session, path string) bool {
 	want, ok := s.WroteBack[path]
 	if !ok {
 		return false
 	}
-	b, err := readRegular(path)
-	return err == nil && digest(b) == want
+	got, ok := stamp(path)
+	return ok && got == want
 }
 
 // configChanges lists a config file's changed key paths for review (names

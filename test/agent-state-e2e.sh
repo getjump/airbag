@@ -115,6 +115,23 @@ $(cat "$T/run.out")"
 [ "$(tail -1 "$proj/memory/OLD.md")" = "kept by apply" ] || fail "apply did not write the memory edit: $(cat "$proj/memory/OLD.md")"
 [ ! -e "$proj/memory/GONE.md" ] || fail "apply did not carry the memory delete"
 
+# A project directory that is not passed through is in the branch, so a
+# session started at the root may delete a subdirectory's project dir,
+# memory included. Resumed from that subdirectory, the session passes its
+# transcripts through and serves its memory from the branch: the deletion
+# stays, and the real memory is untouched.
+subslug=$(printf '%s' "$ws/sub2" | sed 's#/#-#g')
+mkdir -p "$ws/sub2" "$HOME/.claude/projects/$subslug/memory"
+echo 'sub memory' > "$HOME/.claude/projects/$subslug/memory/SUB.md"
+"$AIRBAG" run -- rm -rf "$HOME/.claude/projects/$subslug" >"$T/run.out" 2>&1 || fail "project dir delete run failed:
+$(cat "$T/run.out")"
+(cd "$ws/sub2" && "$AIRBAG" run --session last -- ls -a "$HOME/.claude/projects/$subslug/memory" >"$T/run.out" 2>&1) ||
+	fail "resume after deleting the project dir failed:
+$(cat "$T/run.out")"
+grep -q SUB.md "$T/run.out" && fail "deleted memory is visible again after resume: $(cat "$T/run.out")"
+[ -f "$HOME/.claude/projects/$subslug/memory/SUB.md" ] || fail "the memory delete reached the real home"
+"$AIRBAG" discard --yes >/dev/null
+
 # A third session changes a benign counter and a reviewed key together,
 # as Claude Code does when it adds trust or an MCP server: the counter is
 # written back at session end, and that write of airbag's own is not a
