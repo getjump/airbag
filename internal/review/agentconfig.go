@@ -367,10 +367,6 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		if err != nil {
 			return "", false // a symlink or other non-regular file: leave it alone
 		}
-		mode := os.FileMode(0o600) // the mode the replacement is given
-		if fi, err := os.Lstat(realPath); err == nil {
-			mode = fi.Mode().Perm()
-		}
 		if !exists && haveBase && !absent {
 			// The file was there when the run began (its base is not
 			// empty): the host removed it since. That is a host edit;
@@ -465,7 +461,7 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 			return fmt.Sprintf("could not write ~/%s back: %v", cf.path, err), false
 		}
 		out = append(out, '\n')
-		err = replaceIf(realPath, out, realRaw, exists, filepath.Join(s.Dir, "displaced"), func() bool {
+		installed, err := replaceIf(realPath, out, realRaw, exists, filepath.Join(s.Dir, "displaced"), func() bool {
 			now, nowExists, err := fileState(realPath)
 			return err == nil && nowExists == exists && now == before
 		})
@@ -490,13 +486,12 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		if s.WroteBack == nil {
 			s.WroteBack = map[string]session.WriteStamp{}
 		}
-		// Only airbag's own bytes with the mode it gave them: a host
-		// chmod right after the write is not airbag's.
+		// The record is airbag's bytes with the change time the file had
+		// as it took its place: any later change, a host chmod or xattr
+		// included, moves the change time, and apply sees a conflict.
 		beforeStamp()
-		after, ok := stamp(realPath)
-		fi, ferr := os.Lstat(realPath)
-		if ok && !hostEdited && after.SHA256 == digest(out) && ferr == nil && fi.Mode().Perm() == mode {
-			s.WroteBack[realPath] = after
+		if !hostEdited && installed != 0 {
+			s.WroteBack[realPath] = session.WriteStamp{SHA256: digest(out), Ctime: installed}
 		} else {
 			delete(s.WroteBack, realPath)
 		}
@@ -896,10 +891,27 @@ func writeAtomic(path string, data []byte, unchanged func() bool) error {
 // the filesystem gets no write-back at all (errNoAtomic). A file this
 // displaces that is not airbag's own is never deleted: if one is left
 // over, it is moved to keepDir and reported as a *keptError.
-func replaceIf(path string, data, want []byte, existed bool, keepDir string, unchanged func() bool) (err error) {
+//
+// installed is the replacement's change time, read through a descriptor
+// right after it took its place: any later change to the file, data or
+// metadata, moves the change time past it.
+func replaceIf(path string, data, want []byte, existed bool, keepDir string, unchanged func() bool) (installed int64, err error) {
 	tmp, mode, err := writeTemp(path, data)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	f, err := os.Open(tmp) // follows the replacement's inode wherever it is renamed
+	if err != nil {
+		_ = os.Remove(tmp)
+		return 0, err
+	}
+	defer func() { _ = f.Close() }() // read only
+	ctime := func() int64 {
+		var st unix.Stat_t
+		if unix.Fstat(int(f.Fd()), &st) != nil {
+			return 0
+		}
+		return st.Ctim.Nano()
 	}
 	accepted := false
 	defer func() {
@@ -914,33 +926,37 @@ func replaceIf(path string, data, want []byte, existed bool, keepDir string, unc
 		_ = os.Remove(tmp)
 	}()
 	if !unchanged() {
-		return errChanged
+		return 0, errChanged
 	}
 	if !existed {
 		err := renameNoReplace(tmp, path)
+		installed = ctime()
 		switch {
 		case errors.Is(err, fs.ErrExist):
-			return errChanged // the host created it meanwhile
+			return 0, errChanged // the host created it meanwhile
 		case cannotSwap(err):
-			return errNoAtomic
+			return 0, errNoAtomic
+		case err != nil:
+			return 0, err
 		}
-		return err
+		return installed, nil
 	}
 	err = renameExchange(tmp, path)
+	installed = ctime()
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return errChanged // the host removed it meanwhile
+		return 0, errChanged // the host removed it meanwhile
 	case cannotSwap(err):
-		return errNoAtomic
+		return 0, errNoAtomic
 	case err != nil:
-		return err
+		return 0, err
 	}
 	// What was displaced must be what this attempt read, with the mode
 	// the replacement was given: a host chmod in between is a change too.
 	if got, err := readRegular(tmp); err == nil && bytes.Equal(got, want) {
 		if fi, err := os.Lstat(tmp); err == nil && fi.Mode().Perm() == mode {
 			accepted = true
-			return nil
+			return installed, nil
 		}
 	}
 	afterSwap()
@@ -949,14 +965,14 @@ func replaceIf(path string, data, want []byte, existed bool, keepDir string, unc
 	// newer host write: swap once more, so the newer write is at path.
 	// Whatever host write ends up displaced is kept, not deleted.
 	if err := renameExchange(tmp, path); err != nil {
-		return err
+		return 0, err
 	}
 	if got, err := readRegular(tmp); err != nil || !bytes.Equal(got, data) {
 		if err := renameExchange(tmp, path); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return errChanged
+	return 0, errChanged
 }
 
 // errNoAtomic: the filesystem cannot swap or create a file atomically.

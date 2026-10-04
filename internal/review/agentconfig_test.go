@@ -745,7 +745,7 @@ func TestReplaceIfKeepsARacingHostWrite(t *testing.T) {
 		}
 		return true
 	}
-	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), hostWrite); !errors.Is(err, errChanged) {
+	if _, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), hostWrite); !errors.Is(err, errChanged) {
 		t.Fatalf("err = %v, want errChanged", err)
 	}
 	if got := readCfg(t, p); got["a"] != "host" {
@@ -754,14 +754,14 @@ func TestReplaceIfKeepsARacingHostWrite(t *testing.T) {
 	// Absent at the start, created by the host meanwhile: not replaced.
 	q := filepath.Join(dir, "new.json")
 	hostCreate := func() bool { writeCfg(t, q, `{"b":"host"}`); return true }
-	if err := replaceIf(q, []byte(`{"b":2}`), nil, false, filepath.Join(dir, "kept"), hostCreate); !errors.Is(err, errChanged) {
+	if _, err := replaceIf(q, []byte(`{"b":2}`), nil, false, filepath.Join(dir, "kept"), hostCreate); !errors.Is(err, errChanged) {
 		t.Fatalf("err = %v, want errChanged", err)
 	}
 	if got := readCfg(t, q); got["b"] != "host" {
 		t.Fatalf("file = %v, want the host's file kept", got)
 	}
 	// Unchanged: replaced, and no scratch file is left.
-	if err := replaceIf(p, []byte(`{"a":3}`), []byte(`{"a":"host"}`), true, filepath.Join(dir, "kept"), func() bool { return true }); err != nil {
+	if _, err := replaceIf(p, []byte(`{"a":3}`), []byte(`{"a":"host"}`), true, filepath.Join(dir, "kept"), func() bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	if got := readCfg(t, p); got["a"] != float64(3) {
@@ -784,7 +784,7 @@ func TestReplaceIfKeepsARacingChmod(t *testing.T) {
 		}
 		return true
 	}
-	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), chmod); !errors.Is(err, errChanged) {
+	if _, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), chmod); !errors.Is(err, errChanged) {
 		t.Fatalf("err = %v, want errChanged", err)
 	}
 	fi, err := os.Stat(p)
@@ -808,7 +808,7 @@ func TestReplaceIfUndoKeepsTheNewestHostWrite(t *testing.T) {
 	afterSwap = func() { replace(`{"a":"second"}`) }
 	t.Cleanup(func() { afterSwap = func() {} })
 	first := func() bool { replace(`{"a":"first"}`); return true }
-	err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), first)
+	_, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), first)
 	var kept *keptError
 	if !errors.As(err, &kept) {
 		t.Fatalf("err = %v, want the displaced host write reported as kept", err)
@@ -832,14 +832,14 @@ func TestReplaceIfRefusesWithoutAtomicSwap(t *testing.T) {
 	t.Cleanup(func() { renameExchange, renameNoReplace = saved, savedNR })
 	renameExchange = func(string, string) error { return unix.ENOTSUP }
 	renameNoReplace = func(string, string) error { return unix.EINVAL }
-	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), func() bool { return true }); !errors.Is(err, errNoAtomic) {
+	if _, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), func() bool { return true }); !errors.Is(err, errNoAtomic) {
 		t.Fatalf("err = %v, want errNoAtomic", err)
 	}
 	if got := readCfg(t, p); got["a"] != float64(1) {
 		t.Fatalf("file = %v, want it untouched", got)
 	}
 	q := filepath.Join(dir, "new.json")
-	if err := replaceIf(q, []byte(`{"b":1}`), nil, false, filepath.Join(dir, "kept"), func() bool { return true }); !errors.Is(err, errNoAtomic) {
+	if _, err := replaceIf(q, []byte(`{"b":1}`), nil, false, filepath.Join(dir, "kept"), func() bool { return true }); !errors.Is(err, errNoAtomic) {
 		t.Fatalf("err = %v, want errNoAtomic", err)
 	}
 	if _, err := os.Lstat(q); !os.IsNotExist(err) {
@@ -929,7 +929,7 @@ func TestReplaceIfKeepsBesideWhenKeepDirFails(t *testing.T) {
 	}
 	afterSwap = func() { replace(`{"a":"second"}`) }
 	t.Cleanup(func() { afterSwap = func() {} })
-	err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(blocked, "kept"), func() bool { replace(`{"a":"first"}`); return true })
+	_, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(blocked, "kept"), func() bool { replace(`{"a":"first"}`); return true })
 	var kept *keptError
 	if !errors.As(err, &kept) {
 		t.Fatalf("err = %v, want a keptError", err)
@@ -959,5 +959,26 @@ func TestWriteBackStampSkipsARacingChmod(t *testing.T) {
 	}
 	if OwnWrite(s, realPath) {
 		t.Fatal("a host chmod after the write-back was recorded as airbag's own write")
+	}
+}
+
+// A host xattr (or any other metadata change) after the write-back
+// moves the change time past the record, so it is not airbag's own.
+func TestWriteBackStampSkipsARacingXattr(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
+	s.Created = time.Now() // the real file predates the session
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"userID":"u","numStartups":2,"mcpServers":{}}`)
+	beforeStamp = func() {
+		time.Sleep(2 * time.Millisecond) // a change time the filesystem can tell apart
+		if err := unix.Setxattr(realPath, "user.host", []byte("1"), 0); err != nil {
+			t.Skipf("no user xattrs here: %v", err)
+		}
+	}
+	t.Cleanup(func() { beforeStamp = func() {} })
+	WriteBackConfigs(s)
+	if OwnWrite(s, realPath) {
+		t.Fatal("a host xattr after the write-back was recorded as airbag's own write")
 	}
 }
