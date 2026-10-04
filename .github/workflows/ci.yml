@@ -113,3 +113,21 @@ jobs:
           name: fuzz-failures
           path: "**/testdata/fuzz/"
           if-no-files-found: ignore
+
+  scripts:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: shellcheck
+        run: sh test/check.sh shell
+      - name: actionlint
+        run: sh test/check.sh actions
