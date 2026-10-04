@@ -180,13 +180,13 @@ func TestIoctlFilter(t *testing.T) {
 }
 
 // TestSocketFilter: allowed families pass, the rest are refused, for
-// socket on every ABI.
+// socket and socketpair on every ABI.
 func TestSocketFilter(t *testing.T) {
 	denied := []uint32{unix.AF_VSOCK, unix.AF_PACKET, unix.AF_TIPC, unix.AF_BLUETOOTH, unix.AF_IPX}
 	for _, g := range allNumberings() {
 		p := agentFilter(abisFor(g.goarch), false)
 		for _, a := range g.ns {
-			for name, nr := range map[string]uint32{"socket": a.n.socket} {
+			for name, nr := range map[string]uint32{"socket": a.n.socket, "socketpair": a.n.socketpair} {
 				if nr == 0 {
 					t.Errorf("%s arch %#x: no %s number", g.goarch, a.audit, name)
 					continue
@@ -321,6 +321,7 @@ func TestSyscallNumbers(t *testing.T) {
 		check("SYS_MOUNT_SETATTR", n.mountSetattr)
 		check("SYS_IOCTL", n.ioctl)
 		check("SYS_SOCKET", n.socket)
+		check("SYS_SOCKETPAIR", n.socketpair)
 		check("SYS_PERSONALITY", n.personality)
 	}
 }
@@ -373,7 +374,7 @@ func nrsByName(n nrSet) map[string]uint32 {
 		"lookup_dcookie": n.lookupDcookie,
 		"open_tree":      n.openTree, "move_mount": n.moveMount, "fsopen": n.fsopen,
 		"fsconfig": n.fsconfig, "fsmount": n.fsmount, "fspick": n.fspick, "mount_setattr": n.mountSetattr,
-		"ioctl": n.ioctl, "socket": n.socket, "personality": n.personality,
+		"ioctl": n.ioctl, "socket": n.socket, "socketpair": n.socketpair, "personality": n.personality,
 	}
 }
 

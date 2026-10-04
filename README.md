@@ -147,8 +147,8 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   a `socket()` call), `bpf`, `perf_event_open`, `userfaultfd`, the kernel
   keyring (`add_key`/`keyctl`/`request_key`), `kexec`, module loading,
   `open_by_handle_at`, `quotactl`, `acct`, `swapon`, `reboot`, `syslog`, and
-  sockets of families other than Unix, IPv4/IPv6 and netlink, so `AF_VSOCK`
-  and `AF_PACKET` are out. It stays allow-by-default so nested user
+  sockets (`socket` and `socketpair`) of families other than Unix, IPv4/IPv6
+  and netlink, so `AF_VSOCK`, `AF_PACKET` and `AF_TIPC` are out. It stays allow-by-default so nested user
   namespaces, `mount`, `pivot_root`, `setns` and the rest that Codex's and
   Chromium's own sandboxes use keep working; it covers the native ABI and
   every compat one and kills an unknown architecture, so a 32-bit or x32

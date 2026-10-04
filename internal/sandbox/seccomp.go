@@ -106,8 +106,11 @@ type nrSet struct {
 	fsconfig, fsmount, fspick   uint32
 	mountSetattr                uint32
 
-	// Argument-checked.
-	ioctl, socket, personality uint32
+	// Argument-checked. socketpair takes the family as its first
+	// argument like socket, and creates sockets of that family (for
+	// example AF_TIPC since Linux 4.12), so it goes through the same
+	// family check.
+	ioctl, socket, socketpair, personality uint32
 }
 
 // abi is one ABI the filter covers: an AUDIT_ARCH value and the syscall
@@ -136,7 +139,7 @@ var (
 		lookupDcookie: 212,
 		openTree:      428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
-		ioctl: 16, socket: 41, personality: 135,
+		ioctl: 16, socket: 41, socketpair: 53, personality: 135,
 	}
 	// nrsX32 is the x32 ABI, from arch/x86/entry/syscalls/syscall_64.tbl
 	// (https://github.com/torvalds/linux/blob/v6.18/arch/x86/entry/syscalls/syscall_64.tbl):
@@ -157,7 +160,7 @@ var (
 		lookupDcookie: 212,
 		openTree:      428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
-		ioctl: 514, socket: 41, personality: 135,
+		ioctl: 514, socket: 41, socketpair: 53, personality: 135,
 	}
 	nrs386 = nrSet{
 		ioURingSetup: 425, ioURingEnter: 426, ioURingRegister: 427,
@@ -170,7 +173,7 @@ var (
 		lookupDcookie: 253,
 		openTree:      428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
-		ioctl: 54, socket: 359, personality: 136,
+		ioctl: 54, socket: 359, socketpair: 360, personality: 136,
 	}
 	nrsARM64 = nrSet{
 		ioURingSetup: 425, ioURingEnter: 426, ioURingRegister: 427,
@@ -183,7 +186,7 @@ var (
 		lookupDcookie: 18,
 		openTree:      428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
-		ioctl: 29, socket: 198, personality: 92,
+		ioctl: 29, socket: 198, socketpair: 199, personality: 92,
 	}
 	nrsARM = nrSet{
 		ioURingSetup: 425, ioURingEnter: 426, ioURingRegister: 427,
@@ -196,7 +199,7 @@ var (
 		lookupDcookie: 249,
 		openTree:      428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
-		ioctl: 54, socket: 281, personality: 136,
+		ioctl: 54, socket: 281, socketpair: 288, personality: 136,
 	}
 )
 
@@ -356,7 +359,7 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 				route(s.n.strictENOSYS(), "enosys")
 			}
 			route(nonzero(s.n.ioctl), "ioctl")
-			route(nonzero(s.n.socket), "socket")
+			route(nonzero(s.n.socket, s.n.socketpair), "socket")
 			route(nonzero(s.n.personality), "personality")
 		}
 		b.jmp("allow")

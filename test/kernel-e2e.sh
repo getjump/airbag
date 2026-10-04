@@ -21,7 +21,10 @@ git init -q -b main && git config user.email e2e@example.com && git config user.
 echo hi > README.md && git add -A && git commit -qm init
 
 # Expected verdicts inside the sandbox. io_uring is ENOSYS so libraries
-# fall back; the rest are EPERM.
+# fall back; the rest are EPERM. socketpair is family-checked like
+# socket: the kernel answers a family it lacks with EAFNOSUPPORT, never
+# EPERM, so EPERM for AF_TIPC shows the filter refused it, and AF_UNIX
+# must still work.
 expect() {
 	out=$("$AIRBAG" run -- sh -c "'$T/kernprobe'" 2>/dev/null)
 	"$AIRBAG" discard --yes >/dev/null 2>&1 || true
@@ -37,7 +40,9 @@ expect \
 	"add_key=EPERM" \
 	"userfaultfd=EPERM" \
 	"socket_vsock=EPERM" \
-	"socket_packet=EPERM"
+	"socket_packet=EPERM" \
+	"socketpair_tipc=EPERM" \
+	"socketpair_unix=OK"
 
 # The same calls through the i386 ABI, if this kernel emulates it.
 if [ -x "$T/kernprobe386" ]; then
@@ -48,7 +53,8 @@ if [ -x "$T/kernprobe386" ]; then
 		echo "note: i386 ABI not runnable on this kernel; skipping the 32-bit check" ;;
 	*)
 		for pair in "io_uring_setup=ENOSYS" "bpf=EPERM" "add_key=EPERM" \
-			"socket_vsock=EPERM" "socket_packet=EPERM"; do
+			"socket_vsock=EPERM" "socket_packet=EPERM" \
+			"socketpair_tipc=EPERM" "socketpair_unix=OK"; do
 			echo "$out" | grep -qx "$pair" || fail "i386 probe expected '$pair', got:
 $out"
 		done ;;

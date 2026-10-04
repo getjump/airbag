@@ -38,6 +38,16 @@ func socketFamily(fam int) string {
 	return result(e)
 }
 
+func socketpairFamily(fam int) string {
+	var fds [2]int32
+	_, _, e := unix.Syscall6(unix.SYS_SOCKETPAIR, uintptr(fam), uintptr(unix.SOCK_DGRAM), 0, uintptr(unsafe.Pointer(&fds)), 0, 0)
+	if e == 0 {
+		_ = unix.Close(int(fds[0]))
+		_ = unix.Close(int(fds[1]))
+	}
+	return result(e)
+}
+
 func main() {
 	probes := map[string]func() string{
 		"io_uring_setup": func() string {
@@ -74,6 +84,12 @@ func main() {
 		},
 		"socket_vsock":  func() string { return socketFamily(unix.AF_VSOCK) },
 		"socket_packet": func() string { return socketFamily(unix.AF_PACKET) },
+		// socketpair creates sockets of the family it is given (AF_TIPC
+		// supports it since Linux 4.12), so it is family-checked too. The
+		// kernel itself never answers EPERM here (EAFNOSUPPORT or
+		// EOPNOTSUPP at most), so EPERM can only come from the filter.
+		"socketpair_tipc": func() string { return socketpairFamily(unix.AF_TIPC) },
+		"socketpair_unix": func() string { return socketpairFamily(unix.AF_UNIX) },
 		// ptrace of PID 1 (the supervisor) must fail: it is dumpable=0
 		// and owned by the parent user namespace. ptrace itself stays
 		// allowed, so a success here would be a real exposure.
@@ -96,7 +112,7 @@ func main() {
 	}
 	for _, name := range []string{
 		"io_uring_setup", "bpf", "perf_event_open", "add_key",
-		"userfaultfd", "socket_vsock", "socket_packet",
+		"userfaultfd", "socket_vsock", "socket_packet", "socketpair_tipc", "socketpair_unix",
 	} {
 		fmt.Printf("%s=%s\n", name, probes[name]())
 	}
