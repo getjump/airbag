@@ -294,6 +294,9 @@ rules:
 	}{
 		{"API.EXAMPLE.:443", http.StatusForbidden, "not this host"},
 		{"Api.Example:443", http.StatusForbidden, "not this host"},
+		{"api.example..:443", http.StatusBadRequest, "empty label"},
+		{".api.example:443", http.StatusBadRequest, "empty label"},
+		{"api..example:443", http.StatusBadRequest, "empty label"},
 		{"ap\u0130.example:443", http.StatusBadRequest, "ASCII"},
 		{"\u212Aite.example:443", http.StatusBadRequest, "ASCII"},
 	} {
@@ -306,5 +309,29 @@ rules:
 	effs, _ := effects.Read(path)
 	if len(effs) == 0 || effs[0].Target != "api.example:443" {
 		t.Fatalf("effects = %+v, want the first logged as api.example:443", effs)
+	}
+}
+
+// A plain HTTP request is logged, checked and sent with the same
+// spelling; a CONNECT without a port keeps what it named.
+func TestPlainHTTPHostSpelledOneWay(t *testing.T) {
+	var seen string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = r.Host }))
+	t.Cleanup(up.Close)
+	_, port, _ := net.SplitHostPort(up.Listener.Addr().String())
+	log, path := newLog(t)
+	p := New(Allowlist{"127.0.0.1:*"}, log)
+	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	u, _ := url.Parse("http://127.0.0.1.:" + port + "/x")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, &http.Request{Method: "GET", Host: u.Host, URL: u, Header: http.Header{}})
+	if rec.Code != http.StatusOK || seen != "127.0.0.1:"+port {
+		t.Fatalf("%d %q, upstream saw Host %q", rec.Code, rec.Body.String(), seen)
+	}
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, &http.Request{Method: http.MethodConnect, Host: "api.example", URL: &url.URL{Host: "api.example"}})
+	effs, _ := effects.Read(path)
+	if len(effs) < 2 || effs[0].Target != "127.0.0.1:"+port || effs[len(effs)-1].Target != "api.example" {
+		t.Fatalf("effects = %+v", effs)
 	}
 }

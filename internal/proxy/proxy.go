@@ -158,16 +158,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	// One trailing dot is the same name; "api.example.." would lose a
+	// second one in each later check, so a name with an empty label
+	// does not get that far.
+	if host != "" && !strings.Contains(host, ":") &&
+		(strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") || strings.Contains(host, "..")) {
+		p.Log.Add(effects.Effect{Kind: "net.egress", Target: clipTarget(r.Host), Verdict: "deny", Reason: "host name has an empty label"})
+		http.Error(w, "airbag: host name "+clipTarget(host)+" has an empty label", http.StatusBadRequest)
+		return
+	}
 	if r.Method == http.MethodConnect {
-		_, port, _ := net.SplitHostPort(r.Host)
-		r.Host = net.JoinHostPort(host, port)
-	} else if port := r.URL.Port(); port != "" {
-		r.URL.Host = net.JoinHostPort(host, port)
-	} else if r.URL.Host != "" {
-		r.URL.Host = host
-		if strings.Contains(host, ":") {
-			r.URL.Host = "[" + host + "]"
+		if _, port, err := net.SplitHostPort(r.Host); err == nil {
+			r.Host = net.JoinHostPort(host, port)
 		}
+	} else if r.URL.Host != "" {
+		if port := r.URL.Port(); port != "" {
+			r.URL.Host = net.JoinHostPort(host, port)
+		} else if strings.Contains(host, ":") {
+			r.URL.Host = "[" + host + "]"
+		} else {
+			r.URL.Host = host
+		}
+		r.Host = r.URL.Host // a proxy request's Host is its URL's
 	}
 	target := r.Host
 	if p.Mirror != nil && host == "airbag.mirror" && r.Method != http.MethodConnect {
