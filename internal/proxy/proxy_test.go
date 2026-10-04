@@ -299,6 +299,7 @@ rules:
 		{"api..example:443", http.StatusBadRequest, "empty label"},
 		{"API.EXAMPLE:0443", http.StatusForbidden, "not this host"},
 		{"api.example:99999", http.StatusBadRequest, "not a port number"},
+		{"api.example:", http.StatusBadRequest, "no port"},
 		{"[::1..]:443", http.StatusBadRequest, "not an IP address"},
 		{"ap\u0130.example:443", http.StatusBadRequest, "ASCII"},
 		{"\u212Aite.example:443", http.StatusBadRequest, "ASCII"},
@@ -354,6 +355,35 @@ func TestCanonHost(t *testing.T) {
 	for _, bad := range []string{"a..b", ".a", "a..", "::1.", "[::1]", "ap\u0130.example"} {
 		if _, why := canonHost(bad); why == "" {
 			t.Errorf("canonHost(%q) accepted", bad)
+		}
+	}
+}
+
+// A rule on the port sees a plain HTTP request's port as 80 whether the
+// URL names it or not.
+func TestPlainHTTPPortForRules(t *testing.T) {
+	ws := t.TempDir()
+	_ = os.WriteFile(filepath.Join(ws, "airbag.yaml"), []byte(`
+rules:
+  - name: no-plain-http
+    when: effect.kind == "net.connect" && effect.detail == "80"
+    verdict: deny
+    message: no plain http
+`), 0o644)
+	pol, err := policy.Load(ws, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, _ := newLog(t)
+	p := New(Allowlist{"api.example"}, log)
+	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	p.Gate = policy.NewGate(pol, t.TempDir())
+	for _, raw := range []string{"http://api.example/x", "http://api.example:/x", "http://api.example:080/x"} {
+		u, _ := url.Parse(raw)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, &http.Request{Method: "GET", Host: u.Host, URL: u, Header: http.Header{}})
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "no plain http") {
+			t.Errorf("GET %s: %d %q", raw, rec.Code, rec.Body.String())
 		}
 	}
 }

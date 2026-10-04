@@ -181,7 +181,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	canon, why := canonHost(host)
 	port := r.URL.Port()
 	if r.Method == http.MethodConnect {
-		_, port, _ = net.SplitHostPort(r.Host)
+		var err error
+		// "api.example:" would read as 443 to the credential lookup
+		// and as no port to the rules.
+		if _, port, err = net.SplitHostPort(r.Host); err == nil && port == "" && why == "" {
+			why = "CONNECT names no port"
+		}
 	}
 	if why == "" && port != "" {
 		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
@@ -201,7 +206,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Host = net.JoinHostPort(host, port)
 	case strings.Contains(host, ":"):
 		r.Host = "[" + host + "]"
-	case r.Method != http.MethodConnect || host != "":
+	case host != "":
 		r.Host = host
 	}
 	if r.Method != http.MethodConnect && r.URL.Host != "" {
@@ -237,7 +242,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Gate != nil {
-		_, port, _ := net.SplitHostPort(target)
 		if d, id := p.Gate.Check(policy.Input{Effect: models.Effect{Kind: "net.connect", Target: host, Detail: port}}); d.Verdict != policy.Allow {
 			p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: d.Verdict, Reason: d.Rule})
 			http.Error(w, policy.Explain(d, id), http.StatusForbidden)
