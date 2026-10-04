@@ -450,3 +450,41 @@ func TestPartialRollbackKeepsPreviousVersion(t *testing.T) {
 		t.Fatal("sub/ left behind")
 	}
 }
+
+// A directory the apply made inside a replaced directory, which the
+// first rollback cannot remove because the user put a file in it, is
+// still known as the apply's: once the user removes that file, a second
+// rollback takes it out and restores the user's original.
+func TestRollbackRetryRestoresReplacedDirAfterUserCleansSubdir(t *testing.T) {
+	s, d := appliedReplacedDir(t, filepath.Join("sub", "inner.txt"))
+	added := filepath.Join(d, "sub", "user.txt")
+	if err := os.WriteFile(added, []byte("added after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, added); got != "added after\n" {
+		t.Fatalf("rollback lost a file added after the apply: %s = %q\n%s", added, got, out.String())
+	}
+	if want := "left as is (holds files added or changed after the apply): " + d; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q: %s", want, out.String())
+	}
+	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+		t.Fatalf("version of %s from before the apply = %q", d, prev)
+	}
+	if err := os.Remove(added); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, d); got != "user file\n" {
+		t.Fatalf("second rollback did not restore %s: %q\n%s", d, got, out.String())
+	}
+	if gs, err := listGenerations(s); err != nil || len(gs) != 0 {
+		t.Fatalf("second rollback not complete: generations %v (%v)\n%s", gs, err, out.String())
+	}
+}

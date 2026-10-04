@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"syscall"
@@ -43,7 +44,9 @@ type genEntry struct {
 	Type  fs.FileMode `json:"type"`
 	Saved string      `json:"saved,omitempty"` // the previous version, "" when there was none
 	After string      `json:"after,omitempty"` // fingerprint once applied; "" while in progress
-	// Made: parent directories the step had to create.
+	// Made: parent directories the step had to create. A replaced
+	// directory that a rollback left also keeps here the directories
+	// the apply made inside it that were still there.
 	Made []string `json:"made,omitempty"`
 }
 
@@ -215,8 +218,18 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		// whatever is left was added or kept after the apply, and is
 		// not ours to remove.
 		if e.Type == fs.ModeDir && e.Saved != "" {
-			dirs = removeInside(dirs, e.Path)
+			var still []string
+			dirs, still = removeInside(dirs, e.Path)
 			if !emptyOrAbsent(e.Path) {
+				// The directories the apply made here that still hold
+				// something stay in the journal with this entry, so a
+				// later rollback can remove them once they are empty
+				// and then restore the directory.
+				for _, d := range still {
+					if !slices.Contains(e.Made, d) {
+						e.Made = append(e.Made, d)
+					}
+				}
 				keep(e, "holds files added or changed after the apply")
 				continue
 			}
@@ -258,18 +271,22 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 }
 
 // removeInside removes the directories of dirs that lie inside dir,
-// deepest first, and returns the others.
-func removeInside(dirs []string, dir string) []string {
+// deepest first. It returns the others, and those inside dir that are
+// still there, such as one the user put a file in.
+func removeInside(dirs []string, dir string) (rest, still []string) {
 	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
-	rest := dirs[:0]
+	rest = dirs[:0]
 	for _, d := range dirs {
 		if d != dir && within(d, dir) {
 			removeEmptyDir(d)
+			if _, err := os.Lstat(d); err == nil {
+				still = append(still, d)
+			}
 			continue
 		}
 		rest = append(rest, d)
 	}
-	return rest
+	return rest, still
 }
 
 // removeEmptyDir removes d only if it is an empty directory. Unlike
