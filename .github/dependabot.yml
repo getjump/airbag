@@ -1,0 +1,19 @@
+# Weekly updates for Go modules and GitHub Actions; minor and patch
+# updates come grouped in one pull request each. The tools test/check.sh
+# pins are updated there by hand.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
