@@ -82,8 +82,10 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
 ## What the agent gets
 
 - **A branch of the world.** The workspace and `$HOME` are overlayfs branches; the
-  rest of the host is read-only. Nothing the agent writes reaches your files before
-  `airbag apply`.
+  rest of the host is read-only. Nothing the agent writes to the workspace reaches
+  your files before `airbag apply`, and almost nothing it writes to `$HOME` does
+  either — the exceptions are the narrow agent state below, which has to survive a
+  discard.
 - **One way out.** The sandbox has no network interface besides loopback and no
   DNS. Traffic leaves only through airbag's proxy, which allows model APIs
   (`--allow HOST` adds more) and logs every host. Package registries are reached
@@ -152,8 +154,23 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   the outbox and the effect log continue, and what the session learned stays (a
   secret read in the first run still narrows egress in the second). Iterate
   "agent, review, tell it what to fix, agent again" without applying in between.
-- **Its own state.** Transcripts and logins (`~/.claude/projects`, `~/.codex/sessions`,
-  tokens) pass through, so discarding a branch does not log you out.
+- **Its own state.** Only what must survive a discard passes straight through to the
+  real `$HOME`: the login (`~/.claude/.credentials.json`, `~/.codex/auth.json`, so a
+  discard does not log you out), the current workspace's Claude Code transcripts
+  (`~/.claude/projects/<this project>/`, so `--session` resumes after a discard) and
+  Codex's transcripts (`~/.codex/sessions`, which Codex keys by date, not by project,
+  so these are not narrowed to the workspace). Everything else an agent keeps in
+  `$HOME` — other projects' transcripts, sessions, shell snapshots, file history,
+  todos, caches — goes through the branch: review folds it into one `agent state`
+  line and a discard drops it. A project's `memory/` (instructions loaded into later
+  sessions) stays in the branch too, flagged `agent instructions`, so you see it and
+  a discard drops it. `~/.claude.json` also goes through the branch; at session end
+  airbag copies back only an allowlist of benign keys it rewrites every run (counters,
+  ids, login metadata) and leaves any other change — an MCP server, a tool permission,
+  a trust decision — in the branch, shown in review by key name (never value) and
+  flagged `persist` when it can run code or change trust. On the macOS prototype,
+  which has no branch of `$HOME`, this narrowing is only partial; see
+  [docs/macos.md](docs/macos.md).
 
 ## What the review shows
 

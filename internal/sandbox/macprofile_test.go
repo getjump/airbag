@@ -20,8 +20,10 @@ func TestMacProfile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	proj, holes := ClaudeProjectState(ws, ws)
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true, Hidden: DefaultHidden,
-		HiddenHost: []string{"/var/lib/incus/unix.socket"}})
+		HiddenHost:  []string{"/var/lib/incus/unix.socket"},
+		Passthrough: append(append([]string{}, DefaultPassthrough...), proj...), BranchHoles: holes})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,6 +45,8 @@ func TestMacProfile(t *testing.T) {
 		{"allow file-write*", clone},
 		{"allow file-write*", filepath.Join(home, ".claude")},
 		{"allow file-write*", filepath.Join(home, ".claude.json")},
+		{"allow file-write*", filepath.Join(home, ".claude/projects/"+ClaudeProjectSlug(ws))},
+		{"deny file-write*", filepath.Join(home, ".claude/projects/"+ClaudeProjectSlug(ws)+"/memory")},
 		{"deny file-write*", filepath.Join(home, ".claude/settings.json")},
 		{"deny file-write*", filepath.Join(home, ".codex/config.toml")},
 		{"deny file-read*", filepath.Join(home, ".ssh")},

@@ -14,10 +14,17 @@ import (
 // plain data, so it is built and tested on any platform.
 
 // stateDirs: agent state the profile lets the agent write in $HOME,
-// besides DefaultPassthrough. Settings, hooks and instructions inside
-// them stay read-only (stateReadOnly): without a branch of $HOME those
-// would persist outside review.
+// besides the session's Passthrough. Settings, hooks and instructions
+// inside them stay read-only (stateReadOnly): without a branch of $HOME
+// those would persist outside review.
 var stateDirs = []string{".claude/", ".codex/"}
+
+// macStateWriteFiles: single files in $HOME the agent may write on
+// macOS although they go through the branch on Linux. The macOS
+// prototype has no branch of $HOME, so ~/.claude.json cannot get the
+// key-level write-back the Linux path applies (agentconfig.go); it is
+// left writable and persists in full, a residual noted in docs/macos.md.
+var macStateWriteFiles = []string{".claude.json"}
 
 var stateReadOnly = []string{
 	".claude/settings.json", ".claude/settings.local.json", ".claude/hooks", ".claude/agents",
@@ -51,15 +58,24 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 		_ = os.MkdirAll(filepath.Join(s.Home, d), 0o700)
 		p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(d, "/")))
 	}
-	for _, f := range DefaultPassthrough {
+	for _, f := range s.Passthrough {
 		if strings.HasSuffix(f, "/") {
 			p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(f, "/")))
 		} else {
 			p.WriteFiles = append(p.WriteFiles, filepath.Join(home, f))
 		}
 	}
+	for _, f := range macStateWriteFiles {
+		p.WriteFiles = append(p.WriteFiles, filepath.Join(home, f))
+	}
 	for _, f := range stateReadOnly {
 		p.NoWrite = append(p.NoWrite, filepath.Join(home, f))
+	}
+	// A branch hole cannot be served from a branch on macOS (there is
+	// none), so the profile denies writing it instead: memory/ edits are
+	// blocked rather than silently persisted unreviewed (docs/macos.md).
+	for _, h := range s.BranchHoles {
+		p.NoWrite = append(p.NoWrite, filepath.Join(home, h))
 	}
 	for _, h := range s.Hidden {
 		p.NoRead = append(p.NoRead, filepath.Join(home, h))

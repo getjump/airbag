@@ -122,13 +122,29 @@ $ ./airbag review              # then apply, apply --branch NAME, or discard
 | | Linux | macOS prototype |
 |---|---|---|
 | Workspace branch | overlayfs, at the workspace's own path | an APFS clone (`cp -c`) in the session directory; the agent works at that path |
-| `$HOME` | a branch, reviewed | read-only, except the agent's state (`~/.claude`, `~/.codex`, without their settings, hooks and instructions); caches (`TMPDIR`, Go, npm, pip, uv, cargo) point into the session |
+| `$HOME` | a branch, reviewed: agent state goes through the branch, only the login and this workspace's transcripts pass through | read-only, except the agent's state (`~/.claude`, `~/.codex`, without their settings, hooks and instructions); caches (`TMPDIR`, Go, npm, pip, uv, cargo) point into the session |
+| Agent state in `$HOME` | through the branch (one `agent state` line in review), dropped on discard | writable in place, persists, not reviewed (no branch of `$HOME`) |
+| `~/.claude.json` | through the branch; only an allowlist of benign keys is written back, other keys (MCP servers, permissions, trust) wait for review | writable in place, persists in full with no key-level write-back |
+| A project's `memory/` | in the branch, flagged `agent instructions`, dropped on discard | denied by the profile: an edit fails rather than being reviewed |
 | Network | network namespace, only the proxy | Seatbelt allows outbound traffic only to the proxy's localhost port and airbag's control socket |
 | Secret files | served through FUSE, a read taints the session | not readable at all, in the clone or the real workspace (no FUSE, so a read could not be tracked) |
 | Credentials | hidden by bind mounts | denied by the profile |
 | Shims, outbox, mirror, policies, review, apply, rollback, `--branch`, `--session` | yes | the same code |
 | Agent hooks (steps per tool call) | managed settings in a private `/etc` | not installed: managed settings need root on macOS |
 | Terminal | a pseudo-terminal of its own, TIOCSTI filtered | the agent shares your terminal |
+
+Because the prototype has no branch of `$HOME`, the narrowing that keeps agent
+state out of the real files on Linux cannot be expressed in full by the Seatbelt
+profile. What it does express: writing the current workspace's project `memory/`
+is denied, so Claude Code's auto-memory cannot persist unreviewed (the cost is
+that a memory edit fails instead of being dropped on discard). What it cannot:
+`~/.claude.json` stays writable, so a change to it — including MCP servers,
+permissions and per-project trust — persists in full with no key-level write-back
+or review, and the rest of `~/.claude` and `~/.codex` persists as before. The
+fix is a branch of `$HOME` on macOS (the NFS overlay, step 2 above), after which
+the same code path applies. Independently of the platform, Codex keys its
+transcripts by date (`~/.codex/sessions/<year>/<month>/…`), not by project, so a
+discard keeps every project's Codex transcripts, not only this workspace's.
 
 What to report from a first run: whether Claude Code and Codex start and finish a
 task, which Seatbelt denials they hit (`log stream --predicate 'eventMessage

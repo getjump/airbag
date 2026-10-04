@@ -41,6 +41,10 @@ type Meta struct {
 	Allow     []string  `json:"allow"`
 	// Paths under $HOME that bypass the branch (agent state, logs).
 	Passthrough []string `json:"passthrough"`
+	// BranchHoles: paths under a Passthrough directory that stay in the
+	// branch anyway (so they are reviewed and dropped on discard), e.g.
+	// the memory/ sub-directory of a passed-through transcript directory.
+	BranchHoles []string `json:"branch_holes,omitempty"`
 	// Paths under $HOME hidden from the agent (credentials).
 	Hidden []string `json:"hidden"`
 	// Host paths hidden from the agent (daemon sockets outside /run).

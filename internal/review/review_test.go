@@ -136,7 +136,9 @@ func TestPersistTable(t *testing.T) {
 		".bash_login": true, ".zlogin": true, ".config/environment.d/10-x.conf": true,
 		".local/share/dbus-1/services/x.service": true, ".local/share/applications/x.desktop": true,
 		".config/niri/config.kdl": true, ".gradle/init.d/x.gradle": true, ".cargo/config.toml": true,
-		".claude.json": true, ".claude.json.backup": false, ".local/share/fonts/a.ttf": false,
+		// ~/.claude.json is no longer persist by name: agentconfig.go
+		// flags it only when a key that runs code or changes trust moved.
+		".claude.json": false, ".claude.json.backup": false, ".local/share/fonts/a.ttf": false,
 		".local/lib/python3.12/site-packages/pkg/__init__.py": false, ".config/systemd": true,
 	} {
 		if got := persistReason(rel, persistHomeTable) != ""; got != want {

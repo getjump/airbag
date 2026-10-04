@@ -129,6 +129,27 @@ func buildWorld(s *session.Session) error {
 				return err
 			}
 		}
+		// Punch the holes back into the branch: bind the branch's own
+		// upper layer over each hole, so writes there (e.g. a project's
+		// memory/) land in the branch and show up in review, although
+		// their parent directory passes through. The bind is taken
+		// before /tmp and the session root are hidden below, so it keeps
+		// its own reference to the upper layer afterwards.
+		for _, h := range s.BranchHoles {
+			src, dst := filepath.Join(s.HomeUpper(), h), filepath.Join(s.Home, h)
+			if err := os.MkdirAll(src, 0o700); err != nil {
+				return err
+			}
+			if _, err := os.Lstat(dst); err != nil {
+				continue
+			}
+			if err := bind(src, dst, true); err != nil {
+				return err
+			}
+			if err := setRO(dst, true, false); err != nil {
+				return err
+			}
+		}
 	}
 	for _, p := range s.Hidden {
 		if err := hide(filepath.Join(s.Home, p)); err != nil {

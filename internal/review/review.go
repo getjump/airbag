@@ -195,6 +195,23 @@ func classify(s *session.Session, cs []Change) {
 		if (persistReason(rel, table) != "" || slices.Contains(persistNames, path.Base(rel))) && !strings.HasSuffix(rel, ".sample") {
 			c.Flags = append(c.Flags, "persist")
 		}
+		if c.Layer == "home" {
+			// A config file (~/.claude.json) is shown by its changed
+			// top-level keys, flagged "persist" only when one of them
+			// runs code or changes trust.
+			if keys, persist, ok := configKeyChange(*c); ok {
+				if persist {
+					c.Flags = append(c.Flags, "persist")
+				}
+				if len(keys) > 0 {
+					c.Flags = append(c.Flags, "keys: "+strings.Join(keys, ", "))
+				}
+			}
+			// Project memory is loaded into later sessions.
+			if agentMemory(rel) {
+				c.Flags = append(c.Flags, "agent instructions")
+			}
+		}
 		if c.Kind != Deleted && c.Type == 0 && c.Mode&0o111 != 0 && !hasPrefix(rel, buildDirs) && !strings.HasPrefix(rel, ".git/") {
 			c.Flags = append(c.Flags, "executable")
 		}

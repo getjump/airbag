@@ -54,9 +54,12 @@ var persistHomeTable = []persistence{
 		".gradle/init.d/", ".gradle/init.gradle", ".gradle/gradle.properties",
 	}},
 	{"credential helpers that run commands", []string{".docker/", ".kube/", ".aws/config", ".config/gh/", ".ssh/"}},
+	// ~/.claude.json is handled by agentconfig.go, not here: a change is
+	// flagged "persist" only when it touches a key that runs code or
+	// changes trust, so routine counter rewrites do not alarm.
 	{"agent settings, hooks and instructions", []string{
 		".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/", ".claude/agents/",
-		".claude/skills/", ".claude/commands/", ".claude/plugins/", ".claude/CLAUDE.md", ".claude.json",
+		".claude/skills/", ".claude/commands/", ".claude/plugins/", ".claude/CLAUDE.md",
 		".codex/config.toml", ".codex/hooks.json", ".codex/rules/", ".codex/AGENTS.md",
 		".gemini/", ".cursor/", ".config/airbag/",
 	}},

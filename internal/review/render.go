@@ -31,6 +31,16 @@ var homeNoise = []struct{ match, group, kind string }{
 	{".codex/skills/.system/", ".codex/", "agent state"}, {".codex/*.sqlite*", ".codex/", "agent state"},
 	{".codex/installation_id", ".codex/", "agent state"}, {".codex/.sandbox_migration", ".codex/", "agent state"},
 	{".codex/version.json", ".codex/", "agent state"}, {".codex/models_cache.json", ".codex/", "agent state"},
+	// Claude Code state that now goes through the branch (only the
+	// current workspace's transcripts pass through). settings.json,
+	// hooks, skills, CLAUDE.md and a project's memory/ are flagged, so
+	// they are not folded here; everything below is caches and logs.
+	{".claude/projects/", ".claude/", "agent state"}, {".claude/sessions/", ".claude/", "agent state"},
+	{".claude/session-env/", ".claude/", "agent state"}, {".claude/shell-snapshots/", ".claude/", "agent state"},
+	{".claude/file-history/", ".claude/", "agent state"}, {".claude/todos/", ".claude/", "agent state"},
+	{".claude/statsig/", ".claude/", "agent state"}, {".claude/backups/", ".claude/", "agent state"},
+	{".claude/debug/", ".claude/", "agent state"}, {".claude/ide/", ".claude/", "agent state"},
+	{".claude/plans/", ".claude/", "agent state"},
 }
 
 const maxListed = 40
@@ -436,6 +446,20 @@ func renderShell(w io.Writer, effs []effects.Effect) {
 func Diff(w io.Writer, c Change) {
 	if c.IsDir() {
 		fmt.Fprintf(w, "%s %s/ (directory %s)\n", map[string]string{Added: "+", Deleted: "-", Replaced: "!"}[c.Kind], display(c), c.Kind)
+		return
+	}
+	// A config file is shown by the names of the top-level keys that
+	// changed, never their values, which may carry tokens.
+	if keys, persist, ok := configKeyChange(c); ok {
+		note := ""
+		if persist {
+			note = " (persist)"
+		}
+		if len(keys) == 0 {
+			fmt.Fprintf(w, "~ %s: changed (unreadable JSON)%s\n", display(c), note)
+			return
+		}
+		fmt.Fprintf(w, "~ %s: top-level keys changed%s: %s\n", display(c), note, strings.Join(keys, ", "))
 		return
 	}
 	a, b := c.Path, c.Upper

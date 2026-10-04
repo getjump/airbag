@@ -21,15 +21,70 @@ import (
 // InitArg is the hidden subcommand that runs inside the namespaces.
 const InitArg = "__airbag_init"
 
-// DefaultPassthrough: agent state that must survive a discarded branch
-// (transcripts, logs, login refreshes). Paths are relative to $HOME.
-// A trailing slash marks a directory, which airbag creates if missing.
+// DefaultPassthrough: the agent state that bypasses the branch because
+// it must survive a discard for the user's own workflow and the agent
+// CLI never executes, loads as config, or restores it into other files.
+// Everything else agents keep in $HOME goes through the branch, so it is
+// shown in review and dropped on discard. Paths are relative to $HOME; a
+// trailing slash marks a directory, which airbag creates if missing.
+//
+// This is the fixed part. The current workspace's transcript directory
+// also passes through, but its path depends on the working directory, so
+// ClaudeProjectState computes it per session (and keeps its memory/ in
+// the branch). The passthrough stored on a session is the two combined.
+//
+//   - .claude/.credentials.json, .codex/auth.json: the login, so a
+//     discard does not log the user out.
+//   - .codex/sessions/, .codex/log/: Codex transcripts for resume. Codex
+//     keys sessions by date (sessions/<year>/<month>/…), not by project,
+//     so unlike Claude Code's they cannot be narrowed to this workspace;
+//     a discard keeps every project's Codex transcripts (docs/macos.md).
+//
+// What used to pass through and now goes through the branch: the whole
+// .claude/projects/ tree (only the current workspace's dir passes now),
+// .claude/sessions/, file-history/, session-env/, shell-snapshots/,
+// todos/, statsig/, backups/, debug/, ide/, plans/, and .claude.json
+// (see agentconfig.go for its key-level write-back).
 var DefaultPassthrough = []string{
-	".claude/projects/", ".claude/sessions/", ".claude/file-history/", ".claude/session-env/",
-	".claude/shell-snapshots/", ".claude/todos/", ".claude/statsig/", ".claude/backups/",
-	".claude/debug/", ".claude/ide/", ".claude/plans/",
-	".claude/.credentials.json", ".claude.json",
+	".claude/.credentials.json",
 	".codex/sessions/", ".codex/log/", ".codex/auth.json",
+}
+
+// ClaudeProjectSlug is how Claude Code names a project's transcript
+// directory under ~/.claude/projects: the absolute path with every "/"
+// turned into "-". Observed with Claude Code 2.1.x; Claude Code also
+// hashes paths longer than 200 characters, which airbag does not mirror,
+// so a very long workspace path keeps that directory in the branch
+// instead of passing through (docs/macos.md).
+func ClaudeProjectSlug(dir string) string {
+	return strings.ReplaceAll(dir, "/", "-")
+}
+
+// ClaudeProjectState returns, for the current workspace, the transcript
+// directories that pass through to the real $HOME (so a resumed session
+// keeps the conversation across a discard) and the memory/ directories
+// inside them that stay in the branch. Claude Code writes transcripts
+// under the slug of the working directory and auto-memory under the slug
+// of the git root, so both are covered when they differ. memory/ holds
+// instructions loaded into later sessions, so review shows it and a
+// discard drops it, like any branch change.
+//
+// cwd and root are absolute paths; root is the git top-level (or "").
+func ClaudeProjectState(cwd, root string) (pass, holes []string) {
+	seen := map[string]bool{}
+	for _, d := range []string{cwd, root} {
+		if d == "" {
+			continue
+		}
+		base := ".claude/projects/" + ClaudeProjectSlug(d) + "/"
+		if seen[base] {
+			continue
+		}
+		seen[base] = true
+		pass = append(pass, base)
+		holes = append(holes, base+"memory")
+	}
+	return pass, holes
 }
 
 // DefaultHidden: credentials the agent never sees. Paths are relative
