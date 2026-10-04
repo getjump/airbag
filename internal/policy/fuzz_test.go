@@ -1,8 +1,12 @@
 package policy
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/getjump/airbag/internal/models"
 )
 
 // Match must stay conservative: it defers a call only when the program
@@ -62,4 +66,27 @@ func subsequence(need, have []string) bool {
 		}
 	}
 	return false
+}
+
+// When several rules of the same verdict match, the first one is the
+// one reported, so the message the agent and the review show is stable.
+func TestFirstMatchingRuleIsReported(t *testing.T) {
+	ws := t.TempDir()
+	_ = os.WriteFile(filepath.Join(ws, "airbag.yaml"), []byte(`
+rules:
+  - name: first
+    when: effect.kind == "net.egress"
+    verdict: deny
+  - name: second
+    when: effect.kind == "net.egress"
+    verdict: deny
+`), 0o644)
+	p, err := Load(ws, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := p.Decide(Input{Effect: models.Effect{Kind: "net.egress", Target: "x"}})
+	if d.Verdict != Deny || d.Rule != "first" {
+		t.Fatalf("decision %+v, want deny by first", d)
+	}
 }

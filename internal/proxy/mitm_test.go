@@ -114,7 +114,8 @@ func TestInterceptSubstitutesAndMasks(t *testing.T) {
 	effs, _ := effects.Read(logPath)
 	var seen bool
 	for _, e := range effs {
-		if e.Kind == "http.request" && strings.HasPrefix(e.Target, "GET ") && strings.HasSuffix(e.Target, "/repos/x") && e.Reason == "demo" {
+		// The port is shown because it is not 443.
+		if e.Kind == "http.request" && e.Target == "GET "+up.Listener.Addr().String()+"/repos/x" && e.Reason == "demo" {
 			seen = true
 		}
 	}

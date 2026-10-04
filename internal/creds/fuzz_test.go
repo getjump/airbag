@@ -88,3 +88,28 @@ func (c *chunked) Read(p []byte) (int, error) {
 	c.data = c.data[n:]
 	return n, nil
 }
+
+// The prefix rule at its edges: a separator at index 1..4 of a value of
+// 20 or more is kept; a shorter value or a later separator is not.
+func TestPlaceholderPrefixEdges(t *testing.T) {
+	pad := func(prefix string, n int) string { return prefix + strings.Repeat("x", n-len(prefix)) }
+	for _, c := range []struct {
+		v    string
+		keep string
+	}{
+		{pad("ghp_", 20), "ghp_"},   // length 20: kept
+		{pad("ghp_", 19), ""},       // length 19: not
+		{pad("abcd_", 20), "abcd_"}, // separator at index 4: kept
+		{pad("abcde_", 20), ""},     // index 5: not
+		{pad("_", 20), ""},          // index 0: not
+		{pad("a-", 20), "a-"},       // index 1, dash: kept
+	} {
+		p := Placeholder(c.v)
+		if c.keep != "" && !strings.HasPrefix(p, c.keep) {
+			t.Errorf("Placeholder(%q) = %q, want prefix %q", c.v, p, c.keep)
+		}
+		if c.keep == "" && len(c.v) > 0 && p[0] == c.v[0] && strings.HasPrefix(p, c.v[:min(len(c.v), 5)]) {
+			t.Errorf("Placeholder(%q) = %q kept a prefix it should not", c.v, p)
+		}
+	}
+}

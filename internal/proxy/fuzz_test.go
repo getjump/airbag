@@ -1,7 +1,11 @@
 package proxy
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -60,4 +64,60 @@ func FuzzForbidden(f *testing.F) {
 			t.Fatalf("forbidden(%v) allowed a local/special address", a)
 		}
 	})
+}
+
+// The proxy runs in the host's network namespace: an allowed name that
+// resolves to one of this machine's own addresses must be refused,
+// not only loopback.
+func TestForbiddenOwnAddress(t *testing.T) {
+	own, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Skip(err)
+	}
+	tested := 0
+	for _, o := range own {
+		p, err := netip.ParsePrefix(o.String())
+		if err != nil || p.Addr().IsLoopback() || p.Addr().IsLinkLocalUnicast() {
+			continue // those are refused for another reason; test the own-address rule alone
+		}
+		tested++
+		if why := forbidden(p.Addr()); why != "this machine's own address" {
+			t.Errorf("forbidden(%v) = %q, want this machine's own address", p.Addr(), why)
+		}
+		if why := forbidden(netip.AddrFrom16(p.Addr().As16())); p.Addr().Is4() && why == "" {
+			t.Errorf("own address %v allowed in its IPv4-mapped form", p.Addr())
+		}
+	}
+	if tested == 0 {
+		t.Skip("no non-loopback interface address here")
+	}
+}
+
+// The mirror answers plain requests to airbag.mirror only: a CONNECT
+// to that name is not the mirror (and is not on the allowlist), and no
+// other host reaches the mirror handler.
+func TestMirrorRouting(t *testing.T) {
+	log, _ := newLog(t)
+	hit := 0
+	p := New(Allowlist{"api.anthropic.com"}, log)
+	p.Mirror = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit++ })
+	get := func(method, host string) int {
+		rec := httptest.NewRecorder()
+		u := &url.URL{Scheme: "http", Host: host, Path: "/x"}
+		if method == http.MethodConnect {
+			u = &url.URL{Host: host}
+		}
+		p.ServeHTTP(rec, &http.Request{Method: method, Host: host, URL: u, Header: http.Header{}})
+		return rec.Code
+	}
+	get(http.MethodGet, "airbag.mirror")
+	if hit != 1 {
+		t.Fatalf("GET airbag.mirror did not reach the mirror (hits %d)", hit)
+	}
+	if code := get(http.MethodConnect, "airbag.mirror:443"); hit != 1 || code != http.StatusForbidden {
+		t.Fatalf("CONNECT airbag.mirror: hits %d code %d, want no hit and 403", hit, code)
+	}
+	if code := get(http.MethodGet, "evil.example"); hit != 1 || code != http.StatusForbidden {
+		t.Fatalf("another host reached the mirror or was allowed: hits %d code %d", hit, code)
+	}
 }
