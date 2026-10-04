@@ -223,3 +223,25 @@ func TestLiveExecutorCannotBeMarkedUnknown(t *testing.T) {
 		t.Fatal("recovered the live executor as crashed")
 	}
 }
+
+func TestAbsentDraftFlagDoesNotAttestPublishedRequest(t *testing.T) {
+	p := operation.PullRequest{Repository: "getjump/airbag", Base: "main", Head: "work", HeadCommit: strings.Repeat("a", 40), Title: "Fix", Body: "body"}
+	response := map[string]any{"number": 7, "html_url": "https://github.com/getjump/airbag/pull/7", "title": p.Title, "body": p.Body,
+		"head": map[string]any{"ref": p.Head, "sha": p.HeadCommit, "repo": map[string]string{"full_name": p.Repository}},
+		"base": map[string]any{"ref": p.Base, "repo": map[string]string{"full_name": p.Repository}}}
+	data, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, valid := exactPR(data, p); valid {
+		t.Fatal("missing flag became a confirmed nondraft PR")
+	}
+	response["draft"] = false
+	data, err = json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, valid := exactPR(data, p); !valid {
+		t.Fatal("explicit matching flag was not attested")
+	}
+}
