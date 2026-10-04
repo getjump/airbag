@@ -34,6 +34,12 @@ skipped.
 On macOS, `go build ./cmd/airbag` builds the prototype and `go test ./...` runs
 the unit tests; the end-to-end tests are Linux-only.
 
+`sh test/check.sh` runs the static checks CI runs, with the same tool versions:
+gofmt, `go mod tidy`, `go vet`, golangci-lint and govulncheck for Linux and
+macOS, shellcheck and actionlint. `sh test/check.sh race` and
+`sh test/check.sh fuzz` run the race and fuzz jobs; the versions are at the top
+of the script.
+
 `test/claude-e2e.sh` and `test/codex-e2e.sh` drive the real Claude Code and
 Codex binaries (they skip when the binary is missing). The model is
 `test/mockapi`, a scripted stand-in for the Anthropic Messages and OpenAI
@@ -82,7 +88,8 @@ Smaller, self-contained tasks are labeled
 
 ## Conventions
 
-- Go with `gofmt` and `go vet`; no new dependency without a reason in the PR.
+- Go with `gofmt`, `go vet` and the linters in `.golangci.yml`; a `//nolint`
+  names the linter and says why. No new dependency without a reason in the PR.
 - A change in behavior comes with a test: a unit test, and an e2e test under
   `test/` when it is about what a session does.
 - Commit messages: an imperative summary line, then what changed and why.
