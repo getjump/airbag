@@ -198,6 +198,25 @@ func viaProxy(env []string, port int) []string {
 	return append(out, fmt.Sprintf("HTTPS_PROXY=http://127.0.0.1:%d", port))
 }
 
+// platformTrust is env without SSL_CERT_FILE and SSL_CERT_DIR, and the
+// names it removed. With either set, a program on macOS whose go.mod
+// says go 1.27 or later (the probe's does) checks certificates against
+// those files and never asks trustd. T1 asks whether the platform
+// verifier works without trustd: what a program with an earlier go line
+// always uses on macOS, whatever Go builds it, and a later one uses
+// without the variables.
+func platformTrust(env []string) (out, removed []string) {
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		if k == "SSL_CERT_FILE" || k == "SSL_CERT_DIR" {
+			removed = append(removed, k)
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out, removed
+}
+
 func seconds(d time.Duration) float64 { return d.Seconds() }
 
 func timed(f func() error) (time.Duration, error) {

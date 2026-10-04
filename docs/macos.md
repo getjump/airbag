@@ -4,7 +4,8 @@ airbag is built on Linux namespaces, overlayfs and FUSE; macOS has none of
 them. This page records how the agents and agent sandboxes that run natively
 on macOS do it (as of October 2026), the native design that follows for
 airbag, the prototype of it, and the Linux VM setup, which stays the tested way
-until the prototype has run on a real Mac.
+until the prototype has run on a real Mac. The release binaries need macOS 13
+or later (the minimum of the Go release they are built with).
 
 ## How others sandbox agents on macOS
 
@@ -94,7 +95,7 @@ your user name; read it before pasting.
 | N2 | How much slower creating and walking a `node_modules`-sized tree is through the mount |
 | N3 | git works in a repository at the mount path (without your git config or `GIT_*` variables); the agents' versions there, if installed |
 | C1 | An APFS clone (`clonefile`, which fails where cloning is not supported, unlike `cp -c`, which falls back to a copy) of the same tree: if it is independent, a first prototype can branch the workspace by cloning it, with no NFS server, and review and apply by comparing the clone with the original. The speed is reported for `cp -c -R`, which the prototype runs and which clones file by file, and for one `clonefile` of the tree, each against `cp -R` |
-| T1 | A Go program inside the profile verifies TLS through the proxy without `com.apple.trustd.agent` (and with it, to compare); skipped when the same request outside the profile does not get through |
+| T1 | A Go program inside the profile verifies TLS through the proxy without `com.apple.trustd.agent` (and with it, to compare), with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset: with either set, a program whose `go.mod` says `go 1.27` or later checks the files and skips the platform verifier, which a program with an earlier go line always uses; skipped when the same request outside the profile does not get through |
 
 ### Order
 

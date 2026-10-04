@@ -14,7 +14,12 @@ case $(uname -m) in
 	*) echo "airbag: unsupported architecture $(uname -m)" >&2; exit 1 ;;
 esac
 case $os in
-	linux | darwin) ;;
+	linux) ;;
+	darwin)
+		# The release binaries are built with a Go that needs macOS 13.
+		v=$(/usr/bin/sw_vers -productVersion 2>/dev/null || :)
+		[ "${v%%.*}" -ge 13 ] 2>/dev/null || { echo "airbag: needs macOS 13 or later, this is ${v:-unknown}" >&2; exit 1; }
+		;;
 	*) echo "airbag: unsupported system $os" >&2; exit 1 ;;
 esac
 

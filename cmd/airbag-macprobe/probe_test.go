@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -238,8 +239,23 @@ func TestExportStaysInside(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
 		t.Fatal(err)
 	}
+	sub := filepath.Join(outside, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	fs := exportFS(dir)
-	for _, name := range []string{"../outside/secret", secret, "link/secret"} {
+	for _, name := range []string{"../outside", outside, "link"} {
+		ents, _ := fs.ReadDir(name)
+		for _, e := range ents {
+			if e.Name() == "secret" && e.Size() == int64(len("s3cret")) {
+				t.Errorf("ReadDir(%q) listed the file outside the export", name)
+			}
+		}
+	}
+	for i, name := range []string{"../outside/secret", secret, "link/secret"} {
+		if fi, err := fs.Stat(name); err == nil && fi.Size() == int64(len("s3cret")) {
+			t.Errorf("Stat(%q) saw the file outside the export", name)
+		}
 		if f, err := fs.Open(name); err == nil {
 			b, _ := io.ReadAll(f)
 			_ = f.Close()
@@ -254,6 +270,27 @@ func TestExportStaysInside(t *testing.T) {
 		ch := fs.(billy.Change)
 		_ = ch.Chmod(name, 0o666)
 		_ = ch.Chtimes(name, time.Unix(0, 0), time.Unix(0, 0))
+		// The changes BoundOS took over in v5.9: none may move, replace
+		// or remove anything outside.
+		mine := fmt.Sprintf("mine%d", i)
+		if err := os.WriteFile(filepath.Join(dir, mine), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_ = fs.Rename(name, fmt.Sprintf("moved%d", i))
+		_ = fs.Rename(mine, name)
+		_ = fs.Remove(name)
+	}
+	for i, name := range []string{"../outside/sub", sub, "link/sub", "../outside", "link"} {
+		_ = fs.Remove(name)
+		// go-nfs calls MkdirAll for MKDIR and Symlink for SYMLINK.
+		_ = fs.MkdirAll(filepath.Join(name, "made"), 0o755)
+		_ = fs.Symlink("/", filepath.Join(name, fmt.Sprintf("planted%d", i)))
+	}
+	if ents, _ := os.ReadDir(outside); len(ents) != 2 {
+		t.Errorf("entries outside the export: %v, want secret and sub", ents)
+	}
+	if ents, _ := os.ReadDir(sub); len(ents) != 0 {
+		t.Errorf("entries in the directory outside: %v, want none", ents)
 	}
 	st, err := os.Stat(secret)
 	if err != nil {
@@ -261,6 +298,16 @@ func TestExportStaysInside(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(secret); string(b) != "s3cret" || st.Mode().Perm() != 0o600 || st.ModTime().Unix() == 0 {
 		t.Fatalf("the file outside changed: %q %v %v", b, st.Mode(), st.ModTime())
+	}
+	if _, err := os.Stat(sub); err != nil {
+		t.Fatalf("the directory outside is gone: %v", err)
+	}
+}
+
+func TestPlatformTrust(t *testing.T) {
+	env, removed := platformTrust([]string{"HOME=/h", "SSL_CERT_FILE=/etc/ssl/cert.pem", "SSL_CERT_DIR=/d", "SSL_CERT_FILES=x"})
+	if strings.Join(env, " ") != "HOME=/h SSL_CERT_FILES=x" || strings.Join(removed, " ") != "SSL_CERT_FILE SSL_CERT_DIR" {
+		t.Fatalf("env %q, removed %q", env, removed)
 	}
 }
 
