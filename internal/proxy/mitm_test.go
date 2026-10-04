@@ -46,6 +46,13 @@ func echo(t *testing.T) (*httptest.Server, func() string) {
 
 func mitmProxy(t *testing.T, upstream *httptest.Server, rules string) (*http.Client, *creds.Live, string) {
 	t.Helper()
+	return mitmProxyWith(t, upstream, rules, nil)
+}
+
+// mitmProxyWith is mitmProxy with adjust run on the proxy before it
+// serves.
+func mitmProxyWith(t *testing.T, upstream *httptest.Server, rules string, adjust func(*Proxy)) (*http.Client, *creds.Live, string) {
+	t.Helper()
 	hostport := upstream.Listener.Addr().String()
 	live := &creds.Live{Name: "demo", Hosts: []string{hostport}, Value: "ghp_RealSecretValue0123456789abcdef"}
 	live.Placeholder = creds.Placeholder(live.Value)
@@ -68,6 +75,9 @@ func mitmProxy(t *testing.T, upstream *httptest.Server, rules string) (*http.Cli
 			t.Fatal(err)
 		}
 		p.Gate = policy.NewGate(pol, dir)
+	}
+	if adjust != nil {
+		adjust(p)
 	}
 	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {

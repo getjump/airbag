@@ -79,31 +79,31 @@ type Proxy struct {
 	// UpstreamRoots verify the real hosts behind intercepted TLS; nil
 	// means this machine's roots (SSL_CERT_FILE is honoured).
 	UpstreamRoots *x509.CertPool
+	// Limits bound what the agent holds open here (relay.go).
+	Limits Limits
 
 	mu    sync.Mutex
-	flows map[*flow]bool // open tunnels and forwarded requests
+	flows map[*flow]bool // open tunnels, intercepted connections and forwarded requests
 	// forbid vets the address a connection is about to use (guard.go).
 	forbid func(netip.Addr) string
 }
 
-type flow struct {
-	host, target string
-	stop         func()
-}
-
-// track registers an open connection until the returned func is called.
-func (p *Proxy) track(host, target string, stop func()) (done func()) {
-	f := &flow{host: host, target: target, stop: stop}
+// track registers a connection the agent opens through the proxy,
+// until done is called.
+func (p *Proxy) track(host, target string) (f *flow, done func()) {
 	p.mu.Lock()
 	if p.flows == nil {
 		p.flows = map[*flow]bool{}
 	}
+	f = newFlow(p.Limits.Idle, p.Limits.Drain)
+	f.host, f.target = host, target
 	p.flows[f] = true
 	p.mu.Unlock()
-	return func() {
+	return f, func() {
 		p.mu.Lock()
 		delete(p.flows, f)
 		p.mu.Unlock()
+		f.stop()
 	}
 }
 
@@ -121,13 +121,14 @@ func (p *Proxy) Cut(keep Allowlist, reason string) {
 	}
 	p.mu.Unlock()
 	for _, f := range cut {
-		f.stop()
-		p.Log.Add(effects.Effect{Kind: "net.egress", Target: f.target, Verdict: "cut", Reason: reason})
+		if f.stop() { // not closed already as idle
+			p.Log.Add(effects.Effect{Kind: "net.egress", Target: f.target, Verdict: "cut", Reason: reason})
+		}
 	}
 }
 
 func New(allow Allowlist, log *effects.Log) *Proxy {
-	return &Proxy{Allow: allow, Log: log, forbid: forbidden, Upstream: func(u *url.URL) (*url.URL, error) {
+	return &Proxy{Allow: allow, Log: log, forbid: forbidden, Limits: DefaultLimits(), Upstream: func(u *url.URL) (*url.URL, error) {
 		return http.ProxyFromEnvironment(&http.Request{URL: u})
 	}}
 }
@@ -169,7 +170,9 @@ func isASCII(s string) bool {
 }
 
 func (p *Proxy) Serve(l net.Listener) error {
-	srv := &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second}
+	// A request's header must arrive within 30 s, and a connection
+	// waiting for its next request is closed after Limits.KeepAlive.
+	srv := &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second, IdleTimeout: p.Limits.KeepAlive}
 	return srv.Serve(l)
 }
 
@@ -254,6 +257,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	f, done := p.track(host, target)
+	defer done()
 	p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "allow"})
 	// Talking to a host that is neither a model API nor a registry
 	// brings outside data into the session: label it untrusted, so a
@@ -265,13 +270,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodConnect {
 		if live := p.Creds.For(r.Host); live != nil && p.CA != nil {
-			p.intercept(w, r, host, live)
+			p.intercept(w, r, host, live, f)
 			return
 		}
-		p.connect(w, r, host)
+		p.connect(w, r, host, f)
 		return
 	}
-	p.forward(w, r, host)
+	p.forward(w, r, host, f)
 }
 
 // refuse answers a connection the address guard stopped.
@@ -285,7 +290,9 @@ func (p *Proxy) refuse(w http.ResponseWriter, target, host string, err error) bo
 	return true
 }
 
-func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string) {
+// connect opens a tunnel. It is registered (f) before the dial, so a
+// cut while it dials closes it too.
+func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string, f *flow) {
 	up, err := p.dial(r.Host, !p.Allow.explicitIP(host))
 	if err != nil {
 		if !p.refuse(w, r.Host, host, err) {
@@ -293,20 +300,20 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string) {
 		}
 		return
 	}
+	if !f.hold(up) {
+		http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
+		return
+	}
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		up.Close()
 		return
 	}
 	conn, buf, err := hj.Hijack()
 	if err != nil {
-		up.Close()
 		return
 	}
-	done := p.track(host, r.Host, func() { conn.Close(); up.Close() })
-	defer done()
 	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	pipe(conn, buf.Reader, up)
+	f.pipe(conn, buf.Reader, up)
 }
 
 // dial opens a TCP stream to hostport, through the host's upstream
@@ -348,11 +355,16 @@ func (p *Proxy) dial(hostport string, check bool) (net.Conn, error) {
 	return c, nil
 }
 
-func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string) {
+// forward sends a plain HTTP request on. The upstream connection is
+// the flow's: a cut or a quiet upstream (Limits.Idle) closes it and
+// ends the request.
+func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *flow) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	done := p.track(host, r.Host, cancel)
-	defer done()
+	if !f.hold(&closer{cancel}) {
+		http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
+		return
+	}
 	out := r.Clone(ctx)
 	out.RequestURI = ""
 	for _, h := range []string{"Proxy-Connection", "Proxy-Authorization", "Connection", "Keep-Alive", "Te", "Trailer", "Upgrade"} {
@@ -363,9 +375,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string) {
 		http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	tr := &http.Transport{DialContext: p.dialContext(!p.Allow.explicitIP(host))}
+	tr := &http.Transport{DialContext: f.dialer(p.dialContext(!p.Allow.explicitIP(host)))}
 	if pu != nil {
-		tr = &http.Transport{Proxy: http.ProxyURL(pu)}
+		tr = &http.Transport{Proxy: http.ProxyURL(pu), DialContext: f.dialer((&net.Dialer{Timeout: 15 * time.Second}).DialContext)}
 	}
 	defer tr.CloseIdleConnections()
 	resp, err := tr.RoundTrip(out)
@@ -380,17 +392,12 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string) {
 		w.Header()[k] = v
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
-}
-
-func pipe(a net.Conn, ar io.Reader, b net.Conn) {
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(b, ar); closeWrite(b) }()
-	go func() { defer wg.Done(); _, _ = io.Copy(a, b); closeWrite(a) }()
-	wg.Wait()
-	a.Close()
-	b.Close()
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		// The body broke off (the upstream failed, or was closed as
+		// idle or cut): the client must see a broken response, not a
+		// complete one, which a chunked body would otherwise end as.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func closeWrite(c net.Conn) {

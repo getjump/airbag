@@ -121,7 +121,12 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 // the value in place of the placeholder, and goes on to the real host
 // over a TLS connection verified against this machine's roots. The
 // response comes back with the value masked.
-func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, live *creds.Live) {
+//
+// The connection is the flow f: bytes either way on it or on its
+// upstream connections keep it open. It is closed when it has waited
+// Limits.KeepAlive for its next request, or when a request in progress
+// has moved no byte for Limits.Idle (a host that stalls).
+func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, live *creds.Live, f *flow) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "airbag: cannot intercept", http.StatusInternalServerError)
@@ -132,7 +137,6 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 		return
 	}
 	target := r.Host
-	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	tconn := tls.Server(conn, &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"http/1.1"},
@@ -142,6 +146,10 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 			return p.CA.leaf(host)
 		},
 	})
+	if !f.hold(tconn) {
+		return // cut
+	}
+	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	_ = tconn.SetDeadline(time.Now().Add(15 * time.Second))
 	if err := tconn.HandshakeContext(context.Background()); err != nil {
 		conn.Close()
@@ -167,7 +175,11 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 				c.Close()
 				return nil, err
 			}
-			return tc, nil
+			wc := &watchedConn{Conn: tc, f: f}
+			if !f.hold(wc) {
+				return nil, errStopped
+			}
+			return wc, nil
 		},
 		ResponseHeaderTimeout: 2 * time.Minute,
 		IdleConnTimeout:       time.Minute,
@@ -254,15 +266,14 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       p.Limits.KeepAlive,
 		ConnState: func(_ net.Conn, s http.ConnState) {
 			if s == http.StateClosed {
 				once.Do(func() { close(closed) })
 			}
 		},
 	}
-	done := p.track(host, target, func() { _ = tconn.Close() })
-	defer done()
-	go func() { _ = srv.Serve(&oneConn{c: tconn}) }()
+	go func() { _ = srv.Serve(&oneConn{c: &watchedConn{Conn: tconn, f: f}}) }()
 	<-closed
 	_ = srv.Close()
 }
