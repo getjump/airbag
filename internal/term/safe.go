@@ -24,8 +24,9 @@ type Writer struct {
 func Safe(w io.Writer) *Writer { return &Writer{w: w} }
 
 func (s *Writer) Write(p []byte) (int, error) {
-	b := append(s.rest, p...)
+	b := s.rest
 	s.rest = nil
+	b = append(b, p...)
 	var out []byte
 	for len(b) > 0 {
 		r, size := utf8.DecodeRune(b)

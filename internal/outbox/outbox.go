@@ -92,11 +92,11 @@ func Open(path string) (*Box, error) {
 	}
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if err := addFiles(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return &Box{db: db}, nil
@@ -125,7 +125,7 @@ func (b *Box) List() ([]Intent, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Intent
 	for rows.Next() {
 		var in Intent
@@ -149,7 +149,7 @@ func (b *Box) Push(in Intent) (Intent, error) {
 	if err != nil {
 		return in, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }() // after Commit, a no-op that returns ErrTxDone
 	var n int
 	if err := tx.QueryRow(`SELECT count(*) FROM intents`).Scan(&n); err != nil {
 		return in, err
@@ -157,10 +157,16 @@ func (b *Box) Push(in Intent) (Intent, error) {
 	in.ID = fmt.Sprintf("i-%d", n+1)
 	in.Created = time.Now()
 	in.Status, in.Output = Pending, ""
-	argv, _ := json.Marshal(in.Argv)
+	argv, err := json.Marshal(in.Argv)
+	if err != nil {
+		return in, err
+	}
 	files := ""
 	if len(in.Files) > 0 {
-		b, _ := json.Marshal(in.Files)
+		b, err := json.Marshal(in.Files)
+		if err != nil {
+			return in, err
+		}
 		files = string(b)
 	}
 	now := in.Created.UTC().Format(time.RFC3339Nano)

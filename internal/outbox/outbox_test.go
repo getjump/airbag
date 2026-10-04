@@ -15,7 +15,7 @@ func TestBox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	log.Add(effects.Effect{Kind: "net.egress", Target: "a:443"})
 
 	b, err := Open(path)
@@ -34,10 +34,12 @@ func TestBox(t *testing.T) {
 	if err := b.Update(Intent{ID: "i-9", Status: Done}); err == nil {
 		t.Error("update of a missing intent succeeded")
 	}
-	b.Close()
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	b, _ = Open(path) // reopen: state is on disk
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 	got, err := b.List()
 	if err != nil || len(got) != 2 {
 		t.Fatalf("list: %+v %v", got, err)
@@ -50,7 +52,7 @@ func TestBox(t *testing.T) {
 	}
 
 	db, _ := sql.Open("sqlite", path)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var hist int
 	_ = db.QueryRow(`SELECT count(*) FROM intent_status WHERE intent = 'i-1'`).Scan(&hist)
 	if hist != 2 {
@@ -85,12 +87,12 @@ func TestFilesAndOldDatabase(t *testing.T) {
 		INSERT INTO intent_status (intent, t, status) VALUES ('i-1', '2026-10-04T00:00:00Z', 'pending');`); err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 	b, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 	two, err := b.Push(Intent{Kind: KindCmd, Argv: []string{"gh", "pr", "create"}, Cwd: "/w", Files: map[string]string{"notes.md": "abc"}})
 	if err != nil || two.ID != "i-2" {
 		t.Fatalf("push: %+v %v", two, err)

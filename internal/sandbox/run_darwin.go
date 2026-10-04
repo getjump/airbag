@@ -59,7 +59,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, err
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 
 	if err := cloneWorkspace(s); err != nil {
 		return 1, err
@@ -100,7 +100,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, err
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate, Root: s.CloneDir()}
 	go func() { _ = ctl.Serve(cl) }()
 

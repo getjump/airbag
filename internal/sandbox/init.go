@@ -357,7 +357,7 @@ func loopbackUp() error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	var ifr [unix.IFNAMSIZ + 24]byte
 	copy(ifr[:], "lo")
 	if _, _, e := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.SIOCGIFFLAGS, uintptr(unsafe.Pointer(&ifr[0]))); e != 0 {

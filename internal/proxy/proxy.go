@@ -289,7 +289,7 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string) {
 	up, err := p.dial(r.Host, !p.Allow.explicitIP(host))
 	if err != nil {
 		if !p.refuse(w, r.Host, host, err) {
-			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway) //nolint:gocritic // the return follows the if
 		}
 		return
 	}
@@ -371,7 +371,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string) {
 	resp, err := tr.RoundTrip(out)
 	if err != nil {
 		if !p.refuse(w, r.Host, host, err) {
-			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway) //nolint:gocritic // the return follows the if
 		}
 		return
 	}

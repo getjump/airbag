@@ -40,7 +40,7 @@ func newLog(t *testing.T) (*effects.Log, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { l.Close() })
+	t.Cleanup(func() { _ = l.Close() })
 	return l, p
 }
 
@@ -159,7 +159,9 @@ func TestCutOnTaint(t *testing.T) {
 	if line, _ := keepR.ReadString('\n'); line != "ping\n" {
 		t.Fatalf("kept tunnel broken: %q", line)
 	}
-	log.Close()
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
 	effs, _ := effects.Read(path)
 	var cuts []string
 	for _, e := range effs {
@@ -254,7 +256,9 @@ func TestGuard(t *testing.T) {
 	if code, body := connect("example.test:8443"); code != 403 || !strings.Contains(body, "port 8443") {
 		t.Errorf("example.test:8443: %d %q", code, body)
 	}
-	log.Close()
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
 	effs, _ := effects.Read(path)
 	var reasons []string
 	for _, e := range effs {

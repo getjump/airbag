@@ -82,7 +82,10 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	if err := os.MkdirAll(filepath.Join(g.dir, "saved"), 0o700); err != nil {
 		return nil, err
 	}
-	return g, g.save()
+	if err := g.save(); err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 func (g *generation) save() error {
@@ -96,11 +99,11 @@ func (g *generation) save() error {
 		return err
 	}
 	if _, err := f.Write(b); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -550,7 +553,7 @@ func fingerprint(p string) string {
 	if err != nil {
 		return "unreadable"
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	h := sha256.New()
 	_, _ = io.Copy(h, f)
 	return fmt.Sprintf("file:%o:%s", st.Mode().Perm(), hex.EncodeToString(h.Sum(nil)))

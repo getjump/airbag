@@ -28,7 +28,7 @@ func ClaudeManagedSettings() []byte {
 			}},
 		}}
 	}
-	b, _ := json.MarshalIndent(map[string]any{
+	b, _ := json.MarshalIndent(map[string]any{ //nolint:errchkjson // strings and numbers only, which json always encodes
 		"hooks": map[string]any{
 			"PreToolUse":         hook("PreToolUse"),
 			"PostToolUse":        hook("PostToolUse"),

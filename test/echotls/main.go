@@ -40,7 +40,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(*dir, "ca.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(*dir, "ca.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
 		log.Fatal(err)
 	}
 	l, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}})
@@ -51,15 +51,33 @@ func main() {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		mu.Lock()
-		f, _ := os.OpenFile(filepath.Join(*dir, "got"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		fmt.Fprintf(f, "%s %s %s\n", r.Method, r.URL.Path, auth)
-		f.Close()
+		err := record(filepath.Join(*dir, "got"), fmt.Sprintf("%s %s %s\n", r.Method, r.URL.Path, auth))
 		mu.Unlock()
-		fmt.Fprintf(w, "you sent: %s\n", auth)
+		if err != nil {
+			// The test reads what was recorded; one it cannot read fails it.
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "you sent: %s\n", auth)
 	})
 	_, port, _ := net.SplitHostPort(l.Addr().String())
-	if err := os.WriteFile(filepath.Join(*dir, "port"), []byte(port), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(*dir, "port"), []byte(port), 0o600); err != nil {
 		log.Fatal(err)
 	}
-	log.Fatal(http.Serve(l, h))
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	log.Fatal(srv.Serve(l))
+}
+
+// record appends line to the file at path.
+func record(path, line string) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(line)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }

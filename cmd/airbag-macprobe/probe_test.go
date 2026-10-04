@@ -106,7 +106,7 @@ func TestProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer px.Close()
+	defer func() { _ = px.Close() }()
 	c, err := net.Dial("tcp", px.l.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestNFSServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	path, err := srv.Arm()
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +156,9 @@ func TestNFSServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = w.Write([]byte("new"))
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if got, _ := os.ReadFile(filepath.Join(dir, "new.txt")); string(got) != "new" {
 		t.Fatalf("export has %q", got)
 	}
@@ -240,14 +242,14 @@ func TestExportStaysInside(t *testing.T) {
 	for _, name := range []string{"../outside/secret", secret, "link/secret"} {
 		if f, err := fs.Open(name); err == nil {
 			b, _ := io.ReadAll(f)
-			f.Close()
+			_ = f.Close()
 			if string(b) == "s3cret" {
 				t.Errorf("Open(%q) read the file outside the export", name)
 			}
 		}
 		if f, err := fs.Create(name); err == nil {
 			_, _ = f.Write([]byte("x"))
-			f.Close()
+			_ = f.Close()
 		}
 		ch := fs.(billy.Change)
 		_ = ch.Chmod(name, 0o666)
@@ -281,7 +283,7 @@ func readNFS(t *testing.T, target *nfsc.Target, name string) string {
 	if err != nil {
 		t.Fatalf("open %s: %v", name, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	b, _ := io.ReadAll(f)
 	return string(b)
 }
@@ -308,7 +310,7 @@ func TestNFSGrantsOneMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	_, err = nfsMount(t, srv, "/")
 	refused(t, "Mount(/) before Arm", err)
 	early, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
@@ -358,7 +360,7 @@ func TestNFSSeal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	path, err := srv.Arm()
 	if err != nil {
 		t.Fatal(err)
@@ -389,7 +391,7 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	addr := srv.l.Addr().String()
 	idle, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -421,7 +423,7 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 	go func() {
 		f, err := target.Open("/hello.txt")
 		if err == nil {
-			f.Close()
+			_ = f.Close()
 		}
 		got <- err
 	}()

@@ -24,10 +24,12 @@ func TestAppendOnly(t *testing.T) {
 			t.Errorf("%s succeeded on an append-only log", q)
 		}
 	}
-	l.Close()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	db, _ := sql.Open("sqlite", path)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var n int
 	_ = db.QueryRow(`SELECT count(*) FROM events`).Scan(&n)
 	if n != 2 {

@@ -40,7 +40,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, err
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 
 	pl, err := net.Listen("unix", s.ProxySock())
 	if err != nil {
@@ -59,13 +59,19 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	// tcp:// forwards: one unix socket each, bridged inside the sandbox
 	// to 127.0.0.1:PORT (startForwards).
 	var fws []*forwarder
+	var fls []net.Listener // each serves until the session ends
+	defer func() {
+		for _, l := range fls {
+			_ = l.Close()
+		}
+	}()
 	for i, f := range s.Forwards {
 		_ = os.Remove(s.ForwardSock(i))
 		fl, err := net.Listen("unix", s.ForwardSock(i))
 		if err != nil {
 			return 1, err
 		}
-		defer fl.Close()
+		fls = append(fls, fl)
 		fw := newForwarder(f, gate, log)
 		fws = append(fws, fw)
 		go fw.serve(fl)
@@ -91,7 +97,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, err
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate, Root: s.Workspace}
 	go func() { _ = ctl.Serve(cl) }()
 
@@ -146,9 +152,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 
 	if err := cmd.Start(); err != nil {
 		if tty != nil {
-			tty.slave.Close()
-			tty.ctlPeer.Close()
-			tty.master.Close()
+			_ = tty.slave.Close()
+			_ = tty.ctlPeer.Close()
+			_ = tty.master.Close()
 		}
 		return 1, fmt.Errorf("start sandbox: %w%s", err, userNSHint())
 	}

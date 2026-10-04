@@ -49,7 +49,7 @@ func undoSession(t *testing.T) (*session.Session, *outbox.Box) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { box.Close() })
+	t.Cleanup(func() { _ = box.Close() })
 	return s, box
 }
 
@@ -220,7 +220,7 @@ func TestCloneApplyRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	got := scan(t, s)
 	if len(got) != 3 || got["mod.txt"] != review.Modified || got["new.txt"] != review.Added || got["del.txt"] != review.Deleted {
 		t.Fatalf("scan %v", got)
@@ -276,7 +276,7 @@ func appliedReplacedDir(t *testing.T, inner string) (*session.Session, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { box.Close() })
+	t.Cleanup(func() { _ = box.Close() })
 	if got := scan(t, s); got["d"] != review.Replaced || got[filepath.Join("d", inner)] != review.Added {
 		t.Fatalf("scan %v", got)
 	}
@@ -587,7 +587,7 @@ func appliedOverlayReplacedDir(t *testing.T) (*session.Session, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { box.Close() })
+	t.Cleanup(func() { _ = box.Close() })
 	if got := scan(t, s); got["src"] != review.Replaced || got[filepath.Join("src", "new.go")] != review.Added {
 		t.Fatalf("scan %v", got)
 	}
@@ -761,7 +761,7 @@ func TestRollbackKeepsFileInReplacedDirWithoutPrevious(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	cs := mustScan(t, s)
 	if err := os.Remove(d); err != nil { // gone before the apply
 		t.Fatal(err)
@@ -861,7 +861,7 @@ func overlayReplacedDir(t *testing.T, real, agent map[string]string) (*session.S
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { box.Close() })
+	t.Cleanup(func() { _ = box.Close() })
 	return s, box, src
 }
 

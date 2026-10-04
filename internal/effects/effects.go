@@ -56,7 +56,7 @@ func Open(path string) (*Log, error) {
 	}
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return &Log{db: db}, nil
@@ -66,9 +66,11 @@ func (l *Log) Add(e Effect) {
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}
-	pred, _ := json.Marshal(e.Predict)
-	if e.Predict == nil {
-		pred = []byte("[]")
+	pred := []byte("[]")
+	if e.Predict != nil {
+		if b, err := json.Marshal(e.Predict); err == nil {
+			pred = b
+		}
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -88,12 +90,12 @@ func Read(path string) ([]Effect, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	rows, err := db.Query(`SELECT t, kind, target, verdict, reason, predict FROM events ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Effect
 	for rows.Next() {
 		var e Effect

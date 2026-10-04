@@ -74,15 +74,15 @@ func openTerminal() (*terminal, error) {
 		return nil
 	})
 	if err != nil {
-		m.Close()
+		_ = m.Close()
 		return nil, err
 	}
 	// The agent's terminal starts with the user's settings and size.
 	_ = unix.IoctlSetTermios(sfd, unix.TCSETS, saved)
 	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
-		m.Close()
-		unix.Close(sfd)
+		_ = m.Close()
+		_ = unix.Close(sfd)
 		return nil, err
 	}
 	t := &terminal{
@@ -136,8 +136,8 @@ func (t *terminal) restore() {
 // the sandbox's ends, so the pseudo-terminal reports EOF when the last
 // process inside exits.
 func (t *terminal) start() {
-	t.slave.Close()
-	t.ctlPeer.Close()
+	_ = t.slave.Close()
+	_ = t.ctlPeer.Close()
 	t.raw()
 	go func() { _, _ = io.Copy(t.master, os.Stdin) }()
 	go func() {
@@ -201,6 +201,6 @@ func (t *terminal) finish() {
 	case <-time.After(5 * time.Second):
 	}
 	t.restore()
-	t.master.Close()
-	t.ctl.Close()
+	_ = t.master.Close()
+	_ = t.ctl.Close()
 }

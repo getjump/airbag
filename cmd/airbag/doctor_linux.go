@@ -30,7 +30,7 @@ func cmdDoctor() error {
 	_ = unix.Uname(&u)
 	rel := unix.ByteSliceToString(u.Release[:])
 	var major, minor int
-	fmt.Sscanf(rel, "%d.%d", &major, &minor)
+	_, _ = fmt.Sscanf(rel, "%d.%d", &major, &minor) // a release it cannot read fails the check as 0.0
 	check("kernel "+rel+" (need 5.12+: overlay in user namespaces, mount_setattr)",
 		major > 5 || (major == 5 && minor >= 12), "upgrade the kernel")
 

@@ -126,10 +126,13 @@ func (t *Tracker) record(tool, summary, id string, onlyIfChanged bool) Step {
 	t.last = now
 	t.n++
 	st := Step{N: t.n, Time: time.Now(), Tool: tool, Summary: summary, ID: id, Changes: ch}
-	if f, err := os.OpenFile(path(t.s), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
-		b, _ := json.Marshal(st)
-		_, _ = f.Write(append(b, '\n'))
-		f.Close()
+	// The record is best effort, like the attribution it serves: a step
+	// that is not written still shows its changes in the review.
+	if b, err := json.Marshal(st); err == nil {
+		if f, err := os.OpenFile(path(t.s), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+			_, _ = f.Write(append(b, '\n'))
+			_ = f.Close()
+		}
 	}
 	return st
 }
@@ -143,7 +146,7 @@ func Read(s *session.Session) ([]Step, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var out []Step
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 4<<20)

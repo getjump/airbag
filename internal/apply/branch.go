@@ -54,7 +54,7 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 			return err
 		}
 		if out, err := git(ws, nil, "rev-list", "--count", head, "--not", "--exclude=refs/airbag/*", "--all"); err == nil {
-			fmt.Sscan(strings.TrimSpace(out), &commits)
+			_, _ = fmt.Sscan(strings.TrimSpace(out), &commits) // only counted for the message
 		}
 	} else if out, err := git(ws, nil, "rev-parse", "HEAD"); err == nil {
 		head = strings.TrimSpace(out)
@@ -170,7 +170,7 @@ func fetchAgent(s *session.Session, head string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }() // a scratch repository in the session dir
 	if _, err := git("", nil, "init", "-q", "--bare", tmp); err != nil {
 		return err
 	}
@@ -199,7 +199,7 @@ func fetchAgent(s *session.Session, head string) error {
 func commitLeftovers(s *session.Session, cs []review.Change, base string) (string, int, error) {
 	ws := s.Workspace
 	idx := filepath.Join(s.Dir, "branch.index")
-	defer os.Remove(idx)
+	defer func() { _ = os.Remove(idx) }() // a scratch index in the session dir
 	env := []string{"GIT_INDEX_FILE=" + idx}
 	if _, err := git(ws, env, "read-tree", base); err != nil {
 		return "", 0, err

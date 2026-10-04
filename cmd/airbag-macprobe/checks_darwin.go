@@ -99,7 +99,7 @@ func checkSeatbelt(p *probe) Result {
 	if err != nil {
 		return fail(r, err)
 	}
-	defer px.Close()
+	defer func() { _ = px.Close() }()
 	// A second local listener on a port the profile does not allow. It is
 	// reachable from here, so a refusal inside the profile is Seatbelt's
 	// and not a network that happens to be down.
@@ -467,7 +467,7 @@ func checkTLS(p *probe) Result {
 	if err != nil {
 		return fail(r, err)
 	}
-	defer px.Close()
+	defer func() { _ = px.Close() }()
 	// attempt runs the TLS client through the proxy, inside prof, or
 	// outside any profile when prof is nil.
 	attempt := func(prof *Profile) tlsTry {

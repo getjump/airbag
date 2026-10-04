@@ -41,7 +41,7 @@ func cmdDoctor() error {
 	cwd, _ := os.Getwd()
 	src, err := os.CreateTemp(cwd, ".airbag-doctor-")
 	if err == nil {
-		src.Close()
+		_ = src.Close()
 		dst := filepath.Join(root, filepath.Base(src.Name()))
 		out, cerr := exec.Command("/bin/cp", "-c", src.Name(), dst).CombinedOutput()
 		check("APFS clone from this directory to "+root, cerr == nil,

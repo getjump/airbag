@@ -19,7 +19,7 @@ func TestForwarderTaint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	pol, err := policy.Load(t.TempDir(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)

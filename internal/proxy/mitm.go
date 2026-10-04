@@ -260,7 +260,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 			}
 		},
 	}
-	done := p.track(host, target, func() { tconn.Close() })
+	done := p.track(host, target, func() { _ = tconn.Close() })
 	defer done()
 	go func() { _ = srv.Serve(&oneConn{c: tconn}) }()
 	<-closed

@@ -137,7 +137,7 @@ func knownSecrets() []secret {
 					add(f.Rel, line)
 				}
 			}
-			f.F.Close()
+			_ = f.F.Close()
 		}
 	}
 	// Placeholders for credentials airbag substitutes are not secrets.
@@ -168,11 +168,18 @@ func runMasked(path string, argv []string, secrets []secret) int {
 	cmd.Stdin = os.Stdin
 	out, errw := newMasker(os.Stdout, secrets), newMasker(os.Stderr, secrets)
 	var drained []chan struct{}
+	var ends []*os.File // the write ends, for a return before the child has them
+	defer func() {
+		for _, w := range ends {
+			_ = w.Close()
+		}
+	}()
 	for _, m := range []*masker{out, errw} {
 		r, w, err := os.Pipe()
 		if err != nil {
 			return 126
 		}
+		ends = append(ends, w)
 		if m == out {
 			cmd.Stdout = w
 		} else {
@@ -184,7 +191,6 @@ func runMasked(path string, argv []string, secrets []secret) int {
 			_, _ = io.Copy(m, r)
 			close(done)
 		}(m, r)
-		defer w.Close()
 	}
 	sigs := make(chan os.Signal, 4)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
@@ -197,8 +203,8 @@ func runMasked(path string, argv []string, secrets []secret) int {
 			_ = cmd.Process.Signal(s)
 		}
 	}()
-	cmd.Stdout.(*os.File).Close() // the child holds its own copies
-	cmd.Stderr.(*os.File).Close()
+	_ = cmd.Stdout.(*os.File).Close() // the child holds its own copies
+	_ = cmd.Stderr.(*os.File).Close()
 	err := cmd.Wait()
 	for _, d := range drained {
 		select {

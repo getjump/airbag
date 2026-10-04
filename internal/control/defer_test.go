@@ -34,13 +34,16 @@ func deferServer(t *testing.T, yaml string) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { log.Close(); box.Close() })
+	t.Cleanup(func() { _ = log.Close(); _ = box.Close() })
 	return &Server{Box: box, Log: log, Gate: policy.NewGate(pol, dir), Root: ws}
 }
 
 func ask(t *testing.T, s *Server, in outbox.Intent) DeferReply {
 	t.Helper()
-	body, _ := json.Marshal(in)
+	body, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
 	w := httptest.NewRecorder()
 	s.deferCmd(w, httptest.NewRequest("POST", "/defer", bytes.NewReader(body)))
 	var d DeferReply

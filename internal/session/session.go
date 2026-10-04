@@ -127,7 +127,10 @@ func Create(m Meta) (*Session, error) {
 			return nil, err
 		}
 	}
-	return s, s.Save()
+	if err := s.Save(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func (s *Session) WSUpper() string             { return filepath.Join(s.Dir, "ws", "upper") }
@@ -307,7 +310,10 @@ func Resume(id, workspace string) (*Session, error) {
 	}
 	s.Status = StatusRunning
 	s.Runs = max(s.Runs, 1) + 1
-	return s, s.Save()
+	if err := s.Save(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // RemoveAll deletes a session. Overlay leaves a mode-000 work dir

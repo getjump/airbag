@@ -123,7 +123,7 @@ func TestMaskBodyStreams(t *testing.T) {
 	if err != nil || string(buf[:n]) != "data: one\n\n" {
 		t.Fatalf("event held back: %q %v", buf[:n], err)
 	}
-	pw.Close()
+	_ = pw.Close()
 }
 
 // A binding and a request match when they name the same host and port

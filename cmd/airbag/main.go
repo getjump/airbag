@@ -431,7 +431,7 @@ func cmdApply(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	out := term.Safe(os.Stdout)
 	defer out.Flush()
 	return apply.Apply(s, cs, box, apply.Options{
@@ -454,7 +454,7 @@ func cmdRollback(args []string) error {
 	var done []string
 	for _, it := range listIntents(s) {
 		if it.Status == outbox.Done || it.Status == outbox.Unknown {
-			done = append(done, fmt.Sprintf("intent %s `%s` (%s)", it.ID, strings.Join(it.Argv, " "), it.Status))
+			done = append(done, fmt.Sprintf("intent %s `%s` (%s)", it.ID, strings.Join(it.Argv, " "), it.Status)) //nolint:gocritic // backquotes for display, as in apply's messages; %#q would switch to Go quoting
 		}
 	}
 	out := term.Safe(os.Stdout)
@@ -486,7 +486,7 @@ func listIntents(s *session.Session) []outbox.Intent {
 	if err != nil {
 		return nil
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	intents, _ := box.List()
 	return intents
 }
