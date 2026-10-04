@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"container/list"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -34,8 +35,20 @@ type CA struct {
 	key  *ecdsa.PrivateKey
 	PEM  []byte
 
-	mu    sync.Mutex
-	certs map[string]*tls.Certificate
+	mu     sync.Mutex
+	leaves map[string]*list.Element // host → its *cachedLeaf in order
+	order  list.List                // most recently used first
+	max    int
+}
+
+// maxLeaves bounds the certificates a CA keeps. Under a wildcard
+// binding (*.example.com) the agent picks the names, and each would
+// otherwise stay; a leaf dropped is made again when next asked for.
+const maxLeaves = 256
+
+type cachedLeaf struct {
+	host string
+	cert *tls.Certificate
 }
 
 func NewCA(hosts []string) (*CA, error) {
@@ -75,7 +88,7 @@ func NewCA(hosts []string) (*CA, error) {
 		return nil, err
 	}
 	return &CA{cert: cert, key: key, PEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		certs: map[string]*tls.Certificate{}}, nil
+		leaves: map[string]*list.Element{}, max: maxLeaves}, nil
 }
 
 func serial() *big.Int {
@@ -83,12 +96,15 @@ func serial() *big.Int {
 	return n
 }
 
-// leaf returns a certificate for host, signed by the CA.
+// leaf returns a certificate for host, signed by the CA. The most
+// recently used ones are kept; one dropped from the cache stays valid
+// for a handshake that holds it already.
 func (c *CA) leaf(host string) (*tls.Certificate, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if t, ok := c.certs[host]; ok {
-		return t, nil
+	if e, ok := c.leaves[host]; ok {
+		c.order.MoveToFront(e)
+		return e.Value.(*cachedLeaf).cert, nil
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -112,7 +128,12 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	t := &tls.Certificate{Certificate: [][]byte{der, c.cert.Raw}, PrivateKey: key}
-	c.certs[host] = t
+	c.leaves[host] = c.order.PushFront(&cachedLeaf{host: host, cert: t})
+	for c.order.Len() > c.max {
+		e := c.order.Back()
+		c.order.Remove(e)
+		delete(c.leaves, e.Value.(*cachedLeaf).host)
+	}
 	return t, nil
 }
 
