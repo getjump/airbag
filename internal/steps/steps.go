@@ -42,6 +42,10 @@ type Tracker struct {
 
 func NewTracker(s *session.Session) *Tracker {
 	t := &Tracker{s: s}
+	// A resumed session numbers on from its last step.
+	if prev, _ := Read(s); len(prev) > 0 {
+		t.n = prev[len(prev)-1].N
+	}
 	t.last = t.snapshot()
 	return t
 }

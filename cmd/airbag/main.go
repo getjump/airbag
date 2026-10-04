@@ -29,8 +29,9 @@ import (
 
 const usage = `airbag — approve outcomes, not commands
 
-  airbag run [--allow HOST]... [--no-home] -- AGENT [ARGS...]
-      run the agent in a branch of the workspace and $HOME
+  airbag run [--allow HOST]... [--no-home] [--session ID|last] -- AGENT [ARGS...]
+      run the agent in a branch of the workspace and $HOME (--session: on the
+      branch of a stopped session, with its outbox and labels)
   airbag review [ID]          what the agent changed, sent and queued
   airbag diff [ID] [PATH...]  unified diff of changed files
   airbag apply [ID] [-i] [--only PATH]... [--yes] [--force] [--trust-git]
@@ -124,6 +125,7 @@ func cmdRun(args []string) (int, error) {
 	var passEnv stringList
 	fs.Var(&passEnv, "pass-env", "give the agent this credential-like environment variable (repeatable)")
 	strict := fs.Bool("strict", false, "keep the agent from creating user namespaces; breaks the agents' own sandboxes and Chromium's sandbox")
+	resume := fs.String("session", "", "run on the branch of a stopped session (its ID, or last) instead of a new one")
 	nixDaemon := fs.Bool("nix-daemon", false, "let the agent use the Nix daemon; its builds and substitutes reach the network outside airbag's proxy")
 	_ = fs.Parse(args)
 	argv := fs.Args()
@@ -164,15 +166,40 @@ func cmdRun(args []string) (int, error) {
 	if *nixDaemon {
 		fmt.Fprintln(os.Stderr, "airbag: warning: --nix-daemon: Nix builds and substitutes run outside the sandbox and reach the network without the proxy")
 	}
-	s, err := session.Create(session.Meta{
-		Workspace: ws, Home: home, OverHome: !*noHome,
-		UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
-		Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
-		Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
-		PassEnv: passEnv, Strict: *strict,
-	})
-	if err != nil {
-		return 1, err
+	var s *session.Session
+	if *resume != "" {
+		// Same branch, same outbox and labels; this run's command, plus
+		// whatever this run's flags add.
+		if s, err = session.Resume(*resume, ws); err != nil {
+			return 1, err
+		}
+		s.Argv, s.Cwd = argv, cwd
+		for _, h := range allow {
+			if !slices.Contains(s.Allow, h) {
+				s.Allow = append(s.Allow, h)
+			}
+		}
+		for _, k := range passEnv {
+			if !slices.Contains(s.PassEnv, k) {
+				s.PassEnv = append(s.PassEnv, k)
+			}
+		}
+		s.Strict = s.Strict || *strict
+		if err := s.Save(); err != nil {
+			return 1, err
+		}
+		fmt.Fprintf(os.Stderr, "airbag: resuming session %s (run %d) on its branch\n", s.ID, s.Runs)
+	} else {
+		s, err = session.Create(session.Meta{
+			Workspace: ws, Home: home, OverHome: !*noHome,
+			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
+			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
+			Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
+			PassEnv: passEnv, Strict: *strict,
+		})
+		if err != nil {
+			return 1, err
+		}
 	}
 	if filepath.Base(argv[0]) == "codex" && !slices.Contains(argv, "--dangerously-bypass-approvals-and-sandbox") && !slices.Contains(argv, "--yolo") {
 		if *strict {

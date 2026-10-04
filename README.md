@@ -144,6 +144,11 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   Codex's own `--sandbox` modes and Chromium's sandbox fail under it (run
   Codex with `--dangerously-bypass-approvals-and-sandbox`, Chromium with
   `--no-sandbox`).
+- **More than one run.** `airbag run --session last -- claude --continue` runs the
+  agent again on the branch of a stopped session: it sees its own earlier changes,
+  the outbox and the effect log continue, and what the session learned stays (a
+  secret read in the first run still narrows egress in the second). Iterate
+  "agent, review, tell it what to fix, agent again" without applying in between.
 - **Its own state.** Transcripts and logins (`~/.claude/projects`, `~/.codex/sessions`,
   tokens) pass through, so discarding a branch does not log you out.
 

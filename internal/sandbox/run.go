@@ -75,6 +75,18 @@ const NixDaemonSocket = "/nix/var/nix/daemon-socket"
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
 	gate := policy.NewGate(pol, s.Dir)
+	// A resumed session keeps what it learned before: a secret read in
+	// an earlier run still narrows egress in this one.
+	if prev, err := effects.Read(s.EffectsPath()); err == nil {
+		for _, e := range prev {
+			switch {
+			case e.Kind == "secret.read":
+				gate.Mark(taint.Secret, e.Target)
+			case e.Kind == "label" && e.Verdict == string(taint.Untrusted):
+				gate.Mark(taint.Untrusted, e.Target)
+			}
+		}
+	}
 	log, err := effects.Open(s.EffectsPath())
 	if err != nil {
 		return 1, err

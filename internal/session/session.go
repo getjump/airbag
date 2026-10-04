@@ -53,6 +53,8 @@ type Meta struct {
 	// Branch: the workspace result went to this branch of the real
 	// repository (apply --branch) instead of the working tree.
 	Branch string `json:"branch,omitempty"`
+	// Runs counts the agent runs on this branch; 0 or 1 for one run.
+	Runs int `json:"runs,omitempty"`
 	// Baseline: real files changed after this time conflict with the
 	// branch. The session's start, or the last rollback, which put the
 	// files back as they were.
@@ -92,6 +94,7 @@ func Create(m Meta) (*Session, error) {
 	m.ID = newID()
 	m.Created = time.Now()
 	m.Status = StatusRunning
+	m.Runs = 1
 	s := &Session{Meta: m, Dir: filepath.Join(root, m.ID)}
 	for _, d := range []string{
 		s.WSUpper(), s.WSWork(), s.HomeUpper(), s.HomeWork(), s.EtcUpper(), s.EtcWork(),
@@ -176,6 +179,58 @@ func Find(id, workspace string) (*Session, error) {
 		}
 	}
 	return nil, fmt.Errorf("no open session for %s", workspace)
+}
+
+// Resume reopens a stopped session for another run on the same branch:
+// the upper layers stay, overlayfs gets fresh work directories and the
+// run directory loses the sockets of the previous run.
+func Resume(id, workspace string) (*Session, error) {
+	var s *Session
+	if id == "last" {
+		all, err := List()
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range all {
+			if c.Workspace == workspace && c.Status == StatusStopped {
+				s = c
+				break
+			}
+		}
+		if s == nil {
+			return nil, fmt.Errorf("no stopped session to resume for %s", workspace)
+		}
+	} else {
+		var err error
+		if s, err = Load(filepath.Join(Root(), id)); err != nil {
+			return nil, err
+		}
+	}
+	switch {
+	case s.Workspace != workspace:
+		return nil, fmt.Errorf("session %s is a branch of %s, not of %s", s.ID, s.Workspace, workspace)
+	case s.Status == StatusRunning:
+		return nil, fmt.Errorf("session %s is running", s.ID)
+	case s.Status != StatusStopped:
+		return nil, fmt.Errorf("session %s is %s; only a stopped session can be resumed", s.ID, s.Status)
+	}
+	for _, d := range []string{s.WSWork(), s.HomeWork(), s.EtcWork(), s.RunDir()} {
+		_ = filepath.WalkDir(d, func(p string, de os.DirEntry, err error) error {
+			if err == nil && de.IsDir() {
+				_ = os.Chmod(p, 0o700)
+			}
+			return nil
+		})
+		if err := os.RemoveAll(d); err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	s.Status = StatusRunning
+	s.Runs = max(s.Runs, 1) + 1
+	return s, s.Save()
 }
 
 // RemoveAll deletes a session. Overlay leaves a mode-000 work dir
