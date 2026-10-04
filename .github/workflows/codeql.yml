@@ -1,0 +1,42 @@
+name: codeql
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # New queries arrive with new CodeQL releases.
+    - cron: "41 4 * * 1"
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write # upload the results
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # go.mod's Go, set up first: CodeQL extracts with the go it finds.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: go
+          build-mode: manual
+          queries: security-extended
+      - name: build for Linux and macOS
+        run: |
+          go build ./...
+          GOOS=darwin go build ./...
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:go
