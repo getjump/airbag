@@ -257,36 +257,49 @@ func (l *Live) MaskBody(r io.ReadCloser) io.ReadCloser {
 }
 
 type masked struct {
-	r        io.ReadCloser
-	from, to []byte
-	buf, out []byte
-	eof      bool
+	r    io.ReadCloser
+	from []byte
+	to   []byte
+	// pend holds input bytes not yet emitted; it never holds a
+	// placeholder already written out, so a replacement is never
+	// rescanned and the result equals a single bytes.ReplaceAll.
+	pend []byte
+	out  []byte
+	eof  bool
 }
 
 func (m *masked) Read(p []byte) (int, error) {
 	for len(m.out) == 0 {
 		if m.eof {
-			if len(m.buf) == 0 {
+			if len(m.pend) == 0 {
 				return 0, io.EOF
 			}
-			m.out, m.buf = bytes.ReplaceAll(m.buf, m.from, m.to), nil
+			m.out, m.pend = m.pend, nil
 			break
 		}
 		chunk := make([]byte, 32<<10)
 		n, err := m.r.Read(chunk)
-		m.buf = append(m.buf, chunk[:n]...)
+		m.pend = append(m.pend, chunk[:n]...)
 		if err == io.EOF {
 			m.eof = true
 		} else if err != nil {
 			return 0, err
 		}
-		m.buf = bytes.ReplaceAll(m.buf, m.from, m.to)
+		for {
+			i := bytes.Index(m.pend, m.from)
+			if i < 0 {
+				break
+			}
+			m.out = append(m.out, m.pend[:i]...)
+			m.out = append(m.out, m.to...)
+			m.pend = m.pend[i+len(m.from):]
+		}
 		if !m.eof {
 			// Hold back only a tail that could be the start of a value
 			// cut in two, so a stream (server-sent events) is not held up.
-			keep := partial(m.buf, m.from)
-			m.out = append(m.out, m.buf[:len(m.buf)-keep]...)
-			m.buf = append([]byte(nil), m.buf[len(m.buf)-keep:]...)
+			keep := partial(m.pend, m.from)
+			m.out = append(m.out, m.pend[:len(m.pend)-keep]...)
+			m.pend = append([]byte(nil), m.pend[len(m.pend)-keep:]...)
 		}
 	}
 	n := copy(p, m.out)
