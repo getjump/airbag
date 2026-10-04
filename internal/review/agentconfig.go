@@ -367,6 +367,10 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		if err != nil {
 			return "", false // a symlink or other non-regular file: leave it alone
 		}
+		mode := os.FileMode(0o600) // the mode the replacement is given
+		if fi, err := os.Lstat(realPath); err == nil {
+			mode = fi.Mode().Perm()
+		}
 		if !exists && haveBase && !absent {
 			// The file was there when the run began (its base is not
 			// empty): the host removed it since. That is a host edit;
@@ -486,8 +490,12 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		if s.WroteBack == nil {
 			s.WroteBack = map[string]session.WriteStamp{}
 		}
+		// Only airbag's own bytes with the mode it gave them: a host
+		// chmod right after the write is not airbag's.
+		beforeStamp()
 		after, ok := stamp(realPath)
-		if ok && !hostEdited && after.SHA256 == digest(out) {
+		fi, ferr := os.Lstat(realPath)
+		if ok && !hostEdited && after.SHA256 == digest(out) && ferr == nil && fi.Mode().Perm() == mode {
 			s.WroteBack[realPath] = after
 		} else {
 			delete(s.WroteBack, realPath)
@@ -981,6 +989,10 @@ func keepAside(tmp, dir string) (string, error) {
 
 // afterSwap is a test hook: a host write between the swap and its undo.
 var afterSwap = func() {}
+
+// beforeStamp is a test hook: a host edit between the write-back and its
+// record.
+var beforeStamp = func() {}
 
 func cannotSwap(err error) bool {
 	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.ENOTSUP)

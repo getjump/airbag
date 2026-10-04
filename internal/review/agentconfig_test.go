@@ -938,3 +938,26 @@ func TestReplaceIfKeepsBesideWhenKeepDirFails(t *testing.T) {
 		t.Fatalf("kept at %s, want the older host write beside the config", kept.path)
 	}
 }
+
+// A host chmod between the write-back and its record is not recorded
+// as airbag's own write, so apply still sees it.
+func TestWriteBackStampSkipsARacingChmod(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
+	s.Created = time.Now() // the real file predates the session
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"userID":"u","numStartups":2,"mcpServers":{}}`)
+	beforeStamp = func() {
+		if err := os.Chmod(realPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { beforeStamp = func() {} })
+	WriteBackConfigs(s)
+	if got := readCfg(t, realPath); got["numStartups"] != float64(2) {
+		t.Fatalf("real file = %v, want the counter written back", got)
+	}
+	if OwnWrite(s, realPath) {
+		t.Fatal("a host chmod after the write-back was recorded as airbag's own write")
+	}
+}
