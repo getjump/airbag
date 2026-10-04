@@ -7,45 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
 )
-
-// probe is the state the checks share.
-type probe struct {
-	opts    options
-	dir     string // the temporary directory, resolved
-	home    string
-	tag     string // marks the Seatbelt check's denials in the log
-	mnt     string // the NFS mount point, once mounted
-	mounted bool
-	srv     *nfsServer
-}
-
-// run runs a command with a timeout and returns its combined output.
-func run(timeout time.Duration, dir string, name string, args ...string) (string, error) {
-	return runEnv(timeout, dir, nil, name, args...)
-}
-
-// runEnv is run with the environment env (nil: this process's).
-func runEnv(timeout time.Duration, dir string, env []string, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		err = fmt.Errorf("timed out after %s", timeout)
-	}
-	return string(out), err
-}
-
-// shq quotes s for sh.
-func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // markers parses "key=value" lines.
 func markers(out string) map[string]string {
@@ -97,7 +63,12 @@ const tlsClientArg = "__tls_client"
 // runs inside the sandbox in the TLS check.
 func tlsClient(url string) int {
 	c := &http.Client{Timeout: 20 * time.Second}
-	resp, err := c.Get(url)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil) //nolint:gosec // the URL the probe passes itself for its TLS check
+	if err != nil {
+		fmt.Println("tls=error", err)
+		return 1
+	}
+	resp, err := c.Do(req) //nolint:gosec // the URL the probe passes itself for its TLS check
 	if err != nil {
 		fmt.Println("tls=error", err)
 		return 1
@@ -160,9 +131,6 @@ func gitEnv(env []string) []string {
 	return append(out, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
 }
 
-// gitArgs are prepended to every git command the probe runs.
-var gitArgs = []string{"-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.email=probe@example.com", "-c", "user.name=probe"}
-
 // violationLines picks the Seatbelt denials that name file from the
 // output of `log show --style ndjson`: entries whose message is a
 // "deny" and contains file. Other lines, such as the "Filtering the log
@@ -216,13 +184,3 @@ func platformTrust(env []string) (out, removed []string) {
 	}
 	return out, removed
 }
-
-func seconds(d time.Duration) float64 { return d.Seconds() }
-
-func timed(f func() error) (time.Duration, error) {
-	t := time.Now()
-	err := f()
-	return time.Since(t), err
-}
-
-func writeFile(p, s string) error { return os.WriteFile(p, []byte(s), 0o644) }

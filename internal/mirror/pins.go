@@ -33,7 +33,7 @@ func FindPins(workspace string) Pins {
 	pins := Pins{}
 	_ = filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // an unreadable entry pins nothing, and fewer pins only make the mirror stricter
 		}
 		if d.IsDir() {
 			switch d.Name() {
@@ -165,7 +165,7 @@ func eachLine(path string, f func(string)) {
 	if err != nil {
 		return
 	}
-	defer fh.Close()
+	defer func() { _ = fh.Close() }() // read only
 	sc := bufio.NewScanner(fh)
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	for sc.Scan() {

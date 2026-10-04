@@ -3,6 +3,8 @@ package shim
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -59,7 +61,7 @@ func Shell(name string, args []string) {
 }
 
 func execOrDie(path string, argv []string) {
-	err := syscall.Exec(path, argv, os.Environ())
+	err := syscall.Exec(path, argv, os.Environ()) //nolint:gosec // the shim becomes the shell it stands in for, inside the sandbox
 	fmt.Fprintf(os.Stderr, "airbag: exec %s: %v\n", path, err)
 	os.Exit(126)
 }
@@ -136,7 +138,7 @@ func knownSecrets() []secret {
 					add(f.Rel, line)
 				}
 			}
-			f.F.Close()
+			_ = f.F.Close()
 		}
 	}
 	// Placeholders for credentials airbag substitutes are not secrets.
@@ -162,16 +164,23 @@ func knownSecrets() []secret {
 // the shell exits, output still in flight is drained for a moment; a
 // process that kept the pipe open does not keep the shim alive.
 func runMasked(path string, argv []string, secrets []secret) int {
-	cmd := exec.Command(path, argv[1:]...)
+	cmd := exec.CommandContext(context.Background(), path, argv[1:]...) //nolint:gosec // the shell the shim stands in for, inside the sandbox
 	cmd.Args[0] = argv[0]
 	cmd.Stdin = os.Stdin
 	out, errw := newMasker(os.Stdout, secrets), newMasker(os.Stderr, secrets)
 	var drained []chan struct{}
+	var ends []*os.File // the write ends, for a return before the child has them
+	defer func() {
+		for _, w := range ends {
+			_ = w.Close()
+		}
+	}()
 	for _, m := range []*masker{out, errw} {
 		r, w, err := os.Pipe()
 		if err != nil {
 			return 126
 		}
+		ends = append(ends, w)
 		if m == out {
 			cmd.Stdout = w
 		} else {
@@ -183,7 +192,6 @@ func runMasked(path string, argv []string, secrets []secret) int {
 			_, _ = io.Copy(m, r)
 			close(done)
 		}(m, r)
-		defer w.Close()
 	}
 	sigs := make(chan os.Signal, 4)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
@@ -196,8 +204,8 @@ func runMasked(path string, argv []string, secrets []secret) int {
 			_ = cmd.Process.Signal(s)
 		}
 	}()
-	cmd.Stdout.(*os.File).Close() // the child holds its own copies
-	cmd.Stderr.(*os.File).Close()
+	_ = cmd.Stdout.(*os.File).Close() // the child holds its own copies
+	_ = cmd.Stderr.(*os.File).Close()
 	err := cmd.Wait()
 	for _, d := range drained {
 		select {
@@ -207,7 +215,8 @@ func runMasked(path string, argv []string, secrets []secret) int {
 	}
 	out.Flush()
 	errw.Flush()
-	if ee, ok := err.(*exec.ExitError); ok {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
 		if st, ok := ee.Sys().(syscall.WaitStatus); ok && st.Signaled() {
 			return 128 + int(st.Signal())
 		}

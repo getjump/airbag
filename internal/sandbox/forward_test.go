@@ -1,3 +1,5 @@
+//go:build linux
+
 package sandbox
 
 import (
@@ -19,7 +21,7 @@ func TestForwarderTaint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	pol, err := policy.Load(t.TempDir(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +29,7 @@ func TestForwarderTaint(t *testing.T) {
 	gate := policy.NewGate(pol, t.TempDir())
 	gate.Mark(taint.Secret, ".env")
 
-	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	echo, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

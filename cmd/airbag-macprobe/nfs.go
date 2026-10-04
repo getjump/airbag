@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -31,7 +30,7 @@ type nfsServer struct {
 }
 
 func startNFS(dir string) (*nfsServer, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
@@ -136,11 +135,6 @@ func namesPath(dirpath, p []byte) bool {
 		dirpath = dirpath[:n-1]
 	}
 	return subtle.ConstantTimeCompare(dirpath, p) == 1
-}
-
-// refusedNote says how many MOUNT requests the server refused, for N1.
-func refusedNote(late, other int) string {
-	return fmt.Sprintf("the probe's NFS server refused %d mount request(s) that named the armed path after its grant, and %d that named another path", late, other)
 }
 
 // connListener keeps the connections it accepted, so that closeAll can

@@ -3,6 +3,7 @@ package apply
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -54,7 +55,7 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 			return err
 		}
 		if out, err := git(ws, nil, "rev-list", "--count", head, "--not", "--exclude=refs/airbag/*", "--all"); err == nil {
-			fmt.Sscan(strings.TrimSpace(out), &commits)
+			_, _ = fmt.Sscan(strings.TrimSpace(out), &commits) // only counted for the message
 		}
 	} else if out, err := git(ws, nil, "rev-parse", "HEAD"); err == nil {
 		head = strings.TrimSpace(out)
@@ -147,6 +148,11 @@ func agentHead(s *session.Session) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The agent wrote what HEAD holds, and it goes to git on this
+	// machine as an argument: "--output=..." would be an option there.
+	if !isObjectID(sha) {
+		return "", errors.New("HEAD does not name a commit")
+	}
 	real, err := git(s.Workspace, nil, "rev-parse", "HEAD")
 	if err == nil && strings.TrimSpace(real) == sha {
 		return "", nil
@@ -165,7 +171,7 @@ func fetchAgent(s *session.Session, head string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }() // a scratch repository in the session dir
 	if _, err := git("", nil, "init", "-q", "--bare", tmp); err != nil {
 		return err
 	}
@@ -174,7 +180,7 @@ func fetchAgent(s *session.Session, head string) error {
 		return err
 	}
 	alt := strings.TrimSpace(realObjects) + "\n" + filepath.Join(s.WSBranch(), ".git", "objects") + "\n"
-	if err := os.WriteFile(filepath.Join(tmp, "objects", "info", "alternates"), []byte(alt), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmp, "objects", "info", "alternates"), []byte(alt), 0o600); err != nil {
 		return err
 	}
 	if _, err := git("", nil, "--git-dir", tmp, "update-ref", "refs/heads/agent", head); err != nil {
@@ -194,7 +200,7 @@ func fetchAgent(s *session.Session, head string) error {
 func commitLeftovers(s *session.Session, cs []review.Change, base string) (string, int, error) {
 	ws := s.Workspace
 	idx := filepath.Join(s.Dir, "branch.index")
-	defer os.Remove(idx)
+	defer func() { _ = os.Remove(idx) }() // a scratch index in the session dir
 	env := []string{"GIT_INDEX_FILE=" + idx}
 	if _, err := git(ws, env, "read-tree", base); err != nil {
 		return "", 0, err
@@ -226,7 +232,8 @@ func commitLeftovers(s *session.Session, cs []review.Change, base string) (strin
 	}
 	var info bytes.Buffer
 	for _, c := range keep {
-		mode, sha := "100644", ""
+		mode := "100644"
+		var sha string
 		var err error
 		switch {
 		case c.Type == fs.ModeSymlink:
@@ -305,6 +312,19 @@ func notIgnored(ws string, cs []review.Change) ([]review.Change, error) {
 	return keep, nil
 }
 
+// isObjectID reports whether s is a SHA-1 or SHA-256 object name.
+func isObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func isGitPath(rel string) bool {
 	for _, p := range strings.Split(filepath.ToSlash(rel), "/") {
 		if p == ".git" {
@@ -319,7 +339,7 @@ func git(dir string, env []string, args ...string) (string, error) {
 }
 
 func gitIn(dir string, env []string, stdin io.Reader, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(context.Background(), "git", args...) //nolint:gosec // callers pass their own subcommands; paths from the sandbox follow "--" or an option that takes them
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
 	if stdin != nil {

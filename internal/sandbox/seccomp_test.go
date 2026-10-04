@@ -74,3 +74,17 @@ func TestTTYFilter(t *testing.T) {
 		}
 	}
 }
+
+// A jump too long for BPF's 8-bit offset stops the build of the filter
+// instead of wrapping around to another instruction.
+func TestJumpFits(t *testing.T) {
+	if jump(255) != 255 {
+		t.Fatal("jump(255)")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("jump(256) wrapped")
+		}
+	}()
+	jump(256)
+}

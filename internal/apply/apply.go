@@ -4,6 +4,7 @@ package apply
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -152,10 +153,7 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		for _, c := range picked {
 			if err := gen.apply(c); err != nil {
 				left, rerr := gen.rollback(o.Out)
-				if rerr != nil || left > 0 {
-					return fmt.Errorf("%s: %w; rolling back what was applied also failed (%v), see `airbag rollback %s`", c.Path, err, rerr, s.ID)
-				}
-				return fmt.Errorf("%s: %w; nothing applied, the changes are back in the session", c.Path, err)
+				return applyFailed(c.Path, s.ID, err, left, rerr)
 			}
 		}
 		if err := gen.finish(); err != nil {
@@ -195,6 +193,18 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 
 // choose picks the units to apply: all of them, the ones matching
 // --only, or one by one.
+// applyFailed says what a failed step left behind once the steps before
+// it were rolled back: nothing, or paths the rollback could not undo.
+func applyFailed(path, id string, err error, left int, rerr error) error {
+	switch {
+	case rerr != nil:
+		return fmt.Errorf("%s: %w; rolling back what was applied also failed (%w), see `airbag rollback %s`", path, err, rerr, id)
+	case left > 0:
+		return fmt.Errorf("%s: %w; rolling back what was applied left %d paths as they are, see `airbag rollback %s`", path, err, left, id)
+	}
+	return fmt.Errorf("%s: %w; nothing applied, the changes are back in the session", path, err)
+}
+
 func choose(units []Unit, in *bufio.Reader, o Options) ([]Unit, error) {
 	if len(units) == 0 {
 		return nil, nil
@@ -389,7 +399,7 @@ func runPush(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, 
 		}
 		return outbox.Rejected, nil
 	}
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(context.Background(), "git", args...) //nolint:gosec // a push outbox.GitPush checked and the user confirmed
 	cmd.Dir = cwd
 	return run(box, it, cmd, o)
 }
@@ -462,7 +472,7 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, i
 		}
 		return outbox.Rejected, nil
 	}
-	cmd := exec.Command(prog, it.Argv[1:]...)
+	cmd := exec.CommandContext(context.Background(), prog, it.Argv[1:]...) //nolint:gosec // a deferred command: a program from this machine's PATH, its files checked, confirmed by the user
 	cmd.Args[0] = it.Argv[0]
 	cmd.Dir, cmd.Env = cwd, env
 	return run(box, it, cmd, o)
@@ -492,7 +502,7 @@ func hashFile(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
@@ -510,7 +520,7 @@ func pushTarget(cwd string, args []string) string {
 			break
 		}
 	}
-	out, err := exec.Command("git", "-C", cwd, "remote", "get-url", "--push", remote).Output()
+	out, err := exec.CommandContext(context.Background(), "git", "-C", cwd, "remote", "get-url", "--push", remote).Output() //nolint:gosec // remote is an argument that does not start with "-"
 	if err != nil {
 		return remote
 	}
@@ -562,25 +572,25 @@ func applyOne(c review.Change) error {
 // copyFile replaces dst atomically: write a temp file next to it, then
 // rename over the old one.
 func copyFile(src, dst string, mode fs.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil { //nolint:gosec // a directory in the user's workspace, with the usual mode less the umask
 		return err
 	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }() // read only
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".airbag-*")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }() // gone after the rename
 	if _, err := io.Copy(tmp, in); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {

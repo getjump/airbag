@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -197,7 +198,7 @@ func buildWorld(s *session.Session) error {
 		if err != nil {
 			for _, f := range secrets {
 				if herr := hide(filepath.Join(s.Workspace, f.Rel)); herr != nil {
-					return fmt.Errorf("secret %s is neither tracked (%v) nor hidden: %w", f.Rel, err, herr)
+					return fmt.Errorf("secret %s is neither tracked (%w) nor hidden: %w", f.Rel, err, herr)
 				}
 			}
 			fmt.Fprintf(os.Stderr, "airbag: warning: %d secret files are hidden from the agent: reads cannot be tracked (%v)\n", len(secrets), err)
@@ -230,10 +231,10 @@ func agentConfig(s *session.Session) error {
 		return fmt.Errorf("/etc overlay: %w", err)
 	}
 	dir := agents.ClaudeManagedSettingsDir
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // /etc in the sandbox: the agent reads its managed settings here
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "90-airbag.json"), agents.ClaudeManagedSettings(), 0o444); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "90-airbag.json"), agents.ClaudeManagedSettings(), 0o444); err != nil { //nolint:gosec // managed settings the agent must read and must not change
 		return err
 	}
 	top := filepath.Dir(dir)
@@ -250,10 +251,10 @@ func agentConfig(s *session.Session) error {
 		fmt.Fprintf(os.Stderr, "airbag: note: %s exists on this host; Codex hooks are not installed\n", req)
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(req), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(req), 0o755); err != nil { //nolint:gosec // /etc in the sandbox: the agent reads its requirements here
 		return err
 	}
-	if err := os.WriteFile(req, agents.CodexRequirements(), 0o444); err != nil {
+	if err := os.WriteFile(req, agents.CodexRequirements(), 0o444); err != nil { //nolint:gosec // requirements the agent must read and must not change
 		return err
 	}
 	cdir := filepath.Dir(req)
@@ -309,7 +310,7 @@ func privateRun(s *session.Session) error {
 	if err := unix.Mount("tmpfs", "/run", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755"); err != nil {
 		return fmt.Errorf("tmpfs /run: %w", err)
 	}
-	if err := os.MkdirAll(shim.BinDir, 0o755); err != nil {
+	if err := os.MkdirAll(shim.BinDir, 0o755); err != nil { //nolint:gosec // the shims' directory, which every program in the sandbox searches
 		return err
 	}
 	socks := map[string]string{
@@ -382,7 +383,7 @@ func overlay(lower, upper, work, target string) error {
 func hide(p string) error {
 	st, err := os.Lstat(p)
 	if err != nil || st.Mode()&os.ModeSymlink != 0 {
-		return nil
+		return nil //nolint:nilerr // what PID 1 cannot stat, the agent, with fewer rights, cannot open either
 	}
 	if st.IsDir() {
 		return unix.Mount("tmpfs", p, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0700")
@@ -392,12 +393,14 @@ func hide(p string) error {
 
 // loopbackUp brings up lo in the new network namespace. There is no
 // other interface: the only way out is the proxy bridge.
+//
+//nolint:gosec // unsafe: SIOC[GS]IFFLAGS take a pointer to the ifreq, whose flags sit after the name
 func loopbackUp() error {
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	var ifr [unix.IFNAMSIZ + 24]byte
 	copy(ifr[:], "lo")
 	if _, _, e := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.SIOCGIFFLAGS, uintptr(unsafe.Pointer(&ifr[0]))); e != 0 {
@@ -414,7 +417,7 @@ func loopbackUp() error {
 // startBridge forwards 127.0.0.1:3128 inside the sandbox to the host
 // proxy's unix socket.
 func startBridge() error {
-	l, err := net.Listen("tcp", ProxyAddr)
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", ProxyAddr)
 	if err != nil {
 		return err
 	}
@@ -426,7 +429,7 @@ func startBridge() error {
 			}
 			go func() {
 				defer c.Close()
-				up, err := net.Dial("unix", proxySockInside)
+				up, err := (&net.Dialer{}).DialContext(context.Background(), "unix", proxySockInside)
 				if err != nil {
 					return
 				}
@@ -456,7 +459,7 @@ func startForwards(s *session.Session) error {
 		if strconv.Itoa(f.Port) == strings.TrimPrefix(ProxyAddr, "127.0.0.1:") {
 			return fmt.Errorf("%s: port %d is airbag's proxy inside the sandbox", f, f.Port)
 		}
-		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", f.Port))
+		l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", f.Port))
 		if err != nil {
 			return fmt.Errorf("%s: %w", f, err)
 		}
@@ -469,7 +472,7 @@ func startForwards(s *session.Session) error {
 				}
 				go func() {
 					defer c.Close()
-					up, err := net.Dial("unix", sock)
+					up, err := (&net.Dialer{}).DialContext(context.Background(), "unix", sock)
 					if err != nil {
 						return
 					}
@@ -513,7 +516,7 @@ func runAgent(s *session.Session, ctl *os.File) int {
 		}
 		path = p
 	}
-	cmd := exec.Command(path, s.Argv[1:]...)
+	cmd := exec.CommandContext(context.Background(), path, s.Argv[1:]...) //nolint:gosec // the command the user asked to run in the sandbox
 	cmd.Args[0] = s.Argv[0]
 	cmd.Env = env
 	cmd.Dir = s.Cwd

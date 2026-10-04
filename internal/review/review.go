@@ -153,12 +153,12 @@ func sameContent(a, b string) bool {
 	if err != nil {
 		return false
 	}
-	defer fa.Close()
+	defer func() { _ = fa.Close() }()
 	fb, err := os.Open(b)
 	if err != nil {
 		return false
 	}
-	defer fb.Close()
+	defer func() { _ = fb.Close() }()
 	sa, _ := fa.Stat()
 	sb, _ := fb.Stat()
 	if sa.Size() != sb.Size() {
@@ -260,7 +260,7 @@ func knownSecrets(ws string) []string {
 				add(line)
 			}
 		}
-		fh.Close()
+		_ = fh.Close()
 	}
 	return out
 }

@@ -9,6 +9,7 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -40,9 +41,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, err
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 
-	pl, err := net.Listen("unix", s.ProxySock())
+	pl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ProxySock())
 	if err != nil {
 		return 1, err
 	}
@@ -59,13 +60,19 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	// tcp:// forwards: one unix socket each, bridged inside the sandbox
 	// to 127.0.0.1:PORT (startForwards).
 	var fws []*forwarder
+	var fls []net.Listener // each serves until the session ends
+	defer func() {
+		for _, l := range fls {
+			_ = l.Close()
+		}
+	}()
 	for i, f := range s.Forwards {
 		_ = os.Remove(s.ForwardSock(i))
-		fl, err := net.Listen("unix", s.ForwardSock(i))
+		fl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ForwardSock(i))
 		if err != nil {
 			return 1, err
 		}
-		defer fl.Close()
+		fls = append(fls, fl)
 		fw := newForwarder(f, gate, log)
 		fws = append(fws, fw)
 		go fw.serve(fl)
@@ -82,7 +89,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	})
 	go func() { _ = px.Serve(pl) }()
 
-	cl, err := net.Listen("unix", s.ControlSock())
+	cl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ControlSock())
 	if err != nil {
 		return 1, err
 	}
@@ -91,7 +98,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, err
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate, Root: s.Workspace}
 	go func() { _ = ctl.Serve(cl) }()
 
@@ -119,7 +126,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, fmt.Errorf("pseudo-terminal: %w", err)
 	}
-	cmd := exec.Command(self, InitArg, s.Dir)
+	cmd := exec.CommandContext(context.Background(), self, InitArg, s.Dir) //nolint:gosec // airbag itself, as the sandbox's PID 1
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The sandbox gets a session of its own, so the user's terminal is
 	// never its controlling terminal (tty.go).
@@ -154,9 +161,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 
 	if err := cmd.Start(); err != nil {
 		if tty != nil {
-			tty.slave.Close()
-			tty.ctlPeer.Close()
-			tty.master.Close()
+			_ = tty.slave.Close()
+			_ = tty.ctlPeer.Close()
+			_ = tty.master.Close()
 		}
 		return 1, fmt.Errorf("start sandbox: %w%s", err, userNSHint())
 	}

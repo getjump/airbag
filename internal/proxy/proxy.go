@@ -289,7 +289,7 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string) {
 	up, err := p.dial(r.Host, !p.Allow.explicitIP(host))
 	if err != nil {
 		if !p.refuse(w, r.Host, host, err) {
-			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway) //nolint:gocritic // the return follows the if
 		}
 		return
 	}
@@ -320,7 +320,7 @@ func (p *Proxy) dial(hostport string, check bool) (net.Conn, error) {
 	if pu == nil {
 		return p.dialer(check).Dial("tcp", hostport)
 	}
-	c, err := net.DialTimeout("tcp", pu.Host, 15*time.Second)
+	c, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(context.Background(), "tcp", pu.Host)
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +333,7 @@ func (p *Proxy) dial(hostport string, check bool) (net.Conn, error) {
 		return nil, err
 	}
 	br := bufio.NewReader(c)
-	resp, err := http.ReadResponse(br, req)
+	resp, err := http.ReadResponse(br, req) //nolint:bodyclose // the reply to CONNECT: its body is the tunnel, c, which is returned or closed below
 	if err != nil {
 		c.Close()
 		return nil, err
@@ -371,7 +371,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string) {
 	resp, err := tr.RoundTrip(out)
 	if err != nil {
 		if !p.refuse(w, r.Host, host, err) {
-			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway) //nolint:gocritic // the return follows the if
 		}
 		return
 	}

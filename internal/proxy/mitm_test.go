@@ -69,7 +69,7 @@ func mitmProxy(t *testing.T, upstream *httptest.Server, rules string) (*http.Cli
 		}
 		p.Gate = policy.NewGate(pol, dir)
 	}
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +79,8 @@ func mitmProxy(t *testing.T, upstream *httptest.Server, rules string) (*http.Cli
 	roots.AppendCertsFromPEM(ca.PEM)
 	pu, _ := url.Parse("http://" + l.Addr().String())
 	c := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(pu), TLSClientConfig: &tls.Config{RootCAs: roots}}}
+	// The intercepted connection lives as long as the client keeps it.
+	t.Cleanup(c.CloseIdleConnections)
 	return c, live, path
 }
 
@@ -86,7 +88,7 @@ func TestInterceptSubstitutesAndMasks(t *testing.T) {
 	up, got := echo(t)
 	c, live, logPath := mitmProxy(t, up, "")
 	for _, gz := range []bool{false, true} {
-		req, _ := http.NewRequest("GET", up.URL+"/repos/x?token="+live.Placeholder, nil)
+		req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/repos/x?token="+live.Placeholder, nil)
 		req.Header.Set("Authorization", "Bearer "+live.Placeholder)
 		if gz {
 			req.Header.Set("Accept-Encoding", "gzip") // the client then unpacks it itself
@@ -128,7 +130,7 @@ func TestInterceptSubstitutesAndMasks(t *testing.T) {
 func TestInterceptBasic(t *testing.T) {
 	up, got := echo(t)
 	c, live, _ := mitmProxy(t, up, "")
-	req, _ := http.NewRequest("GET", up.URL+"/", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/", nil)
 	req.SetBasicAuth("x-access-token", live.Placeholder)
 	resp, err := c.Do(req)
 	if err != nil {
@@ -152,7 +154,7 @@ rules:
     verdict: deny
     message: only reads
 `)
-	req, _ := http.NewRequest("POST", up.URL+"/repos/x/issues", strings.NewReader("{}"))
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, up.URL+"/repos/x/issues", strings.NewReader("{}"))
 	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
 	resp, err := c.Do(req)
 	if err != nil {
@@ -191,7 +193,7 @@ func TestCANameConstraints(t *testing.T) {
 func TestInterceptRefusesOtherHost(t *testing.T) {
 	up, got := echo(t)
 	c, live, _ := mitmProxy(t, up, "")
-	req, _ := http.NewRequest("GET", up.URL+"/repos/x", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/repos/x", nil)
 	req.Host = "attacker.example"
 	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
 	resp, err := c.Do(req)
@@ -241,7 +243,7 @@ func TestInterceptSendsCanonicalHost(t *testing.T) {
 	c, live, _ := mitmProxy(t, up, "")
 	target := up.Listener.Addr().String()
 	h, port, _ := net.SplitHostPort(target)
-	req, _ := http.NewRequest("GET", up.URL+"/", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/", nil)
 	req.Host = strings.ToUpper(h) + ".:" + port
 	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
 	resp, err := c.Do(req)

@@ -135,7 +135,10 @@ func Create(m Meta) (*Session, error) {
 			return nil, err
 		}
 	}
-	return s, s.Save()
+	if err := s.Save(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func (s *Session) WSUpper() string             { return filepath.Join(s.Dir, "ws", "upper") }
@@ -302,7 +305,7 @@ func Resume(id, workspace string) (*Session, error) {
 	for _, d := range []string{s.WSWork(), s.HomeWork(), s.EtcWork(), s.RunDir()} {
 		_ = filepath.WalkDir(d, func(p string, de os.DirEntry, err error) error {
 			if err == nil && de.IsDir() {
-				_ = os.Chmod(p, 0o700)
+				_ = os.Chmod(p, 0o700) //nolint:gosec // a directory: the owner needs x to remove what is inside
 			}
 			return nil
 		})
@@ -315,7 +318,10 @@ func Resume(id, workspace string) (*Session, error) {
 	}
 	s.Status = StatusRunning
 	s.Runs = max(s.Runs, 1) + 1
-	return s, s.Save()
+	if err := s.Save(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // RemoveAll deletes a session. Overlay leaves a mode-000 work dir
@@ -323,7 +329,7 @@ func Resume(id, workspace string) (*Session, error) {
 func (s *Session) RemoveAll() error {
 	_ = filepath.WalkDir(s.Dir, func(p string, d os.DirEntry, err error) error {
 		if err == nil && d.IsDir() {
-			_ = os.Chmod(p, 0o700)
+			_ = os.Chmod(p, 0o700) //nolint:gosec // a directory: the owner needs x to remove what is inside
 		}
 		return nil
 	})
