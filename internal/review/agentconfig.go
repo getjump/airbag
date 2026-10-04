@@ -410,14 +410,6 @@ func topLevel(b []byte) (map[string]json.RawMessage, error) {
 	return m, nil
 }
 
-func topLevelFile(path string) (map[string]json.RawMessage, error) {
-	b, err := readRegular(path)
-	if err != nil {
-		return nil, err
-	}
-	return topLevel(b)
-}
-
 // errNotRegular: the path is a symlink, a whiteout or another
 // non-regular file.
 var errNotRegular = errors.New("not a regular file")
@@ -435,7 +427,7 @@ func readRegular(path string) ([]byte, error) {
 		}
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	st, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -565,13 +557,13 @@ func writeJSONAtomic(path string, obj map[string]json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }() // gone after the rename; on error, a scratch file
 	if _, err := tmp.Write(out); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // the write already failed
 		return err
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // the write already failed
 		return err
 	}
 	if err := tmp.Close(); err != nil {
