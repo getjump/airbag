@@ -141,9 +141,30 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   sets stay in that pseudo-terminal, never in the shell you return to; a
   seccomp filter refuses TIOCSTI and TIOCLINUX as well, and the agent runs
   with `no_new_privs`. Ctrl-C, Ctrl-Z with `fg`, and resizing work as usual.
+- **Less kernel to attack.** The same seccomp filter is allow-by-default and
+  refuses a set of syscalls that only widen the kernel's attack surface and
+  that no agent or build tool needs: io_uring (which can open sockets without
+  a `socket()` call), `bpf`, `perf_event_open`, `userfaultfd`, the kernel
+  keyring (`add_key`/`keyctl`/`request_key`), `kexec`, module loading,
+  `open_by_handle_at`, `quotactl`, `acct`, `swapon`, `reboot`, `syslog`, and
+  sockets of families other than Unix, IPv4/IPv6 and netlink, so `AF_VSOCK`
+  and `AF_PACKET` are out. It stays allow-by-default so nested user
+  namespaces, `mount`, `pivot_root`, `setns` and the rest that Codex's and
+  Chromium's own sandboxes use keep working; it covers the native ABI and
+  every compat one and kills an unknown architecture, so a 32-bit or x32
+  entry cannot slip a refused call past it. `ptrace` stays allowed for the
+  agent's own programs (gdb, strace, `go test -race`). Alongside it: the
+  agent's `/proc` hides other processes (`hidepid`), the supervisor is not
+  dumpable so the agent cannot ptrace it or read `/proc/1/mem` or
+  `/proc/1/environ`, file descriptors inherited from the caller are closed
+  before the agent starts, and a crash cannot write a core dump
+  (`RLIMIT_CORE=0`).
 - **A strict mode.** `airbag run --strict` also keeps the agent from creating
   user namespaces, so the kernel features only a user namespace exposes stay
-  out of its reach. It is off by default because common tools need them:
+  out of its reach, and in this mode only the filter refuses the new mount
+  API (`fsopen`, `fsconfig`, `open_tree`, `move_mount`, `mount_setattr`, …)
+  with `ENOSYS`, as Flatpak does, so a nested mount cannot reconfigure the
+  VFS. It is off by default because common tools need user namespaces:
   Codex's own `--sandbox` modes and Chromium's sandbox fail under it (run
   Codex with `--dangerously-bypass-approvals-and-sandbox`, Chromium with
   `--no-sandbox`).
@@ -406,6 +427,11 @@ airbag protects against accidents and casual exfiltration by an agent you let ru
 without prompts. It is not a VM: the kernel is shared, and whatever the agent reads
 is still sent to the model API. A bound credential keeps its value from the agent,
 not its use: through the bound hosts the agent can do what the token allows.
+
+The seccomp filter removes the parts of the kernel surface an agent has no reason
+to touch (above), which cuts the exposure an unprivileged-user-namespace escape
+would use; but the kernel is still shared, so it is a smaller target, not a VM
+boundary. `airbag doctor` reports the host sysctls that harden the rest.
 
 For hosts without a credential the proxy decides from the name the client asks for
 and does not see inside TLS. So a broad allowlist entry (`github.com`) is a way for
