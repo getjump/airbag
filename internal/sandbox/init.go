@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/control"
+	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/shim"
@@ -393,11 +393,9 @@ func startBridge() error {
 				if err != nil {
 					return
 				}
-				defer up.Close()
-				done := make(chan struct{}, 2)
-				go func() { _, _ = io.Copy(up, c); done <- struct{}{} }()
-				go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
-				<-done
+				// The host side bounds idle connections; here an end
+				// is passed on as a half-close, and bounded.
+				proxy.Relay(c, up, 0, proxy.Drain)
 			}()
 		}
 	}()
@@ -436,11 +434,7 @@ func startForwards(s *session.Session) error {
 					if err != nil {
 						return
 					}
-					defer up.Close()
-					done := make(chan struct{}, 2)
-					go func() { _, _ = io.Copy(up, c); done <- struct{}{} }()
-					go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
-					<-done
+					proxy.Relay(c, up, 0, proxy.Drain)
 				}()
 			}
 		}()
