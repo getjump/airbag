@@ -552,7 +552,10 @@ func cmdApprove(args []string) error {
 		return err
 	}
 	if id == "" {
-		asks, _ := policy.ReadAsks(s.Dir)
+		asks, err := policy.ReadAsks(s.Dir)
+		if err != nil {
+			return err
+		}
 		n := 0
 		for _, a := range asks {
 			if !a.Approved {

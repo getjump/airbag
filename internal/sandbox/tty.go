@@ -49,10 +49,10 @@ type terminal struct {
 func openTerminal() (*terminal, error) {
 	saved, err := unix.IoctlGetTermios(int(os.Stdin.Fd()), unix.TCGETS)
 	if err != nil {
-		return nil, nil
+		return nil, nil //nolint:nilerr // not a terminal: nothing to share
 	}
 	if _, err := unix.IoctlGetTermios(int(os.Stdout.Fd()), unix.TCGETS); err != nil {
-		return nil, nil
+		return nil, nil //nolint:nilerr // not a terminal: nothing to share
 	}
 	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
 	if err != nil {

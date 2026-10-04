@@ -81,7 +81,7 @@ func Find(workspace string) []string {
 	var out []string
 	_ = filepath.WalkDir(workspace, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // the walk has at least the agent's rights: what it cannot read, the agent cannot either
 		}
 		if d.IsDir() {
 			if p != workspace && skipDir(d.Name()) {
@@ -94,7 +94,7 @@ func Find(workspace string) []string {
 		}
 		st, err := os.Lstat(p)
 		if err != nil || !st.Mode().IsRegular() {
-			return nil
+			return nil //nolint:nilerr // a file gone since the walk listed it has nothing to serve
 		}
 		if rel, err := filepath.Rel(workspace, p); err == nil {
 			out = append(out, rel)

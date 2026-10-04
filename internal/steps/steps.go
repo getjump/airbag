@@ -59,11 +59,11 @@ func (t *Tracker) snapshot() map[string]entry {
 	for name, root := range layers {
 		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
-				return nil
+				return nil //nolint:nilerr // steps only attribute changes; the review still shows an entry left out here
 			}
 			info, err := d.Info()
 			if err != nil {
-				return nil
+				return nil //nolint:nilerr // gone since the walk listed it: nothing to attribute
 			}
 			rel, _ := filepath.Rel(root, p)
 			e := entry{mtime: info.ModTime().UnixNano(), size: info.Size()}

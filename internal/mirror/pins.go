@@ -33,7 +33,7 @@ func FindPins(workspace string) Pins {
 	pins := Pins{}
 	_ = filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // an unreadable entry pins nothing, and fewer pins only make the mirror stricter
 		}
 		if d.IsDir() {
 			switch d.Name() {

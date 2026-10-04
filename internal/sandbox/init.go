@@ -342,7 +342,7 @@ func overlay(lower, upper, work, target string) error {
 func hide(p string) error {
 	st, err := os.Lstat(p)
 	if err != nil || st.Mode()&os.ModeSymlink != 0 {
-		return nil
+		return nil //nolint:nilerr // what PID 1 cannot stat, the agent, with fewer rights, cannot open either
 	}
 	if st.IsDir() {
 		return unix.Mount("tmpfs", p, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0700")
