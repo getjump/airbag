@@ -28,7 +28,7 @@ git init -q -b main
 git config user.email e2e@example.com && git config user.name e2e
 echo hello > README.md && git add -A && git commit -qm init
 ws=$(git rev-parse --show-toplevel)
-slug=$(printf '%s' "$ws" | sed 's#/#-#g')
+slug=$(printf '%s' "$ws" | sed 's#[^A-Za-z0-9]#-#g')
 proj="$HOME/.claude/projects/$slug"
 # The project already has memory from earlier sessions.
 mkdir -p "$proj/memory"
@@ -84,7 +84,7 @@ $rev"
 # Resumed from a subdirectory of the repository, the session writes a
 # transcript under that directory's own slug, which must pass through too.
 mkdir -p "$ws/sub"
-subproj="$HOME/.claude/projects/$(printf '%s' "$ws/sub" | sed 's#/#-#g')"
+subproj="$HOME/.claude/projects/$(printf '%s' "$ws/sub" | sed 's#[^A-Za-z0-9]#-#g')"
 (cd "$ws/sub" && "$AIRBAG" run --session last -- sh -c "echo '{\"type\":\"user\"}' > '$subproj/sess2.jsonl'" >"$T/run.out" 2>&1) ||
 	fail "resumed run failed:
 $(cat "$T/run.out")"
@@ -120,7 +120,7 @@ $(cat "$T/run.out")"
 # memory included. Resumed from that subdirectory, the session passes its
 # transcripts through and serves its memory from the branch: the deletion
 # stays, and the real memory is untouched.
-subslug=$(printf '%s' "$ws/sub2" | sed 's#/#-#g')
+subslug=$(printf '%s' "$ws/sub2" | sed 's#[^A-Za-z0-9]#-#g')
 mkdir -p "$ws/sub2" "$HOME/.claude/projects/$subslug/memory"
 echo 'sub memory' > "$HOME/.claude/projects/$subslug/memory/SUB.md"
 "$AIRBAG" run -- rm -rf "$HOME/.claude/projects/$subslug" >"$T/run.out" 2>&1 || fail "project dir delete run failed:
@@ -150,4 +150,42 @@ grep -q '"ok"' "$HOME/.claude.json" && fail "mcpServers reached the real file be
 $(cat "$T/apply.out")"
 grep -q '"ok"' "$HOME/.claude.json" || fail "apply did not write the reviewed key: $(cat "$HOME/.claude.json")"
 grep -Eq '"numStartups": *3' "$HOME/.claude.json" || fail "apply lost the written-back counter"
+
+# A session stored by an older airbag passed ~/.claude.json and all of
+# ~/.claude/projects/ through; resumed now, it keeps only today's list.
+"$AIRBAG" run -- true >"$T/run.out" 2>&1 || fail "legacy setup run failed: $(cat "$T/run.out")"
+sid=$(sed -n 's/^airbag: session \(s-[0-9a-f]*\) .*/\1/p' "$T/run.out" | head -1)
+sdir="${AIRBAG_HOME:-/var/tmp/airbag-$(id -u)}/$sid"
+[ -f "$sdir/meta.json" ] || fail "no session meta at $sdir"
+python3 - "$sdir/meta.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+m = json.load(open(p))
+m["passthrough"] = m["passthrough"] + [".claude.json", ".claude/projects/", ".claude/backups/"]
+m["branch_holes"] = []
+json.dump(m, open(p, "w"))
+PY
+cat > "$T/agent4.sh" <<'EOF2'
+set -eu
+cat > "$HOME/.claude.json" <<JSON
+{"numStartups":3,"userID":"seed","mcpServers":{"legacy":{"command":"/bin/true"}}}
+JSON
+mkdir -p "$HOME/.claude/projects/-other/memory"
+echo planted > "$HOME/.claude/projects/-other/memory/MEMORY.md"
+EOF2
+"$AIRBAG" run --session last -- sh "$T/agent4.sh" >"$T/run.out" 2>&1 || fail "legacy resume failed: $(cat "$T/run.out")"
+grep -q legacy "$HOME/.claude.json" && fail "a resumed legacy session wrote mcpServers to the real file"
+[ ! -e "$HOME/.claude/projects/-other/memory/MEMORY.md" ] || fail "a resumed legacy session wrote another project's memory"
+"$AIRBAG" discard --yes >/dev/null
+
+# A ~/.claude that is a symlink out of $HOME: nothing under it passes
+# through, and the agent cannot write the directory it points at.
+H2="$T/home2"
+mkdir -p "$H2" "$T/outside/claude/projects/$slug/memory"
+ln -s "$T/outside/claude" "$H2/.claude"
+(HOME="$H2" && export HOME && cd "$ws" &&
+	"$AIRBAG" run -- sh -c "echo planted > '$H2/.claude/projects/$slug/memory/X.md'" >"$T/run.out" 2>&1) || true
+[ ! -e "$T/outside/claude/projects/$slug/memory/X.md" ] || fail "a write through a symlinked ~/.claude reached the real directory"
+grep -q "is not passed through" "$T/run.out" || fail "no warning for the symlinked passthrough: $(cat "$T/run.out")"
+(HOME="$H2" && export HOME && cd "$ws" && "$AIRBAG" discard --yes >/dev/null 2>&1) || true
 echo "PASS"

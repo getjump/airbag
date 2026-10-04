@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -117,19 +118,42 @@ func buildWorld(s *session.Session) error {
 	}
 
 	if s.OverHome {
+		// Paths pass through only when no component is a symlink: a
+		// symlink in ~/.claude, say, would make the bind and its
+		// read-write flag reach whatever it points at, outside the
+		// branch. Such a path is not passed through and stays in the
+		// branch (or read-only, where the link leads out of $HOME).
+		realhome := s.MountDir("realhome")
+		var pass []string
+		for _, p := range s.Passthrough {
+			p = strings.TrimSuffix(p, "/")
+			if _, err := os.Lstat(filepath.Join(realhome, p)); err != nil {
+				continue
+			}
+			if err := noSymlink(realhome, p); err != nil {
+				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (%v); it stays in the branch\n", p, err)
+				continue
+			}
+			pass = append(pass, p)
+		}
 		// A branch hole (a passed-through project's memory/) must stay a
 		// copy-on-write view: the real files as lower, the branch as
 		// upper, so the agent sees existing memory and its edits and
 		// deletions land in the branch. That view is the home overlay's
 		// own at the hole's path, which the passthrough bind below would
-		// cover, so take a bind of it first and put it back after.
-		// A hole that cannot be set up fails the session: its parent
-		// would pass through whole, and the hole's writes with it.
-		views := make([]string, len(s.BranchHoles))
+		// cover, so take a bind of it first and put it back after. A hole
+		// whose parent does not pass through needs nothing: it is in the
+		// branch already. A hole that cannot be set up fails the session:
+		// its parent would pass through whole, and the hole's writes with
+		// it.
+		type hole struct{ rel, view string }
+		var holes []hole
 		for i, h := range s.BranchHoles {
+			if !slices.ContainsFunc(pass, func(p string) bool { return strings.HasPrefix(h, p+"/") }) {
+				continue
+			}
 			src := filepath.Join(s.Home, h)
-			st, err := os.Lstat(src)
-			if errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Lstat(src); errors.Is(err, os.ErrNotExist) {
 				// An earlier run of this session deleted the hole or its
 				// parent (a project directory that was not passed through
 				// then): a whiteout hides the real directory. New
@@ -138,9 +162,11 @@ func buildWorld(s *session.Session) error {
 				if err := os.MkdirAll(src, 0o700); err != nil {
 					return fmt.Errorf("branch hole ~/%s: %w", h, err)
 				}
-				st, err = os.Lstat(src)
 			}
-			if err != nil || !st.IsDir() {
+			if err := noSymlink(s.Home, h); err != nil {
+				return fmt.Errorf("branch hole ~/%s: %w", h, err)
+			}
+			if st, err := os.Lstat(src); err != nil || !st.IsDir() {
 				return fmt.Errorf("branch hole ~/%s: not a directory", h)
 			}
 			view := s.MountDir(fmt.Sprintf("hole-%d", i))
@@ -150,14 +176,17 @@ func buildWorld(s *session.Session) error {
 			if err := bind(src, view, true); err != nil {
 				return err
 			}
-			views[i] = view
-		}
-		for _, p := range s.Passthrough {
-			p = strings.TrimSuffix(p, "/")
-			src, dst := filepath.Join(s.MountDir("realhome"), p), filepath.Join(s.Home, p)
-			if _, err := os.Lstat(src); err != nil {
-				continue
+			// The view must be the home overlay itself, never a real
+			// directory that a path could lead to.
+			var fs unix.Statfs_t
+			if err := unix.Statfs(view, &fs); err != nil || fs.Type != unix.OVERLAYFS_SUPER_MAGIC {
+				_ = unix.Unmount(view, unix.MNT_DETACH)
+				return fmt.Errorf("branch hole ~/%s: not on the branch of $HOME", h)
 			}
+			holes = append(holes, hole{h, view})
+		}
+		for _, p := range pass {
+			src, dst := filepath.Join(realhome, p), filepath.Join(s.Home, p)
 			if err := bind(src, dst, true); err != nil {
 				return err
 			}
@@ -167,19 +196,22 @@ func buildWorld(s *session.Session) error {
 		}
 		// The mount taken above keeps its own reference to the overlay,
 		// so it survives /tmp and the session root being hidden below.
-		for i, h := range s.BranchHoles {
-			dst := filepath.Join(s.Home, h)
-			if st, err := os.Lstat(dst); err != nil || !st.IsDir() {
-				return fmt.Errorf("branch hole ~/%s: not a directory under the passed-through parent", h)
+		for _, h := range holes {
+			dst := filepath.Join(s.Home, h.rel)
+			if err := noSymlink(s.Home, h.rel); err != nil {
+				return fmt.Errorf("branch hole ~/%s: %w", h.rel, err)
 			}
-			if err := bind(views[i], dst, true); err != nil {
+			if st, err := os.Lstat(dst); err != nil || !st.IsDir() {
+				return fmt.Errorf("branch hole ~/%s: not a directory under the passed-through parent", h.rel)
+			}
+			if err := bind(h.view, dst, true); err != nil {
 				return err
 			}
 			if err := setRO(dst, true, false); err != nil {
 				return err
 			}
-			if err := unix.Unmount(views[i], unix.MNT_DETACH); err != nil {
-				return fmt.Errorf("unmount %s: %w", views[i], err)
+			if err := unix.Unmount(h.view, unix.MNT_DETACH); err != nil {
+				return fmt.Errorf("unmount %s: %w", h.view, err)
 			}
 		}
 	}
@@ -361,6 +393,23 @@ func bind(src, dst string, rec bool) error {
 	}
 	if err := unix.Mount(src, dst, "", flags, ""); err != nil {
 		return fmt.Errorf("bind %s -> %s: %w", src, dst, err)
+	}
+	return nil
+}
+
+// noSymlink checks that no component of rel under root is a symlink,
+// so a bind of root/rel stays where the path names.
+func noSymlink(root, rel string) error {
+	p := root
+	for _, part := range strings.Split(filepath.Clean(rel), "/") {
+		p = filepath.Join(p, part)
+		st, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("~/%s is a symlink", strings.TrimPrefix(p, root+"/"))
+		}
 	}
 	return nil
 }

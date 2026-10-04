@@ -50,14 +50,50 @@ var DefaultPassthrough = []string{
 	".codex/sessions/", ".codex/log/", ".codex/auth.json",
 }
 
-// ClaudeProjectSlug is how Claude Code names a project's transcript
-// directory under ~/.claude/projects: the absolute path with every "/"
-// turned into "-". Observed with Claude Code 2.1.x; Claude Code also
-// hashes paths longer than 200 characters, which airbag does not mirror,
-// so a very long workspace path keeps that directory in the branch
-// instead of passing through (docs/macos.md).
+// ClaudeProjectSlug is how Claude Code names a project's directory under
+// ~/.claude/projects: the absolute path with every character that is not
+// an ASCII letter or digit turned into "-" (so /home/me/my_proj becomes
+// -home-me-my-proj; Claude Code 2.1.x, as its docs describe). Claude
+// Code hashes names longer than maxSlug; airbag does not mirror the
+// hash, so such a directory is not passed through: it stays in the
+// branch, the safe side (docs/macos.md).
 func ClaudeProjectSlug(dir string) string {
-	return strings.ReplaceAll(dir, "/", "-")
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, dir)
+}
+
+const maxSlug = 200
+
+// NarrowPassthrough drops what a session stored before the passthrough
+// was narrowed: a session created by an older airbag passed ~/.claude.json
+// and all of ~/.claude/projects/ (and more) through, and resuming it must
+// not keep that. What stays is today's DefaultPassthrough and the
+// per-project transcript directories, each with its memory/ hole.
+func NarrowPassthrough(s *session.Session) {
+	pass := append([]string{}, DefaultPassthrough...)
+	var holes []string
+	for _, p := range s.Passthrough {
+		if projectDir(p) {
+			pass = appendNew(pass, p)
+			holes = appendNew(holes, p+"memory")
+		}
+	}
+	s.Passthrough, s.BranchHoles = pass, holes
+}
+
+// projectDir reports whether p is one project's directory,
+// ".claude/projects/<slug>/", as ClaudeProjectState makes them.
+func projectDir(p string) bool {
+	slug, ok := strings.CutPrefix(p, ".claude/projects/")
+	if !ok || !strings.HasSuffix(slug, "/") {
+		return false
+	}
+	slug = strings.TrimSuffix(slug, "/")
+	return slug != "" && slug != "." && slug != ".." && !strings.Contains(slug, "/")
 }
 
 // AddClaudeProjectState merges the transcript passthrough and memory
@@ -95,7 +131,11 @@ func ClaudeProjectState(cwd, root string) (pass, holes []string) {
 		if d == "" {
 			continue
 		}
-		base := ".claude/projects/" + ClaudeProjectSlug(d) + "/"
+		slug := ClaudeProjectSlug(d)
+		if len(slug) > maxSlug {
+			continue // Claude Code hashes it; see ClaudeProjectSlug
+		}
+		base := ".claude/projects/" + slug + "/"
 		if seen[base] {
 			continue
 		}

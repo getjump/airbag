@@ -2,14 +2,40 @@ package sandbox
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/getjump/airbag/internal/session"
 )
 
 func TestClaudeProjectSlug(t *testing.T) {
-	if got := ClaudeProjectSlug("/home/me/src/api"); got != "-home-me-src-api" {
-		t.Errorf("slug = %q", got)
+	for in, want := range map[string]string{
+		"/home/me/src/api":     "-home-me-src-api",
+		"/home/me/my_proj":     "-home-me-my-proj",
+		"/home/me/a.b c/d":     "-home-me-a-b-c-d",
+		"/home/me/caf\u00e9/x": "-home-me-caf--x",
+	} {
+		if got := ClaudeProjectSlug(in); got != want {
+			t.Errorf("slug(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if pass, holes := ClaudeProjectState("/"+strings.Repeat("a", 250), ""); len(pass)+len(holes) != 0 {
+		t.Errorf("a slug Claude Code hashes passes through: %v %v", pass, holes)
+	}
+}
+
+// A session an older airbag created stored the old, wide passthrough;
+// resuming it keeps only today's list and the project directories.
+func TestNarrowPassthrough(t *testing.T) {
+	s := &session.Session{Meta: session.Meta{
+		Passthrough: []string{".claude/projects/", ".claude/sessions/", ".claude.json", ".claude/.credentials.json",
+			".claude/projects/-w/", ".claude/projects/../", ".claude/projects/a/b/", ".codex/sessions/"},
+		BranchHoles: []string{".claude/projects/x/memory"},
+	}}
+	NarrowPassthrough(s)
+	want := append(append([]string{}, DefaultPassthrough...), ".claude/projects/-w/")
+	if !slices.Equal(s.Passthrough, want) || !slices.Equal(s.BranchHoles, []string{".claude/projects/-w/memory"}) {
+		t.Fatalf("passthrough %v holes %v, want %v and the one hole", s.Passthrough, s.BranchHoles, want)
 	}
 }
 

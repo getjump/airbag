@@ -200,7 +200,10 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 		s.Argv, s.Cwd = argv, cwd
-		// This run's directory may have its own transcript directory.
+		// A session from an older airbag may have stored a wider
+		// passthrough; keep only today's. This run's directory may have
+		// its own transcript directory.
+		sandbox.NarrowPassthrough(s)
 		sandbox.AddClaudeProjectState(s, cwd)
 		for _, h := range allow {
 			if !slices.Contains(s.Allow, h) {
@@ -284,7 +287,7 @@ func cmdRun(args []string) (int, error) {
 	// files; any other key stays in the branch for review.
 	if msgs := review.WriteBackConfigs(s); len(msgs) > 0 {
 		for _, m := range msgs {
-			fmt.Fprintf(os.Stderr, "airbag: %s\n", m)
+			fmt.Fprintf(os.Stderr, "airbag: %s\n", term.String(m)) // key names the agent chose
 		}
 	}
 	cs, _ := review.Scan(s)
