@@ -79,7 +79,9 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 			home = append(home, c)
 		}
 	}
-	forget(wsChanges)
+	if !s.Clone {
+		forget(wsChanges)
+	}
 	if len(home) == 0 {
 		s.Status = session.StatusApplied
 	}
@@ -101,7 +103,7 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 // agentHead returns the commit the agent's HEAD points to in the
 // branch, or "" when the session did not move HEAD (no commits).
 func agentHead(s *session.Session) (string, error) {
-	upper, lower := filepath.Join(s.WSUpper(), ".git"), filepath.Join(s.Workspace, ".git")
+	upper, lower := filepath.Join(s.WSBranch(), ".git"), filepath.Join(s.Workspace, ".git")
 	read := func(rel string) ([]byte, bool) {
 		for _, dir := range []string{upper, lower} {
 			p := filepath.Join(dir, rel)
@@ -171,7 +173,7 @@ func fetchAgent(s *session.Session, head string) error {
 	if err != nil {
 		return err
 	}
-	alt := strings.TrimSpace(realObjects) + "\n" + filepath.Join(s.WSUpper(), ".git", "objects") + "\n"
+	alt := strings.TrimSpace(realObjects) + "\n" + filepath.Join(s.WSBranch(), ".git", "objects") + "\n"
 	if err := os.WriteFile(filepath.Join(tmp, "objects", "info", "alternates"), []byte(alt), 0o644); err != nil {
 		return err
 	}

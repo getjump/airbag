@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -192,13 +193,19 @@ func cmdRun(args []string) (int, error) {
 		}
 		fmt.Fprintf(os.Stderr, "airbag: resuming session %s (run %d) on its branch\n", s.ID, s.Runs)
 	} else {
-		s, err = session.Create(session.Meta{
+		meta := session.Meta{
 			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
 			Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
 			PassEnv: passEnv, Strict: *strict,
-		})
+		}
+		if runtime.GOOS == "darwin" {
+			// The macOS prototype: the workspace branch is a clone, $HOME
+			// has none (docs/macos.md).
+			meta.OverHome, meta.Clone = false, true
+		}
+		s, err = session.Create(meta)
 		if err != nil {
 			return 1, err
 		}

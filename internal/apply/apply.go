@@ -79,7 +79,7 @@ func changedAfter(p string, t time.Time) bool {
 	if unix.Lstat(p, &st) != nil {
 		return false
 	}
-	return time.Unix(st.Ctim.Sec, st.Ctim.Nsec).After(t)
+	return ctime(&st).After(t)
 }
 
 func changedInside(dir string, t time.Time) string {
@@ -147,7 +147,9 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 			return err
 		}
 	}
-	forget(picked)
+	if !s.Clone {
+		forget(picked) // a clone matches the real files once they are applied
+	}
 	if gitTouched(picked) {
 		s.GitTouched = true
 	}

@@ -45,6 +45,14 @@ func (c Change) IsDir() bool { return c.Type == fs.ModeDir }
 // Scan walks both upper layers. Whiteouts are deletions, opaque
 // directories replace their lower counterpart.
 func Scan(s *session.Session) ([]Change, error) {
+	if s.Clone {
+		out, err := ScanTree("ws", s.Workspace, s.CloneDir())
+		if err != nil {
+			return nil, err
+		}
+		classify(s, out)
+		return out, nil
+	}
 	var out []Change
 	layers := []struct{ name, upper, lower string }{{"ws", s.WSUpper(), s.Workspace}}
 	if s.OverHome {

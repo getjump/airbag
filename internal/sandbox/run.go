@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package sandbox starts the agent in a branch of the world.
 //
 // Host side (this file): starts the egress proxy and the control socket,
@@ -31,62 +33,9 @@ import (
 	"github.com/getjump/airbag/internal/taint"
 )
 
-// InitArg is the hidden subcommand that runs inside the namespaces.
-const InitArg = "__airbag_init"
-
-// DefaultPassthrough: agent state that must survive a discarded branch
-// (transcripts, logs, login refreshes). Paths are relative to $HOME.
-// A trailing slash marks a directory, which airbag creates if missing.
-var DefaultPassthrough = []string{
-	".claude/projects/", ".claude/sessions/", ".claude/file-history/", ".claude/session-env/",
-	".claude/shell-snapshots/", ".claude/todos/", ".claude/statsig/", ".claude/backups/",
-	".claude/debug/", ".claude/ide/", ".claude/plans/",
-	".claude/.credentials.json", ".claude.json",
-	".codex/sessions/", ".codex/log/", ".codex/auth.json",
-}
-
-// DefaultHidden: credentials the agent never sees. Paths are relative
-// to $HOME; a directory becomes an empty tmpfs, a file reads as empty.
-var DefaultHidden = []string{
-	".ssh", ".aws", ".gnupg", ".config/gh", ".config/gcloud", ".azure",
-	".kube", ".docker", ".netrc", ".git-credentials", ".npmrc", ".pypirc",
-	".config/hub", ".terraform.d/credentials.tfrc.json",
-	// Decryption keys and decrypted secrets: sops and age keys,
-	// sops-nix's runtime secrets, pass, Vault, rclone remotes, keyrings.
-	".config/sops", ".config/sops-nix", ".config/age", ".password-store", ".vault-token",
-	".config/rclone", ".local/share/keyrings", ".config/op",
-}
-
-// HostSockets: daemons whose sockets live outside /run, which the
-// sandbox makes private. A unix socket path is reachable from any
-// network namespace, and connecting needs no write access to the
-// mount, so a read-only host does not stop it. Each would act for the
-// agent outside the sandbox: Incus and LXD as root (for members of
-// their admin group), the Nix daemon by building with network access
-// outside the proxy (see --nix-daemon).
-var HostSockets = []string{
-	NixDaemonSocket,
-	"/var/lib/incus/unix.socket", "/var/lib/incus/unix.socket.user",
-	"/var/lib/lxd/unix.socket", "/var/snap/lxd/common/lxd/unix.socket",
-	"/var/snap/lxd/common/lxd/unix.socket.user",
-}
-
-const NixDaemonSocket = "/nix/var/nix/daemon-socket"
-
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
 	gate := policy.NewGate(pol, s.Dir)
-	// A resumed session keeps what it learned before: a secret read in
-	// an earlier run still narrows egress in this one.
-	if prev, err := effects.Read(s.EffectsPath()); err == nil {
-		for _, e := range prev {
-			switch {
-			case e.Kind == "secret.read":
-				gate.Mark(taint.Secret, e.Target)
-			case e.Kind == "label" && e.Verdict == string(taint.Untrusted):
-				gate.Mark(taint.Untrusted, e.Target)
-			}
-		}
-	}
+	restoreLabels(gate, s)
 	log, err := effects.Open(s.EffectsPath())
 	if err != nil {
 		return 1, err
@@ -214,15 +163,4 @@ func userNSHint() string {
 			" run `airbag doctor` for the one-time fix"
 	}
 	return ""
-}
-
-// swallow catches signals and drops them. Unlike signal.Ignore, caught
-// signals are reset to their default in child processes.
-func swallow(sigs ...os.Signal) {
-	ch := make(chan os.Signal, 8)
-	signal.Notify(ch, sigs...)
-	go func() {
-		for range ch {
-		}
-	}()
 }

@@ -250,9 +250,9 @@ $ airbag doctor
 
 One static binary, no daemon, no Docker. Needs Linux 5.12+ with unprivileged user
 namespaces. On Ubuntu 23.10+ AppArmor restricts them; `airbag doctor` prints the
-one-time profile to install. On macOS, run airbag in a Linux VM for now; see
-[docs/macos.md](docs/macos.md) for the setup, what to check, and the plan for
-running natively.
+one-time profile to install. On macOS there is a native prototype (Seatbelt
+around the agent, an APFS clone as the branch), not yet tried on a real Mac, and the
+Linux VM setup that works today; see [docs/macos.md](docs/macos.md).
 
 ## Status
 

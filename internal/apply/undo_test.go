@@ -166,3 +166,59 @@ func mustScan(t *testing.T, s *session.Session) []review.Change {
 	}
 	return cs
 }
+
+// A clone branch (macOS): review compares the clone with the real
+// tree, apply copies from it and leaves it alone, rollback restores.
+func TestCloneApplyRollback(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	for root, files := range map[string]map[string]string{
+		ws:           {"mod.txt": "user\n", "del.txt": "keep me\n", "same.txt": "same\n"},
+		s.CloneDir(): {"mod.txt": "agent\n", "new.txt": "new\n", "same.txt": "same\n"},
+	} {
+		for name, data := range files {
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, name), []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+	got := scan(t, s)
+	if len(got) != 3 || got["mod.txt"] != review.Modified || got["new.txt"] != review.Added || got["del.txt"] != review.Deleted {
+		t.Fatalf("scan %v", got)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if read(t, filepath.Join(ws, "mod.txt")) != "agent\n" || read(t, filepath.Join(s.CloneDir(), "mod.txt")) != "agent\n" {
+		t.Fatal("apply did not copy from the clone, or emptied it")
+	}
+	if left := scan(t, s); len(left) != 0 {
+		t.Fatalf("after apply the clone still differs: %v", left)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if read(t, filepath.Join(ws, "mod.txt")) != "user\n" || read(t, filepath.Join(ws, "del.txt")) != "keep me\n" {
+		t.Fatal("not restored")
+	}
+	if _, err := os.Stat(filepath.Join(s.CloneDir(), "del.txt")); err == nil {
+		t.Fatal("rollback put a deleted file into the clone")
+	}
+	if back := scan(t, s); len(back) != 3 {
+		t.Fatalf("changes not back after rollback: %v", back)
+	}
+}

@@ -3,6 +3,7 @@
 package control
 
 import (
+	"os"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -21,8 +22,17 @@ import (
 	"github.com/getjump/airbag/internal/steps"
 )
 
-// SocketInSandbox is where the control socket is mounted for the agent.
+// SocketInSandbox is where the control socket is mounted for the agent
+// on Linux. On macOS there is no private /run, and airbag passes the
+// socket's path in AIRBAG_CONTROL.
 const SocketInSandbox = "/run/airbag/ctl.sock"
+
+func socketPath() string {
+	if p := os.Getenv("AIRBAG_CONTROL"); p != "" {
+		return p
+	}
+	return SocketInSandbox
+}
 
 type Server struct {
 	Box   *outbox.Box
@@ -232,7 +242,7 @@ func client(timeout time.Duration) *http.Client {
 	return &http.Client{Timeout: timeout, Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
-			return d.DialContext(ctx, "unix", SocketInSandbox)
+			return d.DialContext(ctx, "unix", socketPath())
 		},
 	}}
 }

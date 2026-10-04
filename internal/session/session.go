@@ -53,6 +53,9 @@ type Meta struct {
 	// Branch: the workspace result went to this branch of the real
 	// repository (apply --branch) instead of the working tree.
 	Branch string `json:"branch,omitempty"`
+	// Clone: the workspace branch is a full copy (an APFS clone on
+	// macOS) at CloneDir, not an overlayfs upper layer.
+	Clone bool `json:"clone,omitempty"`
 	// Runs counts the agent runs on this branch; 0 or 1 for one run.
 	Runs int `json:"runs,omitempty"`
 	// Baseline: real files changed after this time conflict with the
@@ -115,6 +118,16 @@ func (s *Session) EtcUpper() string            { return filepath.Join(s.Dir, "et
 func (s *Session) EtcWork() string             { return filepath.Join(s.Dir, "etc", "work") }
 func (s *Session) MountDir(name string) string { return filepath.Join(s.Dir, "mnt", name) }
 func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "run") }
+func (s *Session) CloneDir() string            { return filepath.Join(s.Dir, "ws", "clone") }
+
+// WSBranch is where the agent's version of the workspace lives: the
+// clone, or the overlayfs upper layer (changes only).
+func (s *Session) WSBranch() string {
+	if s.Clone {
+		return s.CloneDir()
+	}
+	return s.WSUpper()
+}
 func (s *Session) ProxySock() string           { return filepath.Join(s.RunDir(), "proxy.sock") }
 func (s *Session) ControlSock() string         { return filepath.Join(s.RunDir(), "ctl.sock") }
 

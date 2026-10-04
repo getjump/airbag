@@ -88,7 +88,7 @@ func scriptArg(args []string) (string, bool) {
 }
 
 func isTerminal(fd int) bool {
-	_, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	_, err := unix.IoctlGetTermios(fd, ioctlGetTermios)
 	return err == nil
 }
 

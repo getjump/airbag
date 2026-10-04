@@ -47,6 +47,7 @@ type genEntry struct {
 
 type generation struct {
 	dir      string
+	Clone    bool       `json:"clone,omitempty"` // the branch is a full copy, not an upper layer
 	Session  string     `json:"session"`
 	Started  time.Time  `json:"started"`
 	Complete bool       `json:"complete"`
@@ -64,7 +65,7 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	if gs, _ := listGenerations(s); len(gs) > 0 {
 		n = gs[len(gs)-1].n + 1
 	}
-	g := &generation{dir: filepath.Join(root, strconv.Itoa(n)), Session: s.ID, Started: time.Now()}
+	g := &generation{dir: filepath.Join(root, strconv.Itoa(n)), Session: s.ID, Started: time.Now(), Clone: s.Clone}
 	if err := os.MkdirAll(filepath.Join(g.dir, "saved"), 0o700); err != nil {
 		return nil, err
 	}
@@ -196,7 +197,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 				left++
 				continue
 			}
-			if err := giveBack(e); err != nil {
+			if err := giveBack(e, g.Clone); err != nil {
 				return left, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err)
 			}
 		}
@@ -229,9 +230,12 @@ func gone(err error) bool {
 
 // giveBack puts the agent's version of an applied path back into the
 // session's upper layer: the file itself, or a whiteout for a deletion.
-func giveBack(e genEntry) error {
+func giveBack(e genEntry, clone bool) error {
 	if _, err := os.Lstat(e.Upper); err == nil {
 		return nil // still there: the change was never forgotten
+	}
+	if clone && e.Kind == review.Deleted {
+		return nil // absent from the clone is what a deletion is
 	}
 	if err := os.MkdirAll(filepath.Dir(e.Upper), 0o755); err != nil {
 		return err

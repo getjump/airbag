@@ -69,10 +69,41 @@ Differences to accept:
 
 ### Order
 
-1. Seatbelt profile and proxy, no branch: network control, hidden credentials,
-   read-only `$HOME`. Most of the safety comes from this step alone.
-2. NFS overlay branch of the workspace, sharing review and apply with Linux.
+1. Seatbelt profile and proxy, with an APFS clone as the workspace branch.
+   This is the prototype below.
+2. NFS overlay branch of the workspace instead of the clone, if the probe
+   (`cmd/airbag-macprobe`, see the macos-probe PR) shows it works without root
+   and fast enough: the agent then works at a path of its own without a copy.
 3. Secret tracking through the same server.
+
+## The prototype
+
+`airbag` builds for macOS and runs the agent natively, without a VM. It is a
+prototype: built and unit-tested on Linux, not yet run on a Mac.
+
+```console
+$ go build ./cmd/airbag        # on the Mac, or GOOS=darwin GOARCH=arm64 elsewhere
+$ ./airbag doctor              # sandbox-exec, and an APFS clone to the session dir
+$ cd ~/src/project
+$ ./airbag run -- claude --dangerously-skip-permissions
+$ ./airbag review              # then apply, apply --branch NAME, or discard
+```
+
+| | Linux | macOS prototype |
+|---|---|---|
+| Workspace branch | overlayfs, at the workspace's own path | an APFS clone (`cp -c`) in the session directory; the agent works at that path |
+| `$HOME` | a branch, reviewed | read-only, except the agent's state (`~/.claude`, `~/.codex`, without their settings, hooks and instructions); caches (`TMPDIR`, Go, npm, pip, uv, cargo) point into the session |
+| Network | network namespace, only the proxy | Seatbelt allows outbound traffic only to the proxy's localhost port and airbag's control socket |
+| Secret files | served through FUSE, a read taints the session | not readable at all, in the clone or the real workspace (no FUSE, so a read could not be tracked) |
+| Credentials | hidden by bind mounts | denied by the profile |
+| Shims, outbox, mirror, policies, review, apply, rollback, `--branch`, `--session` | yes | the same code |
+| Agent hooks (steps per tool call) | managed settings in a private `/etc` | not installed: managed settings need root on macOS |
+| Terminal | a pseudo-terminal of its own, TIOCSTI filtered | the agent shares your terminal |
+
+What to report from a first run: whether Claude Code and Codex start and finish a
+task, which Seatbelt denials they hit (`log stream --predicate 'eventMessage
+CONTAINS "airbag-s-"'` shows them with the session's tag), and how long the clone
+takes on a large repository.
 
 ## Until then: a Linux VM
 
