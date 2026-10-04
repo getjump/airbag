@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/mirror"
@@ -103,8 +105,14 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, err
 	}
+	tty, err := openTerminal()
+	if err != nil {
+		return 1, fmt.Errorf("pseudo-terminal: %w", err)
+	}
 	cmd := exec.Command(self, InitArg, s.Dir)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	// The sandbox gets a session of its own, so the user's terminal is
+	// never its controlling terminal (tty.go).
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID |
 			syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC,
@@ -112,21 +120,55 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: s.GID, Size: 1}},
 		GidMappingsEnableSetgroups: false,
 		Pdeathsig:                  syscall.SIGKILL,
+		Setsid:                     true,
 	}
-	// Ctrl-C belongs to the agent; airbag stays up until the agent exits.
-	// Catch, don't ignore: an ignored signal stays ignored across exec,
-	// and the agent would start deaf to Ctrl-C.
-	swallow(os.Interrupt, syscall.SIGQUIT)
-	defer signal.Reset(os.Interrupt, syscall.SIGQUIT)
+	if tty != nil {
+		cmd.Args = append(cmd.Args, "tty")
+		cmd.Stdin, cmd.Stdout = tty.slave, tty.slave
+		if _, err := unix.IoctlGetTermios(int(os.Stderr.Fd()), unix.TCGETS); err == nil {
+			cmd.Stderr = tty.slave
+		}
+		cmd.ExtraFiles = []*os.File{tty.ctlPeer} // fd 3: ttyCtlFd
+		cmd.SysProcAttr.Setctty = true
+		cmd.SysProcAttr.Ctty = 0
+	}
+	// Signals for the agent go to the sandbox's PID 1, which passes them
+	// on: the agent is no longer in airbag's process group, so Ctrl-C
+	// on a terminal airbag does not share reaches it this way. Catch,
+	// don't ignore: an ignored signal stays ignored across exec, and the
+	// agent would start deaf to Ctrl-C.
+	sigs := make(chan os.Signal, 8)
+	fwd := []os.Signal{os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP}
+	signal.Notify(sigs, fwd...)
+	defer signal.Reset(fwd...)
 
-	err = cmd.Run()
+	if err := cmd.Start(); err != nil {
+		if tty != nil {
+			tty.slave.Close()
+			tty.ctlPeer.Close()
+			tty.master.Close()
+		}
+		return 1, fmt.Errorf("start sandbox: %w%s", err, userNSHint())
+	}
+	go func() {
+		for sig := range sigs {
+			_ = cmd.Process.Signal(sig)
+		}
+	}()
+	if tty != nil {
+		tty.start()
+	}
+	err = cmd.Wait()
+	if tty != nil {
+		tty.finish()
+	}
 	code := 0
 	var ee *exec.ExitError
 	switch {
 	case errors.As(err, &ee):
 		code = ee.ExitCode()
 	case err != nil:
-		return 1, fmt.Errorf("start sandbox: %w%s", err, userNSHint())
+		return 1, fmt.Errorf("sandbox: %w", err)
 	}
 	s.Status = session.StatusStopped
 	s.ExitCode = code

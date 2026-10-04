@@ -58,7 +58,7 @@ func main() {
 		return
 	}
 	if len(os.Args) >= 3 && os.Args[1] == sandbox.InitArg {
-		sandbox.Init(os.Args[2])
+		sandbox.Init(os.Args[2], len(os.Args) > 3 && os.Args[3] == "tty")
 		return
 	}
 	if len(os.Args) < 2 {

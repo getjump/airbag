@@ -29,6 +29,7 @@ Ask the agent to:
 Then check the terminal:
 
 - [ ] Ctrl-C interrupts the agent's current action, a second Ctrl-C or `/exit` quits;
+- [ ] Ctrl-Z stops the agent and returns to the shell, `fg` brings it back;
 - [ ] resizing the window redraws the agent's UI;
 - [ ] after exit airbag prints `session s-… ended`.
 

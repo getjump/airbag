@@ -87,6 +87,12 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   reachable, and the mirror serves only what it has cached. The read returns only
   after airbag has recorded the taint and closed connections opened earlier to
   other hosts. Output going back to the agent has known secret values masked.
+- **A terminal of its own.** The agent runs in a session of its own on a
+  pseudo-terminal that airbag copies to yours, as `sudo` with `use_pty` and
+  `docker run -t` do. Input it pushes into its terminal (TIOCSTI) or modes it
+  sets stay in that pseudo-terminal, never in the shell you return to; a
+  seccomp filter refuses TIOCSTI and TIOCLINUX as well, and the agent runs
+  with `no_new_privs`. Ctrl-C, Ctrl-Z with `fg`, and resizing work as usual.
 - **A strict mode.** `airbag run --strict` also keeps the agent from creating
   user namespaces, so the kernel features only a user namespace exposes stay
   out of its reach. It is off by default because common tools need them:

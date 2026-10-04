@@ -32,8 +32,10 @@ const (
 )
 
 // Init runs as PID 1 in the new namespaces, as root of the new user
-// namespace (mapped to the real user). It never returns.
-func Init(dir string) {
+// namespace (mapped to the real user). With tty, its stdio is the
+// agent's pseudo-terminal and fd 3 the stop/continue channel (tty.go).
+// It never returns.
+func Init(dir string, tty bool) {
 	swallow(os.Interrupt, syscall.SIGQUIT)
 	s, err := session.Load(dir)
 	if err != nil {
@@ -48,7 +50,12 @@ func Init(dir string) {
 	if err := startBridge(); err != nil {
 		fatal("proxy bridge", err)
 	}
-	os.Exit(runAgent(s))
+	var ctl *os.File
+	if tty {
+		syscall.CloseOnExec(ttyCtlFd)
+		ctl = os.NewFile(ttyCtlFd, "tty-ctl")
+	}
+	os.Exit(runAgent(s, ctl))
 }
 
 func fatal(what string, err error) {
@@ -371,7 +378,10 @@ func startBridge() error {
 // creating user namespaces, and with them the kernel surface reachable
 // only from inside one. It is off by default because the agents' own
 // sandboxes and Chromium's sandbox need user namespaces.
-func runAgent(s *session.Session) int {
+//
+// The agent leads a process group of its own, the foreground one on its
+// pseudo-terminal, so Ctrl-C and Ctrl-Z reach it and not PID 1.
+func runAgent(s *session.Session, ctl *os.File) int {
 	if s.Strict {
 		if err := os.WriteFile("/proc/sys/user/max_user_namespaces", []byte("1"), 0); err != nil {
 			fmt.Fprintf(os.Stderr, "airbag: warning: the agent can create user namespaces: %v\n", err)
@@ -397,32 +407,63 @@ func runAgent(s *session.Session) int {
 		UidMappings:                []syscall.SysProcIDMap{{ContainerID: s.UID, HostID: 0, Size: 1}},
 		GidMappings:                []syscall.SysProcIDMap{{ContainerID: s.GID, HostID: 0, Size: 1}},
 		GidMappingsEnableSetgroups: false,
+		Setpgid:                    true,
+	}
+	if ctl != nil {
+		cmd.SysProcAttr.Foreground = true
+		cmd.SysProcAttr.Ctty = 0
+	}
+	if err := restrictAgent(); err != nil {
+		fmt.Fprintf(os.Stderr, "airbag: warning: %v\n", err)
 	}
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "airbag: start agent: %v\n", err)
 		return 126
 	}
-	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGHUP)
+	pgrp := -cmd.Process.Pid
+	// Signals airbag forwards from outside go to the agent's group, as
+	// a terminal would send them.
+	sigs := make(chan os.Signal, 8)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		for sig := range sigs {
-			_ = cmd.Process.Signal(sig)
+			_ = syscall.Kill(pgrp, sig.(syscall.Signal))
 		}
 	}()
+	if ctl != nil {
+		go func() {
+			b := make([]byte, 1)
+			for {
+				if _, err := ctl.Read(b); err != nil {
+					return
+				}
+				if b[0] == ttyContinue {
+					_ = syscall.Kill(pgrp, syscall.SIGCONT)
+				}
+			}
+		}()
+	}
 	// As PID 1 we reap every orphan until the agent itself exits.
 	for {
 		var ws syscall.WaitStatus
-		pid, err := syscall.Wait4(-1, &ws, 0, nil)
+		pid, err := syscall.Wait4(-1, &ws, syscall.WUNTRACED, nil)
 		if err == syscall.EINTR {
 			continue
 		}
 		if err != nil {
 			return 1
 		}
-		if pid == cmd.Process.Pid {
-			if ws.Signaled() {
-				return 128 + int(ws.Signal())
+		if pid != cmd.Process.Pid {
+			continue
+		}
+		switch {
+		case ws.Stopped():
+			if ctl != nil {
+				_, _ = ctl.Write([]byte{ttyStopped})
 			}
+		case ws.Signaled():
+			return 128 + int(ws.Signal())
+		default:
 			return ws.ExitStatus()
 		}
 	}
