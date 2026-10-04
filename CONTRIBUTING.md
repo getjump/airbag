@@ -41,11 +41,12 @@ Each area below is a real gap. Open an issue before a large change, so we can
 agree on the shape first.
 
 **A language for effects.** Commands are modeled in Go in `internal/models`:
-`rm -rf x` deletes `x`, `curl -d @f url` sends `f` to `url`. The goal is to
-describe effects as data, close to function signatures in a functional
-language, and let users add models without rebuilding airbag. Starlark is the
-leading candidate. A first step: port three existing models and keep their
-tests passing.
+`rm -rf x` deletes `x`, `curl -d @f url` sends `f` to `url`. These are
+predictions, hints for review and early refusals; what airbag observes (the
+proxy, FUSE) is the boundary. So the models are frozen for now: better
+observation (syscall-level, below) comes first. When models grow again, flag
+arity can be generated from the [Fig](https://github.com/withfig/autocomplete)
+specs (MIT) rather than written by hand.
 
 **macOS.** There are no Linux namespaces there. [docs/macos.md](docs/macos.md)
 compares how Claude Code, Codex, Gemini CLI, Cursor, nono and AgentFS sandbox
@@ -73,8 +74,8 @@ a placeholder, airbag substitutes the value at an allowed boundary.
 
 **bubblewrap underneath.** airbag sets up namespaces itself in Go.
 [docs/bwrap-backend.md](docs/bwrap-backend.md) has the evaluation: not with
-bubblewrap 0.9 (no overlay), worth measuring as a hybrid once 0.10+ is common.
-Meanwhile its `--disable-userns` idea can move into airbag now.
+bubblewrap 0.9 (no overlay), worth measuring as a hybrid once 0.11+ is common.
+Its `--disable-userns` idea is in airbag as `--strict`.
 
 **More agents.** Claude Code and Codex get hooks, so the review shows which
 tool call changed what. Gemini CLI, Aider, OpenCode and others run in the

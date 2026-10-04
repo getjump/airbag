@@ -18,7 +18,7 @@ script, so it is repeatable without an account (`demo/demo.sh`). `agent ▶` lin
 the calls the model makes, `agent ◀` what the agent sends back. More scenes, one GIF
 each, in `demo/`: `sandbox`, `codex`, `ask`, `apply`, `mirror` (`demo/scenes.sh NAME`).
 
-## Why not bubblewrap, or the agent's own sandbox?
+## How it compares: bubblewrap, built-in sandboxes, branch tools
 
 Isolation is not the difference. On Linux, Claude Code's and Codex's built-in
 sandboxes run on bubblewrap, and airbag uses the same kernel namespaces. What
@@ -37,7 +37,9 @@ pushes.
 - **airbag:** the agent runs without stopping in a branch of your machine.
   Afterwards one review shows all of it: `src` deleted, `.env` read, the upload
   blocked, the `~/.bashrc` line flagged as persistence, the push waiting in the
-  outbox. `airbag discard`, and none of it happened.
+  outbox. `airbag discard`: the files and `~` are as they were, and the push never
+  left. (A request to an allowed host would have happened when it was made; see
+  below.)
 
 | | bubblewrap | built-in sandbox | airbag |
 |---|---|---|---|
@@ -46,14 +48,41 @@ pushes.
 | Network | on or off | domain allowlist through a proxy | allowlist, every host logged, package mirror, cut on a secret read |
 | Irreversible actions | not handled | blocked or asked | queued in the outbox, run after review |
 | Policies | mounts | tools, commands, domains | CEL rules over effects; `ask` with `airbag approve` |
-| Secrets | hide paths | hide paths | reads label the session; values masked in output |
+| Secrets | hide paths | hide paths | a read labels the session and narrows egress; values masked in shell output |
 | One view of what changed | no | no | effect log, steps per tool call, hosts, packages |
 | You decide | before the run | during the run | after the run, once |
 
-Deciding after the run works for what airbag can branch: files, `$HOME`, a push
-that has not left yet. A call to an outside service cannot wait or be undone, so
-there the policy decides beforehand, or `ask` holds the call until you approve
-it.
+Other tools also let you decide after the run, for files at least:
+
+| | Files | Network | Pushes, publishes, API calls | Secrets |
+|---|---|---|---|---|
+| [nono](https://github.com/nolabs-ai/nono) `--rollback` | writes land in place; snapshot before, diff after, restore what you pick | blocked by default, L7 proxy | asked live by its supervisor | stand-in credential, real one injected by the proxy |
+| [try](https://github.com/binpash/try) | overlayfs branch of one command, commit or not | unrestricted | run as they happen | not handled |
+| [AgentFS](https://github.com/tursodatabase/agentfs) | copy-on-write branch of the working directory (SQLite delta), `agentfs diff`; no apply command | not controlled | run as they happen | not handled |
+| [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) in clone mode, or [Code Airlock](https://github.com/Trivo25/code-airlock) on top of it | microVM with a private clone, host repo read-only; review and merge with `git fetch`, `git diff` | allowlist through a proxy | not held | proxy injects credentials, values stay outside the VM |
+| Claude Code sandbox and checkpoints | writes in the workspace, `/rewind` restores the agent's own file edits, not Bash's | allowlist through a proxy, asks for new domains | auto mode's classifier blocks some | denied or masked behind a proxy |
+| airbag | copy-on-write branch of the workspace and `$HOME`; persistence flagged; apply all, part or none | allowlist, every host logged, mirror, cut on a secret read | queued in the outbox, run after review | hidden; a read labels the session and narrows egress |
+
+What airbag adds is around the branch rather than the branch itself: the outbox
+for actions that leave the machine, the `$HOME` branch with persistence called out,
+a label that follows a secret read through the rest of the session, and one review
+that works the same for any agent, on your own toolchain without a VM. Whether that
+beats a VM clone or nono for a given team is a matter of measuring, not of this
+table. Tools that govern effects at runtime in depth, such as
+[agentsh](https://github.com/canyonroad/agentsh) (file, process and network policy
+with approvals, an LLM proxy with DLP), go further than airbag's policies do. (As of
+October 2026, from each project's documentation.)
+
+### What waits for you, and what does not
+
+| | Until you decide | Examples |
+|---|---|---|
+| Stays local until `airbag apply` | the workspace and `$HOME` | edits, deletions, new files, a line in `~/.bashrc` |
+| Waits in the outbox, runs after review | what airbag intercepts | `git push` |
+| Decided when it happens, by the allowlist and policy | every other network request | model API calls, a request to a host you allowed, packages through the mirror; `ask` holds a call until you approve it |
+
+A call to an outside service cannot be held or undone after the fact, so for those
+the allowlist and policy decide beforehand. Review shows that they happened.
 
 airbag sets up its namespaces itself. Could it run on bubblewrap underneath?
 Not yet: bubblewrap 0.9, which Ubuntu 24.04 ships, cannot make the overlay the
@@ -78,7 +107,10 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   PyPI. Review lists every package and version the agent pulled; artifacts are
   cached across sessions.
 - **An outbox.** `git push` returns `queued` and runs on the host after you approve
-  it. Pushing around the shim fails at the proxy.
+  it. Pushing around the shim fails at the proxy. If the session put git config or
+  hooks into the repository, its pushes wait for `airbag apply --trust-git` and
+  run with hooks off. A push cut off by a crash is reported as of unknown outcome
+  and never run again.
 - **No credentials.** `~/.ssh`, `~/.aws`, `gh`, `docker`, `kube` and similar are
   hidden, and so are credential-like environment variables (`*TOKEN*`,
   `*SECRET*`, `*API_KEY*`, ...) except the agents' own API keys; `--pass-env NAME`
@@ -95,7 +127,10 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   the session: commands that send data out are refused, only model APIs stay
   reachable, and the mirror serves only what it has cached. The read returns only
   after airbag has recorded the taint and closed connections opened earlier to
-  other hosts. Output going back to the agent has known secret values masked.
+  other hosts. Without FUSE the secret files are hidden instead. Known secret
+  values are masked in the output of shell commands; the agent's own file tools are
+  not filtered, and model APIs stay reachable, so a secret the agent reads can
+  reach its model. The label stops it from going anywhere else.
 - **A terminal of its own.** The agent runs in a session of its own on a
   pseudo-terminal that airbag copies to yours, as `sudo` with `use_pty` and
   `docker run -t` do. Input it pushes into its terminal (TIOCSTI) or modes it
@@ -205,7 +240,9 @@ file. Codex's own SQLite state folds into one review line.
 `bash` and `sh` are shimmed: each `-c` script is parsed, every command is matched
 against a model of its effects (`rm -rf` deletes, `curl -d` sends data out, `git
 config core.hooksPath` persists), and known secret values (from `.env` and
-credential-like variables) are masked in output that goes back to the agent.
+credential-like variables) are masked in its output. The models are predictions
+for review and early refusals; scripts and programs they do not cover are
+`opaque`, and the boundary for those is the sandbox, the proxy and FUSE.
 
 Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `test/policy-e2e.sh`,
 `test/partial-e2e.sh`, `test/secret-e2e.sh`, `test/taint-e2e.sh`, `test/mirror-e2e.sh`,

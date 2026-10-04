@@ -17,9 +17,18 @@ Two things to do instead:
 1. Take bubblewrap's `--disable-userns` idea now: keep the agent from creating
    user namespaces of its own (see the last section). Done as
    `airbag run --strict`, off by default.
-2. Revisit when Ubuntu LTS ships bubblewrap 0.10 or later. With `--overlay`
+2. Revisit when Ubuntu LTS ships bubblewrap 0.11 or later. With `--overlay`
    in bubblewrap, a hybrid (bubblewrap for namespaces and binds, an airbag
    helper inside for the rest) becomes worth measuring.
+
+Upstream since the probe ([NEWS](https://github.com/containers/bubblewrap/blob/main/NEWS.md)):
+0.11.0 (2024-10-30) added `--overlay`, `--tmp-overlay` and `--ro-overlay`, not
+available when installed setuid; 0.12.0 (2026-08-26) removed setuid builds and
+fixed GHSA-pxhw-h44j-8pfx, where files created during setup could follow parent
+symlinks out of the sandbox; 0.13.0 came out on 2026-09-22. What bubblewrap
+would still bring is its hardening record: the controlling terminal
+(CVE-2017-5226, which airbag now handles with a pseudo-terminal of its own and a
+TIOCSTI filter), safe path resolution during setup, `--die-with-parent`.
 
 ## What airbag needs, and what bubblewrap 0.9 does
 
@@ -28,7 +37,7 @@ Two things to do instead:
 | User, mount, pid, net, ipc namespaces; uid map | Yes: `--unshare-*`, `--uid` | |
 | Host read-only | Yes: `--ro-bind / /` | `$HOME`, `/tmp`, `/var/tmp` read-only inside. bubblewrap remounts submounts read-only too; this machine has no writable submounts to show it |
 | Loopback-only network | Yes: `--unshare-net` | `/proc/net/dev` inside lists only `lo` |
-| Copy-on-write branch of workspace and `$HOME` | **No.** `--overlay` came after 0.9, and is not available when bubblewrap is installed setuid | Overlay works when a nested user namespace inside the sandbox mounts it (upper gets the change, lower untouched) |
+| Copy-on-write branch of workspace and `$HOME` | **No.** `--overlay` came in 0.11.0, and is not available when bubblewrap is installed setuid | Overlay works when a nested user namespace inside the sandbox mounts it (upper gets the change, lower untouched) |
 | Pass-through and hidden paths in `$HOME` | Yes: `--bind`, `--tmpfs`, `--ro-bind /dev/null` | They go on top of the branch, so they wait on the overlay |
 | Agent settings in `/etc` (`managed-settings.d`, `requirements.toml`) | **No**, when the directory does not exist on the host | `--ro-bind-data` and `--tmpfs` need the mount point: `Can't mkdir parents … Read-only file system`. airbag overlays `/etc` |
 | Private `/run`, `/tmp`, `/var/tmp`, `/dev/shm` | Yes: `--tmpfs`, `--dev` | |
