@@ -45,6 +45,8 @@ type Proxy struct {
 	Log   *effects.Log
 	// Gate applies policy rules on top of the allowlist (optional).
 	Gate *policy.Gate
+	// Mirror serves http://airbag.mirror/ (optional).
+	Mirror http.Handler
 	// Upstream returns the host's own proxy for a target, if any, so
 	// airbag works behind a corporate or sandbox proxy.
 	Upstream func(*url.URL) (*url.URL, error)
@@ -67,6 +69,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		host, _, _ = net.SplitHostPort(r.Host)
 	}
 	target := r.Host
+	if p.Mirror != nil && host == "airbag.mirror" && r.Method != http.MethodConnect {
+		p.Mirror.ServeHTTP(w, r)
+		return
+	}
 	if !p.Allow.Allows(host) && (p.Gate == nil || !p.Gate.AllowsHost(host)) {
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "host not in allowlist"})
 		http.Error(w, "airbag: egress to "+host+" denied by policy (host not in allowlist)", http.StatusForbidden)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/getjump/airbag/internal/apply"
@@ -113,6 +114,8 @@ func cmdRun(args []string) (int, error) {
 	var allow stringList
 	fs.Var(&allow, "allow", "extra host to allow, e.g. api.github.com or *.example.com (repeatable)")
 	noHome := fs.Bool("no-home", false, "do not branch $HOME (it stays read-only)")
+	var passEnv stringList
+	fs.Var(&passEnv, "pass-env", "give the agent this credential-like environment variable (repeatable)")
 	_ = fs.Parse(args)
 	argv := fs.Args()
 	if len(argv) == 0 {
@@ -140,12 +143,24 @@ func cmdRun(args []string) (int, error) {
 		UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 		Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
 		Passthrough: sandbox.DefaultPassthrough, Hidden: sandbox.DefaultHidden,
+		PassEnv: passEnv,
 	})
 	if err != nil {
 		return 1, err
 	}
 	fmt.Fprintf(os.Stderr, "airbag: session %s · branch of %s%s · network: allowlist only\n",
 		s.ID, ws, map[bool]string{true: " and ~", false: ""}[s.OverHome])
+	var hidden []string
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		if sandbox.Credential(k) && !slices.Contains(passEnv, k) {
+			hidden = append(hidden, k)
+		}
+	}
+	if len(hidden) > 0 {
+		fmt.Fprintf(os.Stderr, "airbag: hiding %d credential variables from the agent (%s); --pass-env NAME keeps one\n",
+			len(hidden), strings.Join(hidden, ", "))
+	}
 	if len(pol.Sources) > 1 {
 		fmt.Fprintf(os.Stderr, "airbag: policy: %s\n", strings.Join(pol.Sources, " + "))
 	}

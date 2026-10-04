@@ -20,6 +20,7 @@ import (
 
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/mirror"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/proxy"
@@ -64,6 +65,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	defer pl.Close()
 	px := proxy.New(allow, log)
 	px.Gate = gate
+	px.Mirror = mirror.New(filepath.Join(session.Root(), "mirror"), log)
 	go func() { _ = px.Serve(pl) }()
 
 	cl, err := net.Listen("unix", s.ControlSock())

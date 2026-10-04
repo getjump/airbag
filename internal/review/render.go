@@ -100,6 +100,24 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	if len(reads) > 0 {
 		fmt.Fprintf(w, "\nSecrets    read: %s\n           egress was limited to model APIs and registries from then on\n", strings.Join(reads, ", "))
 	}
+	var pkgs []string
+	seenPkg := map[string]bool{}
+	for _, e := range effs {
+		if e.Kind == "pkg.fetch" && !seenPkg[e.Target] {
+			seenPkg[e.Target] = true
+			pkgs = append(pkgs, e.Target)
+		}
+	}
+	if len(pkgs) > 0 {
+		fmt.Fprintf(w, "\nPackages   %d fetched through the mirror\n", len(pkgs))
+		for i, p := range pkgs {
+			if i == maxListed {
+				fmt.Fprintf(w, "  … and %d more\n", len(pkgs)-maxListed)
+				break
+			}
+			fmt.Fprintf(w, "  %s\n", p)
+		}
+	}
 	fmt.Fprintf(w, "\nNetwork    %d allowed%s\n", total(allowed), hostList(allowed))
 	if len(denied) > 0 {
 		fmt.Fprintf(w, "           %d denied%s\n", total(denied), hostList(denied))

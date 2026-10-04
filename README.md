@@ -23,10 +23,16 @@ script, so it is repeatable without an account (`demo/demo.sh`).
 - **One way out.** The sandbox has no network interface besides loopback and no
   DNS. Traffic leaves only through airbag's proxy, which allows model APIs and
   package registries (`--allow HOST` adds more) and logs every host.
+- **A package mirror.** Go, npm, pip, uv and yarn go through
+  `http://airbag.mirror`, a read-only caching mirror of proxy.golang.org, npm and
+  PyPI. Review lists every package and version the agent pulled; artifacts are
+  cached across sessions.
 - **An outbox.** `git push` returns `queued` and runs on the host after you approve
   it. Pushing around the shim fails at the proxy.
 - **No credentials.** `~/.ssh`, `~/.aws`, `gh`, `docker`, `kube` and similar are
-  hidden. Host sockets (docker.sock, D-Bus, ssh-agent, X11, Wayland) are out of
+  hidden, and so are credential-like environment variables (`*TOKEN*`,
+  `*SECRET*`, `*API_KEY*`, ...) except the agents' own API keys; `--pass-env NAME`
+  keeps one. Host sockets (docker.sock, D-Bus, ssh-agent, X11, Wayland) are out of
   reach: `/run`, `/tmp` and `/dev/shm` are private.
 - **Watched secrets.** The workspace's `.env` files are served read-only through
   FUSE. The first read by anything but airbag taints the session: commands that
@@ -104,12 +110,16 @@ config core.hooksPath` persists), and known secret values (from `.env` and
 credential-like variables) are masked in output that goes back to the agent.
 
 Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `test/policy-e2e.sh`,
-`test/partial-e2e.sh`, `test/secret-e2e.sh`, `python3 test/ctrlc.py` and
-`test/claude-e2e.sh` (the real Claude Code binary against a scripted mock of the
+`test/partial-e2e.sh`, `test/secret-e2e.sh`, `test/mirror-e2e.sh`,
+`python3 test/ctrlc.py` and `test/claude-e2e.sh` (the real Claude Code binary against a scripted mock of the
 Messages API). With a real login, follow [docs/manual-test.md](docs/manual-test.md).
 
-Not yet: a local registry mirror, secret handles (the agent sees a placeholder,
-airbag substitutes the value at an allowed boundary), Codex hooks.
+The effect log is a SQLite database per session (`effects.db`, append-only by
+trigger), so `sqlite3` answers questions the review does not.
+
+Not yet: secret handles (the agent sees a placeholder, airbag substitutes the
+value at an allowed boundary), Codex hooks. Registry hosts stay on the allowlist
+for tools that ignore the mirror settings.
 
 ## Threat model
 

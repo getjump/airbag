@@ -40,6 +40,8 @@ type Meta struct {
 	Passthrough []string `json:"passthrough"`
 	// Paths under $HOME hidden from the agent (credentials).
 	Hidden []string `json:"hidden"`
+	// Credential-like environment variables passed to the agent anyway.
+	PassEnv []string `json:"pass_env,omitempty"`
 }
 
 type Session struct {
@@ -97,7 +99,7 @@ func (s *Session) MountDir(name string) string { return filepath.Join(s.Dir, "mn
 func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "run") }
 func (s *Session) ProxySock() string           { return filepath.Join(s.RunDir(), "proxy.sock") }
 func (s *Session) ControlSock() string         { return filepath.Join(s.RunDir(), "ctl.sock") }
-func (s *Session) EffectsPath() string         { return filepath.Join(s.Dir, "effects.jsonl") }
+func (s *Session) EffectsPath() string         { return filepath.Join(s.Dir, "effects.db") }
 func (s *Session) OutboxPath() string          { return filepath.Join(s.Dir, "outbox.json") }
 
 func (s *Session) Save() error {
