@@ -550,6 +550,23 @@ func stamp(path string) (session.WriteStamp, bool) {
 // WriteBackConfigs left it in this session: the same content and the
 // same change time, so no host edit since, a chmod included. Its newer
 // change time is then airbag's and not a host edit.
+// RecordOwnWrite records an agent config apply has just written as
+// airbag's own write, so a later run of the session does not take it
+// for a host edit.
+func RecordOwnWrite(s *session.Session, path string) {
+	for i := range jsonConfigs {
+		if filepath.Join(s.Home, jsonConfigs[i].path) != path {
+			continue
+		}
+		if st, ok := stamp(path); ok {
+			if s.WroteBack == nil {
+				s.WroteBack = map[string]session.WriteStamp{}
+			}
+			s.WroteBack[path] = st
+		}
+	}
+}
+
 func OwnWrite(s *session.Session, path string) bool {
 	want, ok := s.WroteBack[path]
 	if !ok {
@@ -841,7 +858,7 @@ func canon(b []byte) string {
 // checked right before the rename; when it reports false, nothing is
 // replaced and the error is errChanged.
 func writeAtomic(path string, data []byte, unchanged func() bool) error {
-	tmp, err := writeTemp(path, data)
+	tmp, _, err := writeTemp(path, data)
 	if err != nil {
 		return err
 	}
@@ -860,7 +877,7 @@ func writeAtomic(path string, data []byte, unchanged func() bool) error {
 // undone. Where the filesystem cannot swap, it falls back to a plain
 // rename after unchanged.
 func replaceIf(path string, data, want []byte, existed bool, unchanged func() bool) error {
-	tmp, err := writeTemp(path, data)
+	tmp, mode, err := writeTemp(path, data)
 	if err != nil {
 		return err
 	}
@@ -887,29 +904,45 @@ func replaceIf(path string, data, want []byte, existed bool, unchanged func() bo
 	case err != nil:
 		return err
 	}
+	// What was displaced must be what this attempt read, with the mode
+	// the replacement was given: a host chmod in between is a change too.
 	if got, err := readRegular(tmp); err == nil && bytes.Equal(got, want) {
-		return nil
+		if fi, err := os.Lstat(tmp); err == nil && fi.Mode().Perm() == mode {
+			return nil
+		}
 	}
-	if err := renameExchange(tmp, path); err != nil { // put the host's write back
+	afterSwap()
+	// Put the host's write back. If the host replaced airbag's file in
+	// the meantime, the swap brings back airbag's file instead of the
+	// newer host write: swap once more, so the newest write stays.
+	if err := renameExchange(tmp, path); err != nil {
 		return err
+	}
+	if got, err := readRegular(tmp); err != nil || !bytes.Equal(got, data) {
+		if err := renameExchange(tmp, path); err != nil {
+			return err
+		}
 	}
 	return errChanged
 }
+
+// afterSwap is a test hook: a host write between the swap and its undo.
+var afterSwap = func() {}
 
 func cannotSwap(err error) bool {
 	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.ENOTSUP)
 }
 
 // writeTemp writes data, synced, to a new file beside path with path's
-// permissions (0600 if there is none), and returns its name.
-func writeTemp(path string, data []byte) (string, error) {
+// permissions (0600 if there is none), and returns its name and mode.
+func writeTemp(path string, data []byte) (string, os.FileMode, error) {
 	mode := os.FileMode(0o600)
 	if fi, err := os.Lstat(path); err == nil {
 		mode = fi.Mode().Perm()
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".airbag-cfg-*")
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	_, err = tmp.Write(data)
 	if err == nil {
@@ -923,9 +956,9 @@ func writeTemp(path string, data []byte) (string, error) {
 	}
 	if err != nil {
 		_ = os.Remove(tmp.Name())
-		return "", err
+		return "", 0, err
 	}
-	return tmp.Name(), nil
+	return tmp.Name(), mode, nil
 }
 
 // agentMemory reports whether a home path is inside a Claude Code project

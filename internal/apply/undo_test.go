@@ -1066,3 +1066,36 @@ func TestConflictConfigRemovedOnHost(t *testing.T) {
 		t.Fatal("no conflict for a config the host removed during the session")
 	}
 }
+
+// An agent config that apply writes is airbag's own write from then
+// on: a later run of the session does not take it for a host edit.
+func TestApplyRecordsConfigAsOwnWrite(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	s, err := session.Create(session.Meta{Workspace: filepath.Join(t.TempDir(), "ws"), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	real := filepath.Join(home, ".claude.json")
+	for p, data := range map[string]string{real: `{"a":1}`, filepath.Join(s.HomeUpper(), ".claude.json"): `{"a":1,"mcpServers":{}}`} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if !review.OwnWrite(s, real) {
+		t.Fatal("the config apply wrote is not recorded as airbag's own")
+	}
+}

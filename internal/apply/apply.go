@@ -164,6 +164,9 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		if err := gen.finish(); err != nil {
 			return err
 		}
+		for _, c := range picked {
+			review.RecordOwnWrite(s, c.Path) // an agent config written now is not a later host edit
+		}
 	}
 	if !s.Clone {
 		forget(picked) // a clone matches the real files once they are applied

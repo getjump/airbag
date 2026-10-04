@@ -769,3 +769,61 @@ func TestReplaceIfKeepsARacingHostWrite(t *testing.T) {
 		t.Fatalf("scratch files left: %v", es)
 	}
 }
+
+// A host chmod after the check is a change too: the swap is undone and
+// the host's mode stays.
+func TestReplaceIfKeepsARacingChmod(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	writeCfg(t, p, `{"a":1}`)
+	chmod := func() bool {
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return true
+	}
+	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, chmod); !errors.Is(err, errChanged) {
+		t.Fatalf("err = %v, want errChanged", err)
+	}
+	fi, err := os.Stat(p)
+	if err != nil || fi.Mode().Perm() != 0o644 || readCfg(t, p)["a"] != float64(1) {
+		t.Fatalf("file mode %v content %v, want the host's chmod and content kept", fi.Mode(), readCfg(t, p))
+	}
+}
+
+// Undoing the swap does not bury a host write that replaced airbag's
+// file in the meantime: the newest host write stays.
+func TestReplaceIfUndoKeepsTheNewestHostWrite(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	writeCfg(t, p, `{"a":1}`)
+	replace := func(v string) {
+		writeCfg(t, p+".host", v)
+		if err := os.Rename(p+".host", p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	afterSwap = func() { replace(`{"a":"second"}`) }
+	t.Cleanup(func() { afterSwap = func() {} })
+	first := func() bool { replace(`{"a":"first"}`); return true }
+	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, first); !errors.Is(err, errChanged) {
+		t.Fatalf("err = %v, want errChanged", err)
+	}
+	if got := readCfg(t, p); got["a"] != "second" {
+		t.Fatalf("file = %v, want the newest host write", got)
+	}
+}
+
+// apply's write of an agent config is recorded as airbag's own.
+func TestRecordOwnWrite(t *testing.T) {
+	s, realPath, _ := cfgSession(t)
+	writeCfg(t, realPath, `{"a":1}`)
+	RecordOwnWrite(s, realPath)
+	if !OwnWrite(s, realPath) {
+		t.Fatal("an apply-written config is not recorded as airbag's own")
+	}
+	other := filepath.Join(s.Home, "other.json")
+	writeCfg(t, other, `{}`)
+	RecordOwnWrite(s, other)
+	if _, ok := s.WroteBack[other]; ok {
+		t.Fatal("a file that is not an agent config was recorded")
+	}
+}
