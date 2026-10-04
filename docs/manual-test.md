@@ -23,8 +23,9 @@ Ask the agent to:
 
 - [ ] edit two files and add one, then run the tests;
 - [ ] `git commit` and `git push`: the push answers `queued as intent i-N`;
-- [ ] with `defer: [gh pr create]` in `airbag.yaml`, open a pull request: `gh pr
-  create` answers `queued as intent i-N`, while `gh pr list` runs (and fails
+- [ ] with `defer: [gh pr create]` in `airbag.yaml`, commit the result and queue a
+  PR with explicit repo/base/head/title/body ([workflow](typed-pr-outbox.md));
+  it answers `queued as intent i-N` and a JSON queued result, while `gh pr list` runs (and fails
   without a token);
 - [ ] fetch a page from a host that is not allowlisted: it gets `403 ... denied by policy`;
 - [ ] read `~/.ssh/id_*`: nothing is there;
@@ -60,7 +61,8 @@ $ airbag diff
 Then one of:
 
 - [ ] `airbag apply`: the files land, the push runs after confirmation, then
-  `gh pr create` asks on its own and opens the pull request with your login; then
+  the typed PR preview asks on its own and publishes with your host credentials
+  only when both commits match; then
   `airbag rollback` puts the files back as they were and the changes back into
   the session (`airbag review` shows them again);
 - [ ] `airbag apply --branch try-1`: `git log try-1` has the agent's commits and

@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/getjump/airbag/internal/operation"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/review"
 	"github.com/getjump/airbag/internal/session"
@@ -277,12 +278,21 @@ func gitTouched(cs []review.Change) bool {
 }
 
 func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reader, o Options) error {
+	lock, err := box.LockExecution()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }()
 	intents, err := box.List()
 	if err != nil {
 		return err
 	}
 	failed := "" // after a failure the rest wait: a PR without its push means nothing
 	for _, it := range intents {
+		if it.Status == outbox.Unknown {
+			failed = it.ID
+			continue
+		}
 		if it.Status == outbox.Running {
 			// A run was recorded but not its end: airbag stopped mid-push.
 			it.Status = outbox.Unknown
@@ -295,13 +305,14 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 				return fmt.Errorf("intent %s: %w", it.ID, err)
 			}
 			fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
+			failed = it.ID
 			continue
 		}
-		if it.Status != outbox.Pending {
+		if it.Status != outbox.Pending && !(it.Request != nil && it.Status == string(operation.Approved)) {
 			continue
 		}
 		if failed != "" {
-			fmt.Fprintf(o.Out, "intent %s left pending: %s failed before it; once that is sorted out, `airbag apply %s` runs the rest\n",
+			fmt.Fprintf(o.Out, "intent %s left pending: %s did not complete before it; inspect its outcome before publishing anything dependent on it (session %s)\n",
 				it.ID, failed, s.ID)
 			continue
 		}
@@ -311,13 +322,15 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 			status, err = runPush(s, box, it, risky, in, o)
 		case outbox.KindCmd:
 			status, err = runCmd(s, box, it, risky, in, o)
+		case outbox.KindPullRequest:
+			status, err = runPullRequest(s, box, it, in, o)
 		default:
 			status, err = reject(box, it, "unknown kind "+it.Kind, o)
 		}
 		if err != nil {
 			return err
 		}
-		if status == outbox.Failed {
+		if status != outbox.Done {
 			failed = it.ID
 		}
 	}

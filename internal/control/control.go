@@ -18,6 +18,7 @@ import (
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
+	"github.com/getjump/airbag/internal/operation"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/secretfs"
@@ -92,9 +93,10 @@ func writeJSON(w http.ResponseWriter, v any) {
 // names: the call was queued, it should run here (no entry matches),
 // or it was refused.
 type DeferReply struct {
-	Queued  *outbox.Intent `json:"queued,omitempty"`
-	Run     bool           `json:"run,omitempty"`
-	Refused string         `json:"refused,omitempty"`
+	Queued  *outbox.Intent    `json:"queued,omitempty"`
+	Run     bool              `json:"run,omitempty"`
+	Refused string            `json:"refused,omitempty"`
+	Result  *operation.Result `json:"result,omitempty"`
 }
 
 // deferCmd queues a call that a `defer:` entry matches. in.Files holds
@@ -146,13 +148,65 @@ func (s *Server) deferCmd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Kind, in.Files = outbox.KindCmd, files
+	if args, matched, err := operation.ParsePullRequest(in.Argv); matched {
+		if err != nil {
+			refuse(err.Error())
+			return
+		}
+		if in.CaptureError != "" {
+			refuse(in.CaptureError)
+			return
+		}
+		if in.Request == nil {
+			refuse("typed PR capture is missing; update the sandbox shim")
+			return
+		}
+		if err := in.Request.Validate(); err != nil {
+			refuse(err.Error())
+			return
+		}
+		p := in.Request.PullRequest
+		want := args.PullRequest
+		want.HeadCommit = p.HeadCommit
+		if args.BodyFile != "" {
+			path := args.BodyFile
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(in.Cwd, path)
+			}
+			rel, ok := inside(s.Root, path)
+			if !ok || files[rel] != strings.TrimPrefix(operation.Hash([]byte(p.Body)), "sha256:") {
+				refuse("captured PR body does not match its workspace file digest")
+				return
+			}
+			want.Body = p.Body
+		}
+		if want != *p {
+			refuse("typed PR payload does not match the deferred arguments")
+			return
+		}
+		in.Kind = outbox.KindPullRequest
+		digest, err := in.Request.Digest()
+		if err != nil {
+			refuse(err.Error())
+			return
+		}
+		d, id := s.Gate.Check(policy.Input{Effect: models.Effect{Kind: in.Kind, Target: p.Repository, Detail: digest}, Argv: in.Argv})
+		if d.Verdict != policy.Allow {
+			refuse(policy.Explain(d, id))
+			return
+		}
+	} else if in.Request != nil || in.RequestDigest != "" || in.CaptureError != "" {
+		refuse("typed request does not describe this deferred command")
+		return
+	}
 	in, err := s.Box.Push(in)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.Log.Add(effects.Effect{Kind: models.DeferCmd, Target: clip(line, 200), Verdict: "defer", Reason: in.ID})
-	reply(DeferReply{Queued: &in})
+	result := &operation.Result{Outcome: operation.Queued, Ticket: in.ID, RequestDigest: in.RequestDigest}
+	reply(DeferReply{Queued: &in, Result: result})
 }
 
 // namesSecret returns the first argument, as a word or an

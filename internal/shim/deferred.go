@@ -3,6 +3,7 @@ package shim
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -33,7 +34,13 @@ func IsDeferred(name string) bool {
 func Deferred(name string, args []string) {
 	cwd, _ := os.Getwd()
 	argv := append([]string{name}, args...)
-	d, err := control.Defer(outbox.Intent{Argv: argv, Cwd: cwd, Files: pins(cwd, args)})
+	in := outbox.Intent{Argv: argv, Cwd: cwd, Files: pins(cwd, args)}
+	request, captureErr := capturePullRequest(argv, cwd)
+	in.Request = request
+	if captureErr != nil {
+		in.CaptureError = captureErr.Error()
+	}
+	d, err := control.Defer(in)
 	switch {
 	case err != nil:
 		fmt.Fprintf(os.Stderr, "airbag: could not queue %s: %v\n", name, err)
@@ -42,7 +49,12 @@ func Deferred(name string, args []string) {
 		fmt.Fprintf(os.Stderr, "airbag: `%s` not queued: %s\n", clipLine(argv), d.Refused)
 		os.Exit(126)
 	case d.Queued != nil:
-		fmt.Fprintf(os.Stderr, "airbag: `%s` queued as intent %s; it runs on the host after the human approves it in `airbag review`. "+
+		if d.Queued.Request != nil && d.Result != nil {
+			if err := json.NewEncoder(os.Stdout).Encode(d.Result); err != nil {
+				os.Exit(1)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "airbag: `%s` queued as intent %s; it runs on the host after the human approves it in `airbag apply`. "+
 			"Its output is not available now. Do not retry.\n", clipLine(argv), d.Queued.ID)
 		os.Exit(0)
 	}
