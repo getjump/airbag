@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,8 +17,20 @@ import (
 	"github.com/getjump/airbag/internal/steps"
 )
 
-// Noise: caches in $HOME are folded into one line per directory.
-var homeNoise = []string{".cache/", ".npm/", "go/pkg/", ".cargo/registry/", ".local/share/", ".local/state/", ".rustup/"}
+// Noise in $HOME: caches and agent state, folded into one line per
+// group. A match ending in "/" is a directory prefix and its own group;
+// others are path.Match patterns.
+var homeNoise = []struct{ match, group, kind string }{
+	{".cache/", "", "cache"}, {".npm/", "", "cache"}, {"go/pkg/", "", "cache"},
+	{".cargo/registry/", "", "cache"}, {".local/share/", "", "cache"},
+	{".local/state/", "", "cache"}, {".rustup/", "", "cache"},
+	// Codex keeps its state in SQLite next to config.toml; config.toml,
+	// AGENTS.md, rules and user skills stay visible.
+	{".codex/.tmp/", ".codex/", "agent state"}, {".codex/tmp/", ".codex/", "agent state"}, {".codex/shell_snapshots/", ".codex/", "agent state"},
+	{".codex/skills/.system/", ".codex/", "agent state"}, {".codex/*.sqlite*", ".codex/", "agent state"},
+	{".codex/installation_id", ".codex/", "agent state"}, {".codex/.sandbox_migration", ".codex/", "agent state"},
+	{".codex/version.json", ".codex/", "agent state"}, {".codex/models_cache.json", ".codex/", "agent state"},
+}
 
 const maxListed = 40
 
@@ -60,8 +73,8 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		folded := map[string]int{}
 		var shown []Change
 		for _, c := range home {
-			if dir := NoiseDir(c.Rel); dir != "" && !flagged(c) {
-				folded[dir+"… (cache)"]++
+			if group, kind := Noise(c.Rel); group != "" && !flagged(c) {
+				folded[group+"… ("+kind+")"]++
 				continue
 			}
 			if repo := GitDir(c.Rel); repo != "" && !flagged(c) {
@@ -230,13 +243,24 @@ func GitDir(rel string) string {
 	return ""
 }
 
-func NoiseDir(rel string) string {
-	for _, p := range homeNoise {
-		if strings.HasPrefix(rel+"/", p) {
-			return p
+// Noise returns the folding group of a path in $HOME, "" when the path
+// is not noise, and what kind of noise it is.
+func Noise(rel string) (group, kind string) {
+	for _, n := range homeNoise {
+		var hit bool
+		if strings.HasSuffix(n.match, "/") {
+			hit = strings.HasPrefix(rel+"/", n.match)
+		} else {
+			hit, _ = path.Match(n.match, rel)
+		}
+		if hit {
+			if n.group == "" {
+				return n.match, n.kind
+			}
+			return n.group, n.kind
 		}
 	}
-	return ""
+	return "", ""
 }
 
 func total(m map[string]int) int {

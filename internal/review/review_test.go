@@ -92,3 +92,24 @@ func TestScanAndClassify(t *testing.T) {
 		t.Errorf("attention = %d items: %+v", len(att), att)
 	}
 }
+
+func TestNoise(t *testing.T) {
+	for rel, want := range map[string]string{
+		".cache/go-build/ab/cd":            ".cache/ (cache)",
+		".codex/state_5.sqlite-wal":        ".codex/ (agent state)",
+		".codex/shell_snapshots/x.sh":      ".codex/ (agent state)",
+		".codex/skills/.system/a/SKILL.md": ".codex/ (agent state)",
+		".codex/config.toml":               "",
+		".codex/skills/mine/SKILL.md":      "",
+		".codex/sub/state.sqlite":          "",
+	} {
+		g, k := Noise(rel)
+		got := ""
+		if g != "" {
+			got = g + " (" + k + ")"
+		}
+		if got != want {
+			t.Errorf("Noise(%q) = %q, want %q", rel, got, want)
+		}
+	}
+}

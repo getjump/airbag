@@ -74,6 +74,47 @@ func main() {
 		}
 		respond(w, req.Stream, map[string]any{"type": "text", "text": "done"}, "end_turn")
 	})
+	// OpenAI Responses API, as used by Codex CLI.
+	http.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if *logPath != "" {
+			if f, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+				_, _ = f.Write(append(body, '\n'))
+				f.Close()
+			}
+		}
+		done := strings.Count(string(body), `"type":"function_call_output"`) + strings.Count(string(body), `"type":"custom_tool_call_output"`)
+		var item map[string]any
+		if done < len(calls) {
+			c := calls[done]
+			if *verbose {
+				fmt.Fprintf(os.Stderr, "  \033[2magent ▶ %s: %s\033[0m\n", c.Name, string(c.Input))
+			}
+			item = map[string]any{"type": "function_call", "name": c.Name, "arguments": string(c.Input),
+				"call_id": fmt.Sprintf("call_mock_%02d", done+1), "id": fmt.Sprintf("fc_mock_%02d", done+1)}
+		} else {
+			item = map[string]any{"type": "message", "role": "assistant", "id": "msg_mock",
+				"content": []any{map[string]any{"type": "output_text", "text": "done"}}}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		f, _ := w.(http.Flusher)
+		send := func(data map[string]any) {
+			b, _ := json.Marshal(data)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", data["type"], b)
+			if f != nil {
+				f.Flush()
+			}
+		}
+		resp := map[string]any{"id": fmt.Sprintf("resp_mock_%02d", done+1), "object": "response", "status": "in_progress", "output": []any{}}
+		send(map[string]any{"type": "response.created", "response": resp})
+		send(map[string]any{"type": "response.output_item.added", "output_index": 0, "item": item})
+		send(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
+		resp["status"] = "completed"
+		resp["output"] = []any{item}
+		resp["usage"] = map[string]any{"input_tokens": 10, "output_tokens": 10, "total_tokens": 20,
+			"input_tokens_details": map[string]int{"cached_tokens": 0}, "output_tokens_details": map[string]int{"reasoning_tokens": 0}}
+		send(map[string]any{"type": "response.completed", "response": resp})
+	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte("{}"))

@@ -148,12 +148,15 @@ func cmdRun(args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	if filepath.Base(argv[0]) == "codex" && !slices.Contains(argv, "--dangerously-bypass-approvals-and-sandbox") && !slices.Contains(argv, "--yolo") {
+		fmt.Fprintln(os.Stderr, "airbag: tip: Codex's own sandbox works inside airbag, but asks per command and cuts the network; airbag already branches the machine, so --dangerously-bypass-approvals-and-sandbox leaves the review to the end")
+	}
 	fmt.Fprintf(os.Stderr, "airbag: session %s · branch of %s%s · network: allowlist only\n",
 		s.ID, ws, map[bool]string{true: " and ~", false: ""}[s.OverHome])
 	var hidden []string
 	for _, kv := range os.Environ() {
-		k, _, _ := strings.Cut(kv, "=")
-		if sandbox.Credential(k) && !slices.Contains(passEnv, k) {
+		k, v, _ := strings.Cut(kv, "=")
+		if sandbox.Credential(k, v) && !slices.Contains(passEnv, k) {
 			hidden = append(hidden, k)
 		}
 	}

@@ -170,7 +170,27 @@ func agentConfig(s *session.Session) error {
 	if err := bind(top, top, true); err != nil {
 		return err
 	}
-	return setRO(top, true, true)
+	if err := setRO(top, true, true); err != nil {
+		return err
+	}
+	// Codex: only when the host has no managed requirements of its own,
+	// which airbag would otherwise replace.
+	req := agents.CodexRequirementsPath
+	if _, err := os.Stat(req); err == nil {
+		fmt.Fprintf(os.Stderr, "airbag: note: %s exists on this host; Codex hooks are not installed\n", req)
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(req), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(req, agents.CodexRequirements(), 0o444); err != nil {
+		return err
+	}
+	cdir := filepath.Dir(req)
+	if err := bind(cdir, cdir, true); err != nil {
+		return err
+	}
+	return setRO(cdir, true, true)
 }
 
 // serveSecrets puts the workspace's .env files behind secretfs: every
@@ -410,7 +430,7 @@ func agentEnv(s *session.Session) []string {
 	var env []string
 	for _, kv := range os.Environ() {
 		k, v, _ := strings.Cut(kv, "=")
-		if drop[k] || (Credential(k) && !contains(s.PassEnv, k)) {
+		if drop[k] || (Credential(k, v) && !contains(s.PassEnv, k)) {
 			continue
 		}
 		if _, ok := set[k]; ok {
@@ -442,9 +462,12 @@ var agentAuth = map[string]bool{
 
 // Credential reports whether an environment variable looks like a
 // secret the agent should not get (unless passed with --pass-env).
-func Credential(name string) bool {
-	if agentAuth[name] {
-		return false
+func Credential(name, value string) bool {
+	if agentAuth[name] || len(value) < 8 || strings.Trim(value, "0123456789") == "" {
+		return false // agent keys, short values and numbers (MAX_*_TOKENS)
+	}
+	if strings.HasSuffix(name, "_FILE") || strings.HasPrefix(value, "/") {
+		return false // a path; the file itself is what matters
 	}
 	u := strings.ToUpper(name)
 	if strings.Contains(u, "PROXY") {

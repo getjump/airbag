@@ -52,9 +52,9 @@ func Units(cs []review.Change) []Unit {
 			title = "! " + display(c) + "/ (directory replaced)"
 		case c.Layer == "ws" && strings.HasPrefix(c.Rel, ".git/") && !flagged:
 			key, title = "ws:.git", "git internals"
-		case c.Layer == "home" && !flagged && review.NoiseDir(c.Rel) != "":
-			d := review.NoiseDir(c.Rel)
-			key, title = "home:"+d, "~/"+d+"… (cache)"
+		case c.Layer == "home" && !flagged && noise(c.Rel) != "":
+			d, kind := review.Noise(c.Rel)
+			key, title = "home:"+d, "~/"+d+"… ("+kind+")"
 		case c.Layer == "home" && !flagged && review.GitDir(c.Rel) != "":
 			d := review.GitDir(c.Rel)
 			key, title = "home:"+d, "~/"+d+"… (git internals)"
@@ -137,4 +137,9 @@ func forget(cs []review.Change) {
 		}
 		_ = os.RemoveAll(c.Upper)
 	}
+}
+
+func noise(rel string) string {
+	group, _ := review.Noise(rel)
+	return group
 }

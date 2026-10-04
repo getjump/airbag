@@ -84,12 +84,10 @@ func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 		s.Log.Add(effects.Effect{Kind: "tool.call", Target: p.ToolName + ": " + summary, Verdict: "allow", Reason: agent + " " + p.ToolUseID})
 		// Tell the agent before the command runs; the shell shim checks
 		// again for agents without hooks.
-		if p.ToolName == "Bash" && agent == "claude" {
-			var in struct {
-				Command string `json:"command"`
-			}
-			_ = json.Unmarshal(p.ToolInput, &in)
-			cmds, _ := models.Analyze(in.Command)
+		var input map[string]any
+		_ = json.Unmarshal(p.ToolInput, &input)
+		if command, ok := agents.ShellCommand(p.ToolName, input); ok {
+			cmds, _ := models.Analyze(command)
 			for _, c := range cmds {
 				if d, id := s.judge(c); d.Verdict != policy.Allow {
 					s.Log.Add(effects.Effect{Kind: "tool.call", Target: p.ToolName + ": " + summary, Verdict: d.Verdict, Reason: d.Rule})

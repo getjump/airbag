@@ -52,4 +52,18 @@ or `airbag discard`.
   conversation. Transcripts pass through even when the branch was discarded,
   so the conversation may mention edits that no longer exist.
 
+## Codex
+
+```console
+$ airbag run -- codex --dangerously-bypass-approvals-and-sandbox
+```
+
+Run the same session tasks, then:
+
+- [ ] Steps list Codex's commands (Codex reports them as `Bash`);
+- [ ] a command an `airbag.yaml` rule denies is refused before it runs;
+- [ ] Network shows `chatgpt.com` or `api.openai.com`;
+- [ ] Home folds Codex's state into one `~/.codex/… (agent state)` line;
+- [ ] `airbag run -- codex resume` lists the earlier session.
+
 Report any host the agent needed that airbag denied; `--allow HOST` adds it.

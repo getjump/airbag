@@ -70,7 +70,11 @@ func ToolSummary(tool string, input json.RawMessage) string {
 	case "Grep", "Glob":
 		s = str("pattern")
 	default:
-		for _, k := range []string{"command", "file_path", "path", "url", "query"} {
+		if c, ok := ShellCommand(tool, in); ok {
+			s = c
+			break
+		}
+		for _, k := range []string{"cmd", "command", "file_path", "path", "url", "query"} {
 			if s = str(k); s != "" {
 				break
 			}
