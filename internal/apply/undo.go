@@ -271,7 +271,10 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		// Whatever is still left was added while the rollback ran, and
 		// is not ours to remove.
 		if e.Type == fs.ModeDir && e.Saved != "" {
-			removeTemps(e.Path, g.wroteTo())
+			if moved {
+				// Checked by leftWhole: its temp files are the apply's.
+				removeTemps(e.Path, g.wroteTo())
+			}
 			var still []string
 			dirs, still = removeInside(dirs, e.Path)
 			if !emptyOrAbsent(e.Path) {

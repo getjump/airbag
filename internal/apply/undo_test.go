@@ -920,3 +920,25 @@ func TestRollbackKeepsUserFileSameAsAgentsRemovedOne(t *testing.T) {
 		t.Fatalf("rollback not complete: generations %v (%v)", gs, err)
 	}
 }
+
+// Temp files are removed only from a replaced directory checked to hold
+// nothing but the apply's: when its previous version is gone from the
+// session, a user's file that looks like one stays.
+func TestRollbackRemovesTempsOnlyFromCheckedDir(t *testing.T) {
+	s, d := appliedReplacedDir(t, "inner.txt")
+	g, _ := keptVersion(t, s, d)
+	if err := os.RemoveAll(g.Entries[0].Saved); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(d, ".airbag-123")
+	if err := os.WriteFile(p, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, p); got != "mine\n" {
+		t.Fatalf("rollback removed the user's %s: %q\n%s", p, got, out.String())
+	}
+}
