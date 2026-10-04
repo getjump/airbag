@@ -687,9 +687,9 @@ func TestRollbackRemovesApplyTempInReplacedDir(t *testing.T) {
 	}
 }
 
-// Only a temp file named as copyFile names them, in a directory the
-// apply copied a file into, counts as the apply's; a user's file with a
-// similar name keeps the directory as it is.
+// Only a temp file named as copyFile names them, in the directory of a
+// copy step that did not finish, counts as the apply's; a user's file
+// with a similar name keeps the directory as it is.
 func TestRollbackKeepsUserFileNamedLikeTemp(t *testing.T) {
 	for _, name := range []string{".airbag-notes", filepath.Join("own", ".airbag-123")} {
 		s, d := appliedReplacedDir(t, "inner.txt")
@@ -981,5 +981,29 @@ func TestRollbackKeepsReplacedDirOpaque(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(src, "b.go")); err == nil {
 		t.Errorf("the second apply kept src/b.go, which the agent's src does not have")
+	}
+}
+
+// A finished apply leaves no temp file: after one, a file named like
+// copyFile's temp files in a replaced directory the apply copied into
+// is the user's. Rollback keeps it and leaves the directory as it is.
+func TestRollbackKeepsTempNamedFileAfterFinishedApply(t *testing.T) {
+	s, d := appliedReplacedDir(t, "inner.txt")
+	p := filepath.Join(d, ".airbag-123")
+	if err := os.WriteFile(p, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, p); got != "mine\n" {
+		t.Fatalf("rollback removed the user's %s: %q\n%s", p, got, out.String())
+	}
+	if want := "left as is (holds files added or changed after the apply): " + d; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q: %s", want, out.String())
+	}
+	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+		t.Fatalf("version of %s from before the apply = %q", d, prev)
 	}
 }
