@@ -69,4 +69,14 @@ if command -v unshare >/dev/null; then
 	echo "$out" | grep -q nested-refused || fail "--strict let the agent create a user namespace: $out"
 	"$AIRBAG" discard --yes >/dev/null
 fi
+# Text the agent controls is shown, not interpreted, by the terminal.
+"$AIRBAG" run -- sh -c 'printf "x\033[2Jy\n" > "$(printf "esc\033]0;t\007.txt")"' >/dev/null 2>&1
+esc=$(printf '\033')
+for cmd in review diff; do
+	out=$("$AIRBAG" $cmd)
+	case "$out" in *"$esc"*) fail "$cmd printed a raw escape";; esac
+	echo "$out" | grep -qF 'esc\x1b]0;t\x07.txt' || fail "$cmd lacks the escaped name: $out"
+done
+"$AIRBAG" diff | grep -qF 'x\x1b[2Jy' || fail "diff lacks the escaped content"
+"$AIRBAG" discard --yes >/dev/null
 echo "PASS"

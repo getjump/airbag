@@ -24,6 +24,7 @@ import (
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/shim"
 	"github.com/getjump/airbag/internal/steps"
+	"github.com/getjump/airbag/internal/term"
 )
 
 const usage = `airbag — approve outcomes, not commands
@@ -93,7 +94,7 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "airbag: %v\n", err)
+		fmt.Fprintf(os.Stderr, "airbag: %s\n", term.String(err.Error()))
 		if code == 0 {
 			code = 1
 		}
@@ -237,14 +238,18 @@ func cmdReview(s *session.Session) error {
 	effs, _ := effects.Read(s.EffectsPath())
 	intents := listIntents(s)
 	sts, _ := steps.Read(s)
-	review.Render(os.Stdout, s, cs, effs, intents, sts)
+	out := term.Safe(os.Stdout)
+	defer out.Flush()
+	review.Render(out, s, cs, effs, intents, sts)
 	return nil
 }
 
 func cmdLog(s *session.Session) error {
 	effs, err := effects.Read(s.EffectsPath())
+	out := term.Safe(os.Stdout)
+	defer out.Flush()
 	for _, e := range effs {
-		fmt.Printf("%s  %-16s %-6s %s %s\n", e.Time.Format("15:04:05"), e.Kind, e.Verdict, e.Target, e.Reason)
+		fmt.Fprintf(out, "%s  %-16s %-6s %s %s\n", e.Time.Format("15:04:05"), e.Kind, e.Verdict, e.Target, e.Reason)
 	}
 	return err
 }
@@ -262,11 +267,13 @@ func cmdDiff(args []string) error {
 	if err != nil {
 		return err
 	}
+	out := term.Safe(os.Stdout)
+	defer out.Flush()
 	for _, c := range cs {
 		if c.IsDir() || !matches(c, args) || (strings.HasPrefix(c.Rel, ".git/") && len(args) == 0) {
 			continue
 		}
-		review.Diff(os.Stdout, c)
+		review.Diff(out, c)
 	}
 	return nil
 }
@@ -311,8 +318,10 @@ func cmdApply(args []string) error {
 		return err
 	}
 	defer box.Close()
+	out := term.Safe(os.Stdout)
+	defer out.Flush()
 	return apply.Apply(s, cs, box, apply.Options{
-		Yes: *yes, Force: *force, Interactive: *inter, Only: only, In: os.Stdin, Out: os.Stdout})
+		Yes: *yes, Force: *force, Interactive: *inter, Only: only, In: os.Stdin, Out: out})
 }
 
 // listIntents reads a session's outbox; a session without one has none.
@@ -435,8 +444,10 @@ func cmdList() error {
 	if err != nil {
 		return err
 	}
+	out := term.Safe(os.Stdout)
+	defer out.Flush()
 	for _, s := range all {
-		fmt.Printf("%s  %-9s %s  %-30s %s\n", s.ID, s.Status, s.Created.Format("2006-01-02 15:04"), s.Workspace, strings.Join(s.Argv, " "))
+		fmt.Fprintf(out, "%s  %-9s %s  %-30s %s\n", s.ID, s.Status, s.Created.Format("2006-01-02 15:04"), s.Workspace, strings.Join(s.Argv, " "))
 	}
 	return nil
 }
