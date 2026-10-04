@@ -634,6 +634,21 @@ func TestRollbackLeavesReplacedDirWhole(t *testing.T) {
 // temp file copyFile was writing is left next to it.
 func crashAt(t *testing.T, s *session.Session, path string) string {
 	t.Helper()
+	stopAt(t, s, path)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(filepath.Dir(path), ".airbag-2918374650")
+	if err := os.WriteFile(tmp, []byte("half of the agent's"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return tmp
+}
+
+// stopAt turns the last generation of s into one that stopped at the
+// step for path: the journal does not record it as done.
+func stopAt(t *testing.T, s *session.Session, path string) {
+	t.Helper()
 	gs, err := listGenerations(s)
 	if err != nil || len(gs) == 0 {
 		t.Fatal("no generation", err)
@@ -651,14 +666,6 @@ func crashAt(t *testing.T, s *session.Session, path string) string {
 	if err := g.save(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	tmp := filepath.Join(filepath.Dir(path), ".airbag-2918374650")
-	if err := os.WriteFile(tmp, []byte("half of the agent's"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return tmp
 }
 
 // A temp file an apply that was stopped left inside a replaced
@@ -754,5 +761,41 @@ func TestRollbackKeepsFileInReplacedDirWithoutPrevious(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(d, "inner.txt")); err == nil {
 		t.Errorf("the agent's inner.txt was not rolled back")
+	}
+}
+
+// A step that did not finish and had no previous version to move away
+// removes what is at its path only when that is the agent's version: a
+// file the user wrote there after the apply stopped survives.
+func TestRollbackKeepsUserFileAtUnfinishedStep(t *testing.T) {
+	for _, tc := range []struct {
+		data string
+		kept bool
+	}{{"the user's own\n", true}, {"new\n", false}} {
+		s, box := undoSession(t)
+		var out bytes.Buffer
+		if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+			t.Fatal(err, out.String())
+		}
+		p := filepath.Join(s.Workspace, "sub", "new.txt")
+		stopAt(t, s, p)
+		// A stopped apply never got to forget the agent's version.
+		if err := os.WriteFile(filepath.Join(s.WSUpper(), "sub", "new.txt"), []byte("new\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(tc.data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out.Reset()
+		if err := Rollback(s, nil, &out); err != nil {
+			t.Fatal(err, out.String())
+		}
+		got := read(t, p)
+		switch {
+		case tc.kept && got != tc.data:
+			t.Fatalf("rollback lost a file the user wrote after the apply stopped: %q\n%s", got, out.String())
+		case !tc.kept && got == tc.data:
+			t.Fatalf("rollback left the agent's version of an unfinished step:\n%s", out.String())
+		}
 	}
 }

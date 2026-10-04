@@ -241,6 +241,12 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			if e.Saved != "" && !moved {
 				continue
 			}
+			// Otherwise the path holds nothing yet or the agent's
+			// version; anything else was put there since, and stays.
+			if !ours(e) {
+				keep(e, "changed after the apply stopped")
+				continue
+			}
 		} else if fingerprint(e.Path) != e.After {
 			keep(e, "changed after the apply")
 			continue
@@ -409,9 +415,23 @@ func removeTemps(dir string, wrote map[string]bool) {
 	})
 }
 
-// ours: the real path of e is as the apply left it.
+// ours: the real path of e is as the apply left it. For a step that
+// did not finish, that is nothing yet or the agent's version.
 func ours(e genEntry) bool {
-	return e.After != "" && fingerprint(e.Path) == e.After
+	fp := fingerprint(e.Path)
+	if e.After == "" {
+		return fp == "absent" || fp == agents(e)
+	}
+	return fp == e.After
+}
+
+// agents returns the fingerprint of the agent's version of e, as the
+// step puts it at the real path.
+func agents(e genEntry) string {
+	if e.Kind == review.Deleted {
+		return "absent" // and the session's whiteout is no file to read
+	}
+	return fingerprint(e.Upper)
 }
 
 // removeInside removes the directories of dirs that lie inside dir,
