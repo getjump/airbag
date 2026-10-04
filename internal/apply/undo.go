@@ -32,8 +32,9 @@ import (
 //   - `airbag rollback` undoes the last generation: the user's versions
 //     come back and the agent's go back into the session, to apply again
 //     or discard. A file changed after the apply is left as it is, and
-//     so is a replaced directory that holds anything the rollback did
-//     not take out; their previous versions stay in the generation.
+//     so is a replaced directory that holds anything the apply did not
+//     put there, whole, with what the apply put inside it; their
+//     previous versions stay in the generation.
 
 type genEntry struct {
 	Layer string      `json:"layer"`
@@ -193,15 +194,43 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	dirs := slices.Clone(g.Dirs) // directories the apply created, removed last, deepest first
 	var kept []genEntry
 	keep := func(e genEntry, why string) {
-		fmt.Fprintf(out, "  left as is (%s): %s\n", why, e.Path)
-		if _, err := os.Lstat(e.Saved); e.Saved != "" && err == nil {
-			fmt.Fprintf(out, "    its version from before the apply is kept at %s\n", e.Saved)
+		if why != "" {
+			fmt.Fprintf(out, "  left as is (%s): %s\n", why, e.Path)
+			if _, err := os.Lstat(e.Saved); e.Saved != "" && err == nil {
+				fmt.Fprintf(out, "    its version from before the apply is kept at %s\n", e.Saved)
+			}
 		}
 		kept = append(kept, e)
 		left++
 	}
+	// Which replaced directories stay is decided before anything inside
+	// them is touched. Rolling back only what the apply put inside one
+	// that also holds something else would leave the user with neither
+	// version: not the agent's, and not their own, which is in saved/.
+	whole := g.leftWhole()
+	inWhole := func(p string) string {
+		for d := range whole {
+			if p != d && within(p, d) {
+				return d
+			}
+		}
+		return ""
+	}
+	inside := map[string]int{} // paths left inside each of those directories
 	for i := len(g.Entries) - 1; i >= 0; i-- {
 		e := g.Entries[i]
+		if d := inWhole(e.Path); d != "" {
+			switch {
+			case !ours(e):
+				keep(e, "changed after the apply")
+			case e.Saved != "":
+				keep(e, "inside a directory left as is")
+			default:
+				keep(e, "") // counted in the line for d
+				inside[d]++
+			}
+			continue
+		}
 		dirs = append(dirs, e.Made...)
 		_, serr := os.Lstat(e.Saved)
 		moved := e.Saved != "" && serr == nil
@@ -215,11 +244,18 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			keep(e, "changed after the apply")
 			continue
 		}
-		// A replaced directory goes only once it is empty: by now the
-		// entries inside it that the apply made are gone, and so are
-		// the directories it made there that nothing is left in, so
-		// whatever is left was added or kept after the apply, and is
-		// not ours to remove.
+		if whole[e.Path] {
+			keep(e, "holds files added or changed after the apply")
+			if n := inside[e.Path]; n > 0 {
+				fmt.Fprintf(out, "    so is what the apply put inside it (paths: %d)\n", n)
+			}
+			continue
+		}
+		// Any other replaced directory held only what the apply put
+		// there, and it goes once that is out: by now the entries inside
+		// it are gone, and so are the directories the apply made there.
+		// Whatever is still left was added while the rollback ran, and
+		// is not ours to remove.
 		if e.Type == fs.ModeDir && e.Saved != "" {
 			var still []string
 			dirs, still = removeInside(dirs, e.Path)
@@ -260,7 +296,9 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
 	var still []string
 	for _, d := range dirs {
-		removeEmptyDir(d)
+		if inWhole(d) == "" {
+			removeEmptyDir(d)
+		}
 		if _, err := os.Lstat(d); err == nil && !slices.Contains(still, d) {
 			still = append(still, d)
 		}
@@ -277,6 +315,59 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	}
 	g.Entries, g.Dirs, g.Complete, g.Partial = kept, still, true, true
 	return left, g.save()
+}
+
+// leftWhole returns the replaced directories, their previous versions
+// moved into saved/, that hold anything the apply did not put there.
+func (g *generation) leftWhole() map[string]bool {
+	entries := map[string]genEntry{}
+	made := map[string]bool{}
+	for _, d := range g.Dirs {
+		made[d] = true
+	}
+	for _, e := range g.Entries {
+		entries[e.Path] = e
+		for _, d := range e.Made {
+			made[d] = true
+		}
+	}
+	whole := map[string]bool{}
+	for _, e := range g.Entries {
+		if e.Kind != review.Replaced || e.Saved == "" || fingerprint(e.Path) != "dir" {
+			continue
+		}
+		if _, err := os.Lstat(e.Saved); err == nil && !onlyApplied(e.Path, entries, made) {
+			whole[e.Path] = true
+		}
+	}
+	return whole
+}
+
+// onlyApplied reports whether all there is under dir is what the apply
+// put there: its entries as it left them, and directories it made.
+func onlyApplied(dir string, entries map[string]genEntry, made map[string]bool) bool {
+	clean := true
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && p == dir {
+			return nil
+		}
+		if err == nil {
+			if e, ok := entries[p]; ok && ours(e) {
+				return nil // a directory of the apply's is walked too
+			}
+			if d.IsDir() && made[p] {
+				return nil
+			}
+		}
+		clean = false
+		return filepath.SkipAll
+	})
+	return clean
+}
+
+// ours: the real path of e is as the apply left it.
+func ours(e genEntry) bool {
+	return e.After != "" && fingerprint(e.Path) == e.After
 }
 
 // removeInside removes the directories of dirs that lie inside dir,
