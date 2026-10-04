@@ -31,16 +31,22 @@ func systemVersion() string {
 	return "macOS " + strings.TrimSpace(v) + " " + strings.TrimSpace(m)
 }
 
-func (p *probe) cleanup() {
+// cleanup unmounts the export and stops its server. When neither umount
+// nor diskutil can unmount it, the mount and the server stay and the
+// failure is returned.
+func (p *probe) cleanup() error {
 	if p.mounted {
 		if _, err := run(20*time.Second, "", "/sbin/umount", p.mnt); err != nil {
-			_, _ = run(20*time.Second, "", "/usr/sbin/diskutil", "unmount", "force", p.mnt)
+			if out, err := run(20*time.Second, "", "/usr/sbin/diskutil", "unmount", "force", p.mnt); err != nil {
+				return fmt.Errorf("cannot unmount %s: %v: %s", p.mnt, err, firstLine(out))
+			}
 		}
 		p.mounted = false
 	}
 	if p.srv != nil {
 		_ = p.srv.Close()
 	}
+	return nil
 }
 
 // S1: a deny-first profile around a shell: writes only where allowed,

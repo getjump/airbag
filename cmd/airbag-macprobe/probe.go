@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -95,6 +98,21 @@ func tlsClient(url string) int {
 	resp.Body.Close()
 	fmt.Println("tls=ok", resp.Status)
 	return 0
+}
+
+// homeDir is $HOME, or the account's home when HOME is unset or not a
+// usable path (some launchd and CI jobs): S1 writes a file there, and
+// the report shortens it to "~", which an empty or "/" home would put
+// everywhere.
+func homeDir() (string, error) {
+	usable := func(h string) bool { return filepath.IsAbs(h) && filepath.Clean(h) != "/" }
+	if h, err := os.UserHomeDir(); err == nil && usable(h) {
+		return h, nil
+	}
+	if u, err := user.Current(); err == nil && usable(u.HomeDir) {
+		return u.HomeDir, nil
+	}
+	return "", errors.New("no home directory: set HOME to your home")
 }
 
 // viaProxy is env with every proxy setting Go reads replaced by one

@@ -184,3 +184,17 @@ func TestViaProxy(t *testing.T) {
 		t.Fatalf("got %q, want %q", env, want)
 	}
 }
+
+func TestHomeDir(t *testing.T) {
+	for _, h := range []string{"", "/", "relative/dir"} {
+		t.Setenv("HOME", h)
+		got, err := homeDir()
+		if err == nil && (!filepath.IsAbs(got) || got == "/") {
+			t.Errorf("HOME=%q: homeDir() = %q", h, got)
+		}
+	}
+	t.Setenv("HOME", "/Users/me")
+	if got, err := homeDir(); err != nil || got != "/Users/me" {
+		t.Errorf("HOME=/Users/me: homeDir() = %q, %v", got, err)
+	}
+}

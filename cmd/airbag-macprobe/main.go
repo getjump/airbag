@@ -13,7 +13,8 @@ import (
 // Usage: airbag-macprobe [-json] [-v] [-keep] [-files N] [-no-net]
 //
 // The probe needs no root and writes only inside a temporary directory,
-// which it removes at the end (unless -keep). It mounts an NFS export
+// which it removes at the end (unless -keep, or when the export under it
+// would not unmount: then it says so and exits 1). It mounts an NFS export
 // from a server inside this process under that directory and unmounts
 // it. With -no-net it skips the one check that reaches the internet
 // (Go TLS through a local proxy to proxy.golang.org).
@@ -52,12 +53,16 @@ func main() {
 		os.Exit(2)
 	}
 
+	home, err := homeDir()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "airbag-macprobe:", err)
+		os.Exit(2)
+	}
 	dir, err := os.MkdirTemp("", "airbag-macprobe-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "airbag-macprobe:", err)
 		os.Exit(1)
 	}
-	home, _ := os.UserHomeDir()
 	rp := strings.NewReplacer(dir, "$TMP", resolve(dir), "$TMP", home, "~")
 
 	p := &probe{opts: o, dir: resolve(dir), home: home}
@@ -98,11 +103,19 @@ func main() {
 		}
 		rep.Interrupted = true
 	}
-	p.cleanup()
-	if !o.keep {
-		_ = os.RemoveAll(dir)
-	} else {
+	// A mount that would not go stays where it is, and so does the
+	// directory: removing it would go through the mount.
+	cerr := p.cleanup()
+	switch {
+	case cerr != nil:
+		fmt.Fprintln(os.Stderr, "airbag-macprobe:", cerr)
+		fmt.Fprintln(os.Stderr, "airbag-macprobe: left", dir, "in place; unmount the export under it, then remove it")
+	case o.keep:
 		fmt.Fprintln(os.Stderr, "kept", dir)
+	default:
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Fprintln(os.Stderr, "airbag-macprobe: remove", dir+":", err)
+		}
 	}
 	if o.json {
 		_ = writeJSON(os.Stdout, rep)
@@ -113,7 +126,7 @@ func main() {
 	switch {
 	case rep.Interrupted:
 		os.Exit(130)
-	case rep.Summary.Fail > 0:
+	case rep.Summary.Fail > 0, cerr != nil:
 		os.Exit(1)
 	}
 }
