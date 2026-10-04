@@ -116,6 +116,27 @@ func buildWorld(s *session.Session) error {
 	}
 
 	if s.OverHome {
+		// A branch hole (a passed-through project's memory/) must stay a
+		// copy-on-write view: the real files as lower, the branch as
+		// upper, so the agent sees existing memory and its edits and
+		// deletions land in the branch. That view is the home overlay's
+		// own at the hole's path, which the passthrough bind below would
+		// cover, so take a bind of it first and put it back after.
+		views := make([]string, len(s.BranchHoles))
+		for i, h := range s.BranchHoles {
+			src := filepath.Join(s.Home, h)
+			if st, err := os.Lstat(src); err != nil || !st.IsDir() {
+				continue
+			}
+			view := s.MountDir(fmt.Sprintf("hole-%d", i))
+			if err := os.MkdirAll(view, 0o700); err != nil {
+				return err
+			}
+			if err := bind(src, view, true); err != nil {
+				return err
+			}
+			views[i] = view
+		}
 		for _, p := range s.Passthrough {
 			p = strings.TrimSuffix(p, "/")
 			src, dst := filepath.Join(s.MountDir("realhome"), p), filepath.Join(s.Home, p)
@@ -129,25 +150,24 @@ func buildWorld(s *session.Session) error {
 				return err
 			}
 		}
-		// Punch the holes back into the branch: bind the branch's own
-		// upper layer over each hole, so writes there (e.g. a project's
-		// memory/) land in the branch and show up in review, although
-		// their parent directory passes through. The bind is taken
-		// before /tmp and the session root are hidden below, so it keeps
-		// its own reference to the upper layer afterwards.
-		for _, h := range s.BranchHoles {
-			src, dst := filepath.Join(s.HomeUpper(), h), filepath.Join(s.Home, h)
-			if err := os.MkdirAll(src, 0o700); err != nil {
-				return err
-			}
-			if _, err := os.Lstat(dst); err != nil {
+		// The mount taken above keeps its own reference to the overlay,
+		// so it survives /tmp and the session root being hidden below.
+		for i, h := range s.BranchHoles {
+			if views[i] == "" {
 				continue
 			}
-			if err := bind(src, dst, true); err != nil {
+			dst := filepath.Join(s.Home, h)
+			if st, err := os.Lstat(dst); err != nil || !st.IsDir() {
+				continue
+			}
+			if err := bind(views[i], dst, true); err != nil {
 				return err
 			}
 			if err := setRO(dst, true, false); err != nil {
 				return err
+			}
+			if err := unix.Unmount(views[i], unix.MNT_DETACH); err != nil {
+				return fmt.Errorf("unmount %s: %w", views[i], err)
 			}
 		}
 	}

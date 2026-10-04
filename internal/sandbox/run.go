@@ -102,12 +102,11 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 			_ = os.MkdirAll(filepath.Join(s.Home, p), 0o700)
 		}
 	}
-	// A branch hole (e.g. a passed-through project's memory/) needs a
-	// mountpoint in the real $HOME and a target in the branch; the agent
-	// writes to the mountpoint and the data lands in the branch.
+	// A branch hole (a passed-through project's memory/) needs to exist
+	// in the real $HOME: as a mountpoint inside the passed-through parent,
+	// and as the lower layer of the copy-on-write view put on it (init.go).
 	for _, h := range s.BranchHoles {
 		_ = os.MkdirAll(filepath.Join(s.Home, h), 0o700)
-		_ = os.MkdirAll(filepath.Join(s.HomeUpper(), h), 0o700)
 	}
 
 	self, err := os.Executable()
