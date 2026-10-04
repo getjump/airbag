@@ -248,6 +248,10 @@ $ go install github.com/getjump/airbag/cmd/airbag@latest
 $ airbag doctor
 ```
 
+With Nix: `nix run github:getjump/airbag -- doctor`, or add the flake's
+`packages.<system>.airbag` to your configuration. `nix flake check` runs the unit
+tests, `nix develop` gives a shell with Go and the test tools.
+
 One static binary, no daemon, no Docker. Needs Linux 5.12+ with unprivileged user
 namespaces. On Ubuntu 23.10+ AppArmor restricts them; `airbag doctor` prints the
 one-time profile to install. On macOS there is a native prototype (Seatbelt
