@@ -15,7 +15,8 @@ bubblewrap cannot create overlay mounts at all.
 Two things to do instead:
 
 1. Take bubblewrap's `--disable-userns` idea now: keep the agent from creating
-   user namespaces of its own (see the last section).
+   user namespaces of its own (see the last section). Done: on by default,
+   `airbag run --allow-userns` lifts it.
 2. Revisit when Ubuntu LTS ships bubblewrap 0.10 or later. With `--overlay`
    in bubblewrap, a hybrid (bubblewrap for namespaces and binds, an airbag
    helper inside for the rest) becomes worth measuring.
@@ -33,7 +34,7 @@ Two things to do instead:
 | Private `/run`, `/tmp`, `/var/tmp`, `/dev/shm` | Yes: `--tmpfs`, `--dev` | |
 | Secret files through FUSE | **No** | The sandboxed process has no capabilities (`CapEff: 0`), so it cannot mount FUSE. The alternative, `fusermount3` on the host, is a setuid dependency |
 | Proxy at `127.0.0.1:3128` inside | **No** | Needs a process inside that bridges TCP to the proxy's unix socket; Claude Code's own sandbox runs such a helper |
-| Agent cannot create user namespaces | Yes: `--disable-userns` | `unshare -Ur` inside fails with ENOSPC. airbag does not do this yet |
+| Agent cannot create user namespaces | Yes: `--disable-userns` | `unshare -Ur` inside fails with ENOSPC. airbag now does the same (below) |
 | Signals, terminal, reaping | Yes: `--die-with-parent`, `--new-session`, a PID 1 reaper | |
 
 ## What a bubblewrap backend would look like
@@ -59,8 +60,14 @@ agent-cannot-nest
 ```
 
 The agent's own namespace is still created; the agent cannot create another.
-That closes a large kernel surface to whatever runs inside. The cost: the
-agents' own sandboxes, Codex's `--sandbox workspace-write` and Claude Code's
-sandbox mode, run on bubblewrap and need user namespaces, so they would no
-longer start inside airbag. airbag already advises turning them off in favor of
-its own branch, so the limit can be the default with a flag to lift it.
+That closes a large kernel surface to whatever runs inside. airbag does this
+by default; `airbag run --allow-userns` lifts it.
+
+The cost: an agent's own sandbox built on bubblewrap cannot start inside
+airbag. Checked with Codex 0.160: `codex exec -s workspace-write` fails with
+`bwrap: Creating new namespace failed: nesting depth or
+/proc/sys/user/max_user_namespaces exceeded`, and runs with `--allow-userns`.
+airbag warns when Codex starts without
+`--dangerously-bypass-approvals-and-sandbox`. Claude Code with
+`sandbox.enabled` in project settings still ran its Bash tool in the same
+check; whether its sandbox engaged there is not established.

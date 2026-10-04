@@ -65,5 +65,7 @@ Run the same session tasks, then:
 - [ ] Network shows `chatgpt.com` or `api.openai.com`;
 - [ ] Home folds Codex's state into one `~/.codex/… (agent state)` line;
 - [ ] `airbag run -- codex resume` lists the earlier session.
+- [ ] `airbag run -- codex` without the bypass flag prints the warning that
+  Codex's own sandbox cannot start; with `--allow-userns` it starts.
 
 Report any host the agent needed that airbag denied; `--allow HOST` adds it.
