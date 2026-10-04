@@ -135,7 +135,11 @@ func TestAddClaudeProjectStateKeepsBranchedDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(s.HomeUpper(), ".claude/projects/-home-me-api-sub"), 0o700); err != nil {
+	dir := filepath.Join(s.HomeUpper(), ".claude/projects/-home-me-api-sub")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "old.jsonl"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	AddClaudeProjectState(s, "/home/me/api/sub")
@@ -144,5 +148,25 @@ func TestAddClaudeProjectStateKeepsBranchedDir(t *testing.T) {
 	}
 	if slices.Contains(s.BranchHoles, ".claude/projects/-home-me-api-sub/memory") {
 		t.Errorf("a hole under a branched project dir: %v", s.BranchHoles)
+	}
+}
+
+// Plain directories alone in the branch, as apply leaves the copied-up
+// ancestors of what it took, are not a change: the directory passes
+// through.
+func TestAddClaudeProjectStateIgnoresEmptyScaffolding(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	pass, holes := ClaudeProjectState("/home/me/api", "/home/me/api")
+	s, err := session.Create(session.Meta{Workspace: "/home/me/api", Home: t.TempDir(),
+		Passthrough: append(append([]string{}, DefaultPassthrough...), pass...), BranchHoles: holes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(s.HomeUpper(), ".claude/projects/-home-me-api-sub/memory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	AddClaudeProjectState(s, "/home/me/api/sub")
+	if !slices.Contains(s.Passthrough, ".claude/projects/-home-me-api-sub/") {
+		t.Errorf("empty copied-up directories kept the project dir in the branch: %v", s.Passthrough)
 	}
 }

@@ -461,7 +461,7 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 			return fmt.Sprintf("could not write ~/%s back: %v", cf.path, err), false
 		}
 		out = append(out, '\n')
-		err = writeAtomic(realPath, out, func() bool {
+		err = replaceIf(realPath, out, realRaw, exists, func() bool {
 			now, nowExists, err := fileState(realPath)
 			return err == nil && nowExists == exists && now == before
 		})
@@ -841,34 +841,91 @@ func canon(b []byte) string {
 // checked right before the rename; when it reports false, nothing is
 // replaced and the error is errChanged.
 func writeAtomic(path string, data []byte, unchanged func() bool) error {
+	tmp, err := writeTemp(path, data)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp) }() // gone after the rename; otherwise a scratch file
+	if !unchanged() {
+		return errChanged
+	}
+	return os.Rename(tmp, path)
+}
+
+// replaceIf is writeAtomic for the real file, as a compare-and-swap:
+// the replacement happens only while path still holds want (existed)
+// or is still absent (!existed). A rename cannot compare, so the new
+// file is swapped in atomically and what it displaced is checked after;
+// when that is not want, the host wrote in between, and the swap is
+// undone. Where the filesystem cannot swap, it falls back to a plain
+// rename after unchanged.
+func replaceIf(path string, data, want []byte, existed bool, unchanged func() bool) error {
+	tmp, err := writeTemp(path, data)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp) }() // after a swap it holds the displaced file
+	if !unchanged() {
+		return errChanged
+	}
+	if !existed {
+		err := renameNoReplace(tmp, path)
+		switch {
+		case errors.Is(err, fs.ErrExist):
+			return errChanged // the host created it meanwhile
+		case cannotSwap(err):
+			return os.Rename(tmp, path)
+		}
+		return err
+	}
+	err = renameExchange(tmp, path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return errChanged // the host removed it meanwhile
+	case cannotSwap(err):
+		return os.Rename(tmp, path)
+	case err != nil:
+		return err
+	}
+	if got, err := readRegular(tmp); err == nil && bytes.Equal(got, want) {
+		return nil
+	}
+	if err := renameExchange(tmp, path); err != nil { // put the host's write back
+		return err
+	}
+	return errChanged
+}
+
+func cannotSwap(err error) bool {
+	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.ENOTSUP)
+}
+
+// writeTemp writes data, synced, to a new file beside path with path's
+// permissions (0600 if there is none), and returns its name.
+func writeTemp(path string, data []byte) (string, error) {
 	mode := os.FileMode(0o600)
 	if fi, err := os.Lstat(path); err == nil {
 		mode = fi.Mode().Perm()
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".airbag-cfg-*")
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer func() { _ = os.Remove(tmp.Name()) }() // gone after the rename; otherwise a scratch file
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close() // the write already failed
-		return err
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Chmod(mode)
 	}
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close() // the chmod already failed
-		return err
+	if err == nil {
+		err = tmp.Sync()
 	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close() // the sync already failed
-		return err
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", err
 	}
-	if !unchanged() {
-		return errChanged
-	}
-	return os.Rename(tmp.Name(), path)
+	return tmp.Name(), nil
 }
 
 // agentMemory reports whether a home path is inside a Claude Code project

@@ -7,11 +7,14 @@ package sandbox
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/mirror"
@@ -113,7 +116,7 @@ func AddClaudeProjectState(s *session.Session, cwd string) {
 	var kept []string
 	for _, p := range pass {
 		if !slices.Contains(s.Passthrough, p) {
-			if _, err := os.Lstat(filepath.Join(s.HomeUpper(), strings.TrimSuffix(p, "/"))); err == nil {
+			if branchChanged(filepath.Join(s.HomeUpper(), strings.TrimSuffix(p, "/"))) {
 				fmt.Fprintf(os.Stderr, "airbag: ~/%s was changed earlier in this session; it stays in the branch (its transcripts reach ~ only if applied)\n", strings.TrimSuffix(p, "/"))
 				continue
 			}
@@ -126,6 +129,36 @@ func AddClaudeProjectState(s *session.Session, cwd string) {
 			s.BranchHoles = appendNew(s.BranchHoles, h)
 		}
 	}
+}
+
+// branchChanged reports whether an upper-layer path holds a change: a
+// file, a whiteout or an opaque directory at or below it. Plain
+// directories alone are not one: apply leaves the copied-up ancestors
+// of what it took.
+func branchChanged(root string) bool {
+	changed := false
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			changed = !(p == root && errors.Is(err, fs.ErrNotExist))
+		case !d.IsDir() || opaque(p):
+			changed = true
+		default:
+			return nil
+		}
+		return filepath.SkipAll
+	})
+	return changed
+}
+
+func opaque(p string) bool {
+	for _, attr := range []string{"user.overlay.opaque", "trusted.overlay.opaque"} {
+		buf := make([]byte, 8)
+		if n, err := unix.Lgetxattr(p, attr, buf); err == nil && n > 0 && buf[0] == 'y' {
+			return true
+		}
+	}
+	return false
 }
 
 func appendNew(list []string, add ...string) []string {

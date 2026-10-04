@@ -729,3 +729,43 @@ func TestWriteBackHostRemovedZeroByteFile(t *testing.T) {
 		t.Fatal("RemovedOnHost = false for a zero-byte config the host removed")
 	}
 }
+
+// A host write that lands between the last check and the replacement
+// is not overwritten: the swap is undone and the attempt retried.
+func TestReplaceIfKeepsARacingHostWrite(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfg.json")
+	writeCfg(t, p, `{"a":1}`)
+	hostWrite := func() bool { // the host replaces the file just after the check
+		writeCfg(t, p+".host", `{"a":"host"}`)
+		if err := os.Rename(p+".host", p); err != nil {
+			t.Fatal(err)
+		}
+		return true
+	}
+	if err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, hostWrite); !errors.Is(err, errChanged) {
+		t.Fatalf("err = %v, want errChanged", err)
+	}
+	if got := readCfg(t, p); got["a"] != "host" {
+		t.Fatalf("file = %v, want the host's write kept", got)
+	}
+	// Absent at the start, created by the host meanwhile: not replaced.
+	q := filepath.Join(dir, "new.json")
+	hostCreate := func() bool { writeCfg(t, q, `{"b":"host"}`); return true }
+	if err := replaceIf(q, []byte(`{"b":2}`), nil, false, hostCreate); !errors.Is(err, errChanged) {
+		t.Fatalf("err = %v, want errChanged", err)
+	}
+	if got := readCfg(t, q); got["b"] != "host" {
+		t.Fatalf("file = %v, want the host's file kept", got)
+	}
+	// Unchanged: replaced, and no scratch file is left.
+	if err := replaceIf(p, []byte(`{"a":3}`), []byte(`{"a":"host"}`), true, func() bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCfg(t, p); got["a"] != float64(3) {
+		t.Fatalf("file = %v, want the replacement", got)
+	}
+	if es, _ := os.ReadDir(dir); len(es) != 2 {
+		t.Fatalf("scratch files left: %v", es)
+	}
+}
