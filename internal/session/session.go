@@ -50,6 +50,9 @@ type Meta struct {
 	// hooks into the real repository. It stays set for every later
 	// apply, so the session's pushes keep running untrusted.
 	GitTouched bool `json:"git_touched,omitempty"`
+	// Branch: the workspace result went to this branch of the real
+	// repository (apply --branch) instead of the working tree.
+	Branch string `json:"branch,omitempty"`
 }
 
 type Session struct {

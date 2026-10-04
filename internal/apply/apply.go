@@ -25,6 +25,7 @@ type Options struct {
 	Force       bool     // apply over files changed on the host during the session
 	Interactive bool     // ask about each unit
 	Only        []string // apply only units touching these paths
+	Branch      string   // put the workspace result on this new branch instead
 	// TrustGit runs the session's pushes although the session changed
 	// .git/config or git hooks; hooks stay disabled.
 	TrustGit bool
@@ -92,6 +93,12 @@ func changedInside(dir string, t time.Time) string {
 }
 
 func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) error {
+	if o.Branch != "" {
+		if err := ApplyBranch(s, cs, o.Branch, o); err != nil {
+			return err
+		}
+		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
+	}
 	if s.Status == session.StatusApplied {
 		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
 	}
@@ -241,6 +248,13 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 			continue
 		}
 		if it.Status != outbox.Pending {
+			continue
+		}
+		if s.Branch != "" {
+			// The push names the agent's branch, which is not the
+			// user's: the work is on s.Branch now.
+			fmt.Fprintf(o.Out, "intent %s (git %s) left pending: the session's work is on branch %s; "+
+				"push that when ready (git push origin %s)\n", it.ID, strings.Join(it.Argv[1:], " "), s.Branch, s.Branch)
 			continue
 		}
 		args, err := outbox.GitPush(it.Argv)

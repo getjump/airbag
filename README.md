@@ -8,7 +8,7 @@ then apply it or throw it away.
 $ airbag run -- claude --dangerously-skip-permissions
 $ airbag run -- codex --dangerously-bypass-approvals-and-sandbox   # or Codex
 $ airbag review
-$ airbag apply        # or: airbag apply -i, or: airbag discard
+$ airbag apply        # or: apply -i, apply --branch NAME, or: airbag discard
 ```
 
 ![demo: the agent deletes src, reads .env, tries to send it out, plants a line in ~/.bashrc and pushes; airbag review shows all of it; discard, and nothing happened](demo/demo.gif)
@@ -167,6 +167,13 @@ ended up in the diff. `apply` refuses to overwrite files you changed on the host
 while the agent worked. `apply -i` goes through the changes one by one (git
 internals and caches come as one piece each) and keeps the rejected ones in the
 session; `apply --only PATH` takes just part of the branch.
+
+`apply --branch NAME` leaves your working tree alone and puts the result on a new
+branch of the repository instead: the agent's commits, fetched with their history,
+then one commit with whatever it left uncommitted (files your `.gitignore` excludes
+stay out). Your index, uncommitted edits, `.git/config` and hooks are not touched,
+and the agent's git config and hooks are never carried over. Review and merge it
+with git as you would a colleague's branch. Changes in `~` stay in the session.
 
 ## Policies
 
