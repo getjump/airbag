@@ -23,6 +23,38 @@ import (
 type Check func([]runtimepolicy.Request) error
 type BeforeRead func(path string, pid uint32, fd int) error
 
+type CacheMode string
+
+const (
+	CacheDisabled CacheMode = "off"
+	// CacheSealed retains data only when the backing inode is protected by
+	// fs-verity or irreversible memfd seals. Read-only permissions and mounts
+	// do not qualify: another hardlink or mount could still modify their data.
+	CacheSealed CacheMode = "sealed"
+)
+
+// OperationStats observes callback work, not an operation's eventual success
+// in the caller. In particular, Read returns a fd-backed ReadResult: copying
+// its bytes into the kernel happens after the callback has returned.
+type OperationStats struct {
+	Operation   string
+	Duration    time.Duration
+	Requests    int
+	Errno       syscall.Errno
+	CacheKeep   bool
+	CacheReason string
+}
+
+type Options struct {
+	DataCache CacheMode
+	// Zero selects the normal 100ms metadata timeout. This is unrelated to
+	// data caching, and never caches policy decisions.
+	MetadataTTL time.Duration
+	// Observe is synchronous and must be concurrency-safe. With a nil hook,
+	// operation timings do not call time.Now.
+	Observe func(OperationStats)
+}
+
 type backingKey struct{ dev, ino uint64 }
 type inodeTree struct {
 	children   map[string]*inodeTree
@@ -59,16 +91,52 @@ type View struct {
 	path       string
 	check      Check
 	beforeRead BeforeRead
+	options    Options
+	// sealProbe is private so a caller cannot assert that a mutable inode is
+	// sealed. Unit tests can exercise version guards on ordinary files.
+	sealProbe func(int) bool
 }
 
 // Capture must precede all overmounts, including the HOME mount when the
 // workspace is a child of HOME. The retained fd is never inherited by agents.
 func Capture(path string, check Check, beforeRead BeforeRead) (*View, error) {
+	return CaptureWithOptions(path, check, beforeRead, Options{})
+}
+
+func CaptureWithOptions(path string, check Check, beforeRead BeforeRead, options Options) (*View, error) {
+	if options.DataCache == "" {
+		options.DataCache = CacheDisabled
+	}
+	if options.DataCache != CacheDisabled && options.DataCache != CacheSealed {
+		return nil, fmt.Errorf("unsupported filesystem data cache mode %q", options.DataCache)
+	}
+	if options.MetadataTTL < 0 {
+		return nil, fmt.Errorf("negative filesystem metadata timeout")
+	}
+	if options.MetadataTTL == 0 {
+		options.MetadataTTL = 100 * time.Millisecond
+	}
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
-	return &View{fd: fd, path: filepath.Clean(path), check: check, beforeRead: beforeRead, nextInode: 1 << 40}, nil
+	return &View{fd: fd, path: filepath.Clean(path), check: check, beforeRead: beforeRead, nextInode: 1 << 40, options: options, sealProbe: dataSealed}, nil
+}
+
+func (v *View) observedStart() time.Time {
+	if v.options.Observe != nil {
+		return time.Now()
+	}
+	return time.Time{}
+}
+func (v *View) observedEnd(start time.Time, stats OperationStats) {
+	if v.options.Observe != nil {
+		stats.Duration = time.Since(start)
+		v.options.Observe(stats)
+	}
+}
+func (v *View) observedErrnoEnd(start time.Time, operation string, errno *syscall.Errno) {
+	v.observedEnd(start, OperationStats{Operation: operation, Errno: *errno})
 }
 
 // Stable identities are essential: dentry revalidation must not detach the
@@ -124,7 +192,7 @@ func (v *View) Close() error { return unix.Close(v.fd) }
 
 func (v *View) Mount() (*fuse.Server, error) {
 	zero := time.Duration(0)
-	metadataTTL := 100 * time.Millisecond
+	metadataTTL := v.options.MetadataTTL
 	server, err := fs.Mount(v.path, &node{view: v}, &fs.Options{
 		MountOptions: fuse.MountOptions{DirectMount: true, DirectMountStrict: true, FsName: "airbag-policy", Name: "airbag", Options: []string{"default_permissions"}, EnableLocks: true},
 		AttrTimeout:  &metadataTTL, EntryTimeout: &metadataTTL, NegativeTimeout: &zero,
@@ -137,7 +205,11 @@ func (v *View) Mount() (*fuse.Server, error) {
 
 type node struct {
 	fs.Inode
-	view *View
+	view     *View
+	backing  backingKey
+	cacheMu  sync.Mutex
+	cache    backingVersion
+	hasCache bool
 }
 
 func (n *node) rel() string {
@@ -159,7 +231,11 @@ func callerPID(ctx context.Context) uint32 {
 func (n *node) request(ctx context.Context, rel, kind, detail string) runtimepolicy.Request {
 	return runtimepolicy.Request{Source: "fuse", Kind: kind, Target: n.absolute(rel), Detail: detail, PID: callerPID(ctx)}
 }
-func (n *node) gates(requests []runtimepolicy.Request) syscall.Errno {
+func (n *node) gates(requests []runtimepolicy.Request) (errno syscall.Errno) {
+	start := n.view.observedStart()
+	defer func() {
+		n.view.observedEnd(start, OperationStats{Operation: "gate", Requests: len(requests), Errno: errno})
+	}()
 	if n.view.check == nil {
 		return syscall.EACCES
 	}
@@ -211,27 +287,32 @@ func (n *node) newChild(ctx context.Context, name string, out *fuse.EntryOut) (*
 	out.Attr.FromStat(&st)
 	// Give aliases distinct nodes: a path policy must not inherit the first
 	// hardlink's pathname through inode deduplication. See documented limits.
-	ch := n.NewInode(ctx, &node{view: n.view}, fs.StableAttr{Mode: st.Mode, Ino: n.view.inode(n.child(name), uint64(st.Dev), st.Ino)})
+	ch := n.NewInode(ctx, &node{view: n.view, backing: backingKey{uint64(st.Dev), st.Ino}}, fs.StableAttr{Mode: st.Mode, Ino: n.view.inode(n.child(name), uint64(st.Dev), st.Ino)})
 	return ch, 0
 }
-func (n *node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+func (n *node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (child *fs.Inode, errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "lookup", &errno)
 	if !validName(name) {
 		return nil, syscall.EINVAL
 	}
 	return n.newChild(ctx, name, out)
 }
-func (n *node) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+func (n *node) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) (errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "getattr", &errno)
 	if f, ok := fh.(fs.FileGetattrer); ok {
 		return f.Getattr(ctx, out)
 	}
 	var st syscall.Stat_t
-	errno := n.stat(n.rel(), &st)
+	errno = n.stat(n.rel(), &st)
 	if errno == 0 {
 		out.FromStat(&st)
 	}
 	return errno
 }
-func (n *node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+func (n *node) Readdir(ctx context.Context) (stream fs.DirStream, errno syscall.Errno) {
+	// Readdir opens a lazy stream; getdents below observes its actual directory
+	// reads separately, rather than claiming they happened in this callback.
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "readdir", &errno)
 	rel := n.rel()
 	if e := n.gate(ctx, rel, "fs.read", "readdir"); e != 0 {
 		return nil, e
@@ -263,8 +344,10 @@ type dirStream struct {
 
 func (d *dirStream) HasNext() bool {
 	if len(d.todo) == 0 && d.errno == 0 && !d.eof {
+		start := d.view.observedStart()
 		n, err := unix.Getdents(d.fd, d.buf)
 		d.errno = fs.ToErrno(err)
+		d.view.observedEnd(start, OperationStats{Operation: "getdents", Errno: d.errno})
 		if n > 0 {
 			d.todo = d.buf[:n]
 		} else {
@@ -302,7 +385,8 @@ func (d *dirStream) Close() {
 	d.todo = nil
 }
 
-func (n *node) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+func (n *node) Readlink(ctx context.Context) (target []byte, errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "readlink", &errno)
 	rel := n.rel()
 	if e := n.gate(ctx, rel, "fs.read", "readlink"); e != 0 {
 		return nil, e
@@ -329,33 +413,103 @@ func (n *node) openChecks(ctx context.Context, rel string, flags uint32) []runti
 	}
 	return requests
 }
-func (n *node) open(ctx context.Context, rel string, flags uint32, mode uint32) (fs.FileHandle, syscall.Errno) {
+
+// The version guard describes the actually opened backing descriptor, never a
+// pathname stat. Even sealed data may be replaced or the inode's metadata may
+// change, so immutability alone is insufficient to retain this FUSE inode's
+// cache. A stale FUSE node opening a replacement must always discard its cache.
+type backingVersion struct {
+	key          backingKey
+	size         int64
+	mtime, ctime syscall.Timespec
+}
+
+func dataSealed(fd int) bool {
+	if flags, err := unix.IoctlGetInt(fd, unix.FS_IOC_GETFLAGS); err == nil && flags&unix.FS_VERITY_FL != 0 {
+		return true
+	}
+	const required = unix.F_SEAL_WRITE | unix.F_SEAL_GROW | unix.F_SEAL_SHRINK | unix.F_SEAL_SEAL
+	seals, err := unix.FcntlInt(uintptr(fd), unix.F_GET_SEALS, 0)
+	return err == nil && seals&required == required
+}
+
+func (n *node) cacheOpenFlags(fd int, flags uint32) (uint32, string) {
+	if n.view.options.DataCache != CacheSealed {
+		return 0, "disabled"
+	}
+	n.cacheMu.Lock()
+	defer n.cacheMu.Unlock()
+	clear := func(reason string) (uint32, string) {
+		n.hasCache = false
+		return 0, reason
+	}
+	if flags&syscall.O_ACCMODE != syscall.O_RDONLY || flags&(syscall.O_TRUNC|syscall.O_CREAT) != 0 {
+		return clear("writable")
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return clear("stat-error")
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		return clear("not-regular")
+	}
+	if key := (backingKey{uint64(st.Dev), st.Ino}); key != n.backing {
+		return clear("identity-changed")
+	}
+	if !n.view.sealProbe(fd) {
+		return clear("unsealed")
+	}
+	// The seal is irreversible. Validate the complete version after obtaining
+	// its proof, so a pre-seal modification cannot populate a later hit.
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return clear("stat-error")
+	}
+	version := backingVersion{backingKey{uint64(st.Dev), st.Ino}, st.Size, st.Mtim, st.Ctim}
+	if n.hasCache && n.cache == version {
+		return fuse.FOPEN_KEEP_CACHE, "sealed-hit"
+	}
+	reason := "first"
+	if n.hasCache {
+		reason = "version-changed"
+	}
+	n.cache, n.hasCache = version, true
+	return 0, reason
+}
+
+func (n *node) open(ctx context.Context, rel string, flags uint32, mode uint32) (result fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	start := n.view.observedStart()
+	cacheReason := "not-opened"
+	defer func() {
+		n.view.observedEnd(start, OperationStats{Operation: "open", Errno: errno, CacheKeep: fuseFlags&fuse.FOPEN_KEEP_CACHE != 0, CacheReason: cacheReason})
+	}()
 	fd, name, err := n.parent(rel)
 	if err != nil {
-		return nil, fs.ToErrno(err)
+		return nil, 0, fs.ToErrno(err)
 	}
 	defer unix.Close(fd)
 	backing, err := unix.Openat(fd, name, int(flags)|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 	if err != nil {
-		return nil, fs.ToErrno(err)
+		return nil, 0, fs.ToErrno(err)
 	}
 	if flags&syscall.O_ACCMODE != syscall.O_WRONLY && n.view.beforeRead != nil {
 		if err := n.view.beforeRead(n.absolute(rel), callerPID(ctx), backing); err != nil {
 			unix.Close(backing)
-			return nil, syscall.EACCES
+			cacheReason = "before-read-denied"
+			return nil, 0, syscall.EACCES
 		}
 	}
-	return &file{base: fs.NewLoopbackFile(backing)}, 0
+	fuseFlags, cacheReason = n.cacheOpenFlags(backing, flags)
+	return &file{base: fs.NewLoopbackFile(backing), view: n.view}, fuseFlags, 0
 }
 func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	rel := n.rel()
 	if e := n.gates(n.openChecks(ctx, rel, flags)); e != 0 {
 		return nil, 0, e
 	}
-	f, e := n.open(ctx, rel, flags, 0)
-	return f, 0, e
+	return n.open(ctx, rel, flags, 0)
 }
-func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, handle fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "create", &errno)
 	if !validName(name) {
 		return nil, nil, 0, syscall.EINVAL
 	}
@@ -367,7 +521,7 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 	if e := n.gates(requests); e != 0 {
 		return nil, nil, 0, e
 	}
-	f, e := n.open(ctx, rel, flags|syscall.O_CREAT, mode)
+	f, _, e := n.open(ctx, rel, flags|syscall.O_CREAT, mode)
 	if e != 0 {
 		return nil, nil, 0, e
 	}
@@ -378,7 +532,8 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 	}
 	return child, f, 0, 0
 }
-func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "mkdir", &errno)
 	if !validName(name) {
 		return nil, syscall.EINVAL
 	}
@@ -396,7 +551,8 @@ func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 	}
 	return n.newChild(ctx, name, out)
 }
-func (n *node) Mknod(ctx context.Context, name string, mode uint32, dev uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+func (n *node) Mknod(ctx context.Context, name string, mode uint32, dev uint32, out *fuse.EntryOut) (inode *fs.Inode, errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "mknod", &errno)
 	if !validName(name) {
 		return nil, syscall.EINVAL
 	}
@@ -441,11 +597,16 @@ func (n *node) remove(ctx context.Context, name string, flags int) syscall.Errno
 	n.view.removed(n.child(name))
 	return 0
 }
-func (n *node) Unlink(ctx context.Context, name string) syscall.Errno { return n.remove(ctx, name, 0) }
-func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
+func (n *node) Unlink(ctx context.Context, name string) (errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "unlink", &errno)
+	return n.remove(ctx, name, 0)
+}
+func (n *node) Rmdir(ctx context.Context, name string) (errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "rmdir", &errno)
 	return n.remove(ctx, name, unix.AT_REMOVEDIR)
 }
-func (n *node) Rename(ctx context.Context, name string, newparent fs.InodeEmbedder, newname string, flags uint32) syscall.Errno {
+func (n *node) Rename(ctx context.Context, name string, newparent fs.InodeEmbedder, newname string, flags uint32) (errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "rename", &errno)
 	p, ok := newparent.(*node)
 	if !ok || p.view != n.view {
 		return syscall.EXDEV
@@ -481,7 +642,8 @@ func (n *node) Rename(ctx context.Context, name string, newparent fs.InodeEmbedd
 	n.view.renamed(src, dst, flags&unix.RENAME_EXCHANGE != 0)
 	return 0
 }
-func (n *node) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+func (n *node) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (inode *fs.Inode, errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "symlink", &errno)
 	if !validName(name) {
 		return nil, syscall.EINVAL
 	}
@@ -498,7 +660,8 @@ func (n *node) Symlink(ctx context.Context, target, name string, out *fuse.Entry
 	}
 	return n.newChild(ctx, name, out)
 }
-func (n *node) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+func (n *node) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (inode *fs.Inode, errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "link", &errno)
 	t, ok := target.(*node)
 	if !ok || t.view != n.view {
 		return nil, syscall.EXDEV
@@ -528,7 +691,8 @@ func (n *node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 	}
 	return n.newChild(ctx, name, out)
 }
-func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) (errno syscall.Errno) {
+	defer n.view.observedErrnoEnd(n.view.observedStart(), "setattr", &errno)
 	rel := n.rel()
 	requests := []runtimepolicy.Request{n.request(ctx, rel, "fs.write", "setattr")}
 	if mode, ok := in.GetMode(); ok && mode&0o111 != 0 {
@@ -620,12 +784,19 @@ func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 // forwarded through an unchecked path. Tools can use their normal fallbacks.
 // Keeping the file wrapper explicit also prevents FUSE passthrough negotiation
 // from handing the kernel an unguarded backing descriptor.
-type file struct{ base fs.FileHandle }
+type file struct {
+	base fs.FileHandle
+	view *View
+}
 
-func (f *file) Read(ctx context.Context, b []byte, o int64) (fuse.ReadResult, syscall.Errno) {
+func (f *file) Read(ctx context.Context, b []byte, o int64) (result fuse.ReadResult, errno syscall.Errno) {
+	start := f.view.observedStart()
+	defer func() { f.view.observedEnd(start, OperationStats{Operation: "read", Errno: errno}) }()
 	return f.base.(fs.FileReader).Read(ctx, b, o)
 }
-func (f *file) Write(ctx context.Context, b []byte, o int64) (uint32, syscall.Errno) {
+func (f *file) Write(ctx context.Context, b []byte, o int64) (count uint32, errno syscall.Errno) {
+	start := f.view.observedStart()
+	defer func() { f.view.observedEnd(start, OperationStats{Operation: "write", Errno: errno}) }()
 	return f.base.(fs.FileWriter).Write(ctx, b, o)
 }
 func (f *file) Release(ctx context.Context) syscall.Errno {

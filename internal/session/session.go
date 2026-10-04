@@ -51,6 +51,10 @@ type Meta struct {
 	Strict     bool `json:"strict,omitempty"`
 	FilePolicy bool `json:"file_policy,omitempty"`
 	ExecPolicy bool `json:"exec_policy,omitempty"`
+	// RuntimeAudit is "durable" (also the legacy empty value) or "buffered".
+	RuntimeAudit   string `json:"runtime_audit,omitempty"`
+	FileCache      string `json:"file_cache,omitempty"`
+	RuntimeProfile bool   `json:"runtime_profile,omitempty"`
 	// GitTouched: an apply of this session wrote .git/config or git
 	// hooks into the real repository. It stays set for every later
 	// apply, so the session's pushes keep running untrusted.

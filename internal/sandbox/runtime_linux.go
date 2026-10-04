@@ -21,7 +21,7 @@ func socketPair() (*os.File, *os.File, error) {
 	return os.NewFile(uintptr(fds[0]), "supervisor"), os.NewFile(uintptr(fds[1]), "sandbox"), nil
 }
 
-func runtimeClient() (*runtimepolicy.Client, error) {
+func runtimeClient(profile *runtimepolicy.Profile) (*runtimepolicy.Client, error) {
 	unix.CloseOnExec(runtimeFD)
 	f := os.NewFile(runtimeFD, "runtime-policy")
 	c, err := net.FileConn(f)
@@ -29,5 +29,5 @@ func runtimeClient() (*runtimepolicy.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runtimepolicy.NewClient(c), nil
+	return runtimepolicy.NewClientWithProfile(c, profile), nil
 }

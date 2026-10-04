@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/runtimepolicy"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"golang.org/x/sys/unix"
 )
 
 func testRoot(t *testing.T, dir string, check func(runtimepolicy.Request) error) *node {
@@ -202,5 +204,364 @@ func TestLazyReaddirUsesPinnedDescriptor(t *testing.T) {
 	}
 	if len(seen) != 600 {
 		t.Fatalf("missing entries: %d", len(seen))
+	}
+}
+
+func cacheTestRoot(t *testing.T, dir string, options Options, check Check, beforeRead BeforeRead) *node {
+	t.Helper()
+	v, err := CaptureWithOptions(dir, check, beforeRead, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { v.Close() })
+	root := &node{view: v}
+	fs.NewNodeFS(root, &fs.Options{})
+	return root
+}
+
+func cacheTestChild(t *testing.T, root *node, name string) *node {
+	t.Helper()
+	var out fuse.EntryOut
+	child, errno := root.Lookup(context.Background(), name, &out)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	root.AddChild(name, child, true)
+	return child.Operations().(*node)
+}
+
+func cacheTestOpen(t *testing.T, n *node, flags uint32) uint32 {
+	t.Helper()
+	f, fuseFlags, errno := n.Open(context.Background(), flags)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	if _, unsafe := f.(fs.FilePassthroughFder); unsafe {
+		t.Fatal("cache option exposed a passthrough backing fd")
+	}
+	if errno := f.(fs.FileReleaser).Release(context.Background()); errno != 0 {
+		t.Fatal(errno)
+	}
+	return fuseFlags
+}
+
+func TestDataCacheRequiresKernelSeal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "readonly")
+	if err := os.WriteFile(path, []byte("data"), 0444); err != nil {
+		t.Fatal(err)
+	}
+	var observed []OperationStats
+	root := cacheTestRoot(t, dir, Options{DataCache: CacheSealed, Observe: func(s OperationStats) {
+		observed = append(observed, s)
+	}}, func([]runtimepolicy.Request) error { return nil }, nil)
+	n := cacheTestChild(t, root, "readonly")
+	observed = nil
+	for i := 0; i < 2; i++ {
+		if flags := cacheTestOpen(t, n, syscall.O_RDONLY); flags&fuse.FOPEN_KEEP_CACHE != 0 {
+			t.Fatal("read-only permissions were accepted as an immutable data seal")
+		}
+	}
+	if len(observed) != 4 || observed[0].Operation != "gate" || observed[1].Operation != "open" || observed[1].CacheReason != "unsealed" {
+		t.Fatalf("unexpected observation: %+v", observed)
+	}
+	if observed[0].Requests != 1 || observed[0].Errno != 0 || observed[1].Duration <= 0 {
+		t.Fatalf("incomplete observation: %+v", observed)
+	}
+}
+
+func TestDataSealIsIrreversible(t *testing.T) {
+	fd, err := unix.MemfdCreate("policyfs-cache-test", unix.MFD_ALLOW_SEALING|unix.MFD_CLOEXEC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if _, err := unix.Write(fd, []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if dataSealed(fd) {
+		t.Fatal("unsealed memfd was accepted")
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_WRITE); err != nil {
+		t.Fatal(err)
+	}
+	if dataSealed(fd) {
+		t.Fatal("memfd without grow/shrink seals was accepted")
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
+		t.Fatal(err)
+	}
+	if !dataSealed(fd) {
+		t.Fatal("fully sealed memfd was rejected")
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		t.Fatal(err)
+	}
+	n := &node{view: &View{options: Options{DataCache: CacheSealed}, sealProbe: dataSealed}, backing: backingKey{uint64(st.Dev), st.Ino}}
+	if flags, reason := n.cacheOpenFlags(fd, syscall.O_RDONLY); flags != 0 || reason != "first" {
+		t.Fatalf("first open preserved an unknown cache: %v %q", flags, reason)
+	}
+	if flags, reason := n.cacheOpenFlags(fd, syscall.O_RDONLY); flags != fuse.FOPEN_KEEP_CACHE || reason != "sealed-hit" {
+		t.Fatalf("repeated sealed open missed cache: %v %q", flags, reason)
+	}
+	if _, err := unix.Pwrite(fd, []byte("evil"), 0); err != syscall.EPERM {
+		t.Fatalf("sealed data was writable: %v", err)
+	}
+	if err := unix.Ftruncate(fd, 0); err != syscall.EPERM {
+		t.Fatalf("sealed data was truncatable: %v", err)
+	}
+}
+
+func TestDataCacheNeverSkipsPolicyOrBeforeRead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	checks, taints, proofs := 0, 0, 0
+	denyPolicy, denyRead := false, false
+	root := cacheTestRoot(t, dir, Options{DataCache: CacheSealed}, func([]runtimepolicy.Request) error {
+		checks++
+		if denyPolicy {
+			return syscall.EACCES
+		}
+		return nil
+	}, func(path string, pid uint32, fd int) error {
+		taints++
+		var st syscall.Stat_t
+		if err := syscall.Fstat(fd, &st); err != nil || st.Size != 4 {
+			t.Fatal("beforeRead did not receive the opened backing file", err)
+		}
+		if denyRead {
+			return syscall.EACCES
+		}
+		return nil
+	})
+	// Test the guard independently of an fs-verity-capable filesystem.
+	root.view.sealProbe = func(int) bool { proofs++; return true }
+	n := cacheTestChild(t, root, "file")
+	if flags := cacheTestOpen(t, n, syscall.O_RDONLY); flags != 0 {
+		t.Fatal("first open kept the cache")
+	}
+	if flags := cacheTestOpen(t, n, syscall.O_RDONLY); flags != fuse.FOPEN_KEEP_CACHE {
+		t.Fatal("validated repeated open did not keep the cache")
+	}
+	denyRead = true
+	f, flags, errno := n.Open(context.Background(), syscall.O_RDONLY)
+	if f != nil || flags != 0 || errno != syscall.EACCES || proofs != 2 {
+		t.Fatal("cache hit bypassed the pre-read barrier", f, flags, errno, proofs)
+	}
+	denyPolicy = true
+	f, flags, errno = n.Open(context.Background(), syscall.O_RDONLY)
+	if f != nil || flags != 0 || errno != syscall.EACCES || taints != 3 || checks != 4 {
+		t.Fatal("cache hit bypassed policy", f, flags, errno, taints, checks)
+	}
+}
+
+func TestDataCacheRejectsReplacementAndBackingMutation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file")
+	if err := os.WriteFile(path, []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root := cacheTestRoot(t, dir, Options{DataCache: CacheSealed}, func([]runtimepolicy.Request) error { return nil }, nil)
+	root.view.sealProbe = func(int) bool { return true }
+	n := cacheTestChild(t, root, "file")
+	cacheTestOpen(t, n, syscall.O_RDONLY)
+	if cacheTestOpen(t, n, syscall.O_RDONLY) != fuse.FOPEN_KEEP_CACHE {
+		t.Fatal("expected a repeated-open hit")
+	}
+	old, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Restore mtime after a same-size rewrite. The ctime guard must still
+	// detect the mutation; this simulates a defensive fallback, since real
+	// fs-verity/sealed backing inodes cannot be rewritten at all.
+	time.Sleep(time.Millisecond)
+	if err := os.WriteFile(path, []byte("evil"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, old.ModTime(), old.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if cacheTestOpen(t, n, syscall.O_RDONLY) != 0 {
+		t.Fatal("same-size rewrite with restored mtime retained stale data")
+	}
+	if cacheTestOpen(t, n, syscall.O_RDONLY) != fuse.FOPEN_KEEP_CACHE {
+		t.Fatal("unchanged new version missed cache")
+	}
+	replacement := filepath.Join(dir, "replacement")
+	if err := os.WriteFile(replacement, []byte("new!"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if cacheTestOpen(t, n, syscall.O_RDONLY) != 0 {
+			t.Fatal("a stale FUSE inode retained replacement data")
+		}
+	}
+	newNode := cacheTestChild(t, root, "file")
+	if newNode == n || newNode.StableAttr().Ino == n.StableAttr().Ino {
+		t.Fatal("replacement reused the old FUSE identity")
+	}
+	cacheTestOpen(t, newNode, syscall.O_RDONLY)
+	if cacheTestOpen(t, newNode, syscall.O_RDONLY) != fuse.FOPEN_KEEP_CACHE {
+		t.Fatal("fresh replacement node missed cache")
+	}
+}
+
+func TestDataCacheHardlinkAliasesAndWritableOpen(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	if err := os.WriteFile(a, []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(a, b); err != nil {
+		t.Fatal(err)
+	}
+	root := cacheTestRoot(t, dir, Options{DataCache: CacheSealed}, func([]runtimepolicy.Request) error { return nil }, nil)
+	root.view.sealProbe = func(int) bool { return true }
+	left, right := cacheTestChild(t, root, "a"), cacheTestChild(t, root, "b")
+	if left.backing != right.backing || left.StableAttr().Ino == right.StableAttr().Ino {
+		t.Fatal("aliases lost their shared backing or distinct policy identity")
+	}
+	for _, n := range []*node{left, right} {
+		cacheTestOpen(t, n, syscall.O_RDONLY)
+		if cacheTestOpen(t, n, syscall.O_RDONLY) != fuse.FOPEN_KEEP_CACHE {
+			t.Fatal("unchanged alias missed cache")
+		}
+	}
+	if cacheTestOpen(t, left, syscall.O_WRONLY) != 0 || cacheTestOpen(t, left, syscall.O_RDONLY) != 0 {
+		t.Fatal("writable open preserved a cache record")
+	}
+	time.Sleep(time.Millisecond)
+	if err := os.WriteFile(a, []byte("evil"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if cacheTestOpen(t, right, syscall.O_RDONLY) != 0 {
+		t.Fatal("alias mutation retained the other FUSE inode's stale data")
+	}
+}
+
+func TestCaptureOptionsAndIOObservations(t *testing.T) {
+	dir := t.TempDir()
+	for _, options := range []Options{{DataCache: "unsafe"}, {MetadataTTL: -time.Second}} {
+		if v, err := CaptureWithOptions(dir, nil, nil, options); err == nil {
+			v.Close()
+			t.Fatal("invalid options were accepted", options)
+		}
+	}
+	v, err := Capture(dir, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.options.DataCache != CacheDisabled || v.options.MetadataTTL != 100*time.Millisecond || !v.observedStart().IsZero() {
+		t.Fatal("default settings changed or nil observer read the clock")
+	}
+	v.Close()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var observed []OperationStats
+	root := cacheTestRoot(t, dir, Options{MetadataTTL: time.Second, Observe: func(s OperationStats) {
+		observed = append(observed, s)
+	}}, func([]runtimepolicy.Request) error { return nil }, nil)
+	if root.view.options.MetadataTTL != time.Second {
+		t.Fatal("custom metadata timeout was ignored")
+	}
+	n := cacheTestChild(t, root, "file")
+	observed = nil
+	f, flags, errno := n.Open(context.Background(), syscall.O_RDWR)
+	if errno != 0 || flags != 0 {
+		t.Fatal(errno, flags)
+	}
+	defer f.(fs.FileReleaser).Release(context.Background())
+	result, errno := f.(fs.FileReader).Read(context.Background(), make([]byte, 4), 0)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	data, status := result.Bytes(make([]byte, 4))
+	result.Done()
+	if status != fuse.OK || string(data) != "data" {
+		t.Fatal("observer changed fd-backed reads", status, string(data))
+	}
+	count, errno := f.(fs.FileWriter).Write(context.Background(), []byte("new!"), 0)
+	if errno != 0 || count != 4 {
+		t.Fatal(errno, count)
+	}
+	if len(observed) != 4 || observed[0].Requests != 2 || observed[1].CacheReason != "disabled" || observed[2].Operation != "read" || observed[3].Operation != "write" {
+		t.Fatalf("missing callback observations: %+v", observed)
+	}
+}
+
+func TestMetadataCallbackObservationsIncludeErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("file", filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	var observed []OperationStats
+	root := cacheTestRoot(t, dir, Options{Observe: func(s OperationStats) {
+		observed = append(observed, s)
+	}}, func([]runtimepolicy.Request) error { return nil }, nil)
+	ctx := context.Background()
+	n := cacheTestChild(t, root, "file")
+	var attrs fuse.AttrOut
+	if errno := n.Getattr(ctx, nil, &attrs); errno != 0 || attrs.Size != 4 {
+		t.Fatal(errno, attrs.Size)
+	}
+	var entry fuse.EntryOut
+	if _, errno := root.Lookup(ctx, "missing", &entry); errno != syscall.ENOENT {
+		t.Fatal(errno)
+	}
+	stream, errno := root.Readdir(ctx)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	for stream.HasNext() {
+		if _, errno := stream.Next(); errno != 0 {
+			t.Fatal(errno)
+		}
+	}
+	stream.Close()
+	link := cacheTestChild(t, root, "link")
+	if target, errno := link.Readlink(ctx); errno != 0 || string(target) != "file" {
+		t.Fatal(errno, string(target))
+	}
+	child, handle, _, errno := root.Create(ctx, "created", syscall.O_WRONLY, 0600, &entry)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	root.AddChild("created", child, true)
+	if errno := child.Operations().(*node).Setattr(ctx, handle, &fuse.SetAttrIn{SetAttrInCommon: fuse.SetAttrInCommon{Valid: fuse.FATTR_MODE, Mode: 0400}}, &attrs); errno != 0 {
+		t.Fatal(errno)
+	}
+	handle.(fs.FileReleaser).Release(ctx)
+	if errno := root.Rename(ctx, "created", root, "renamed", 0); errno != 0 {
+		t.Fatal(errno)
+	}
+	if errno := root.Unlink(ctx, "renamed"); errno != 0 {
+		t.Fatal(errno)
+	}
+	seen := make(map[string]int)
+	lookupError := false
+	for _, s := range observed {
+		seen[s.Operation]++
+		if s.Operation == "lookup" && s.Errno == syscall.ENOENT {
+			lookupError = true
+		}
+	}
+	for _, op := range []string{"lookup", "getattr", "readdir", "getdents", "readlink", "create", "setattr", "rename", "unlink"} {
+		if seen[op] == 0 {
+			t.Fatal("missing observed callback", op, seen)
+		}
+	}
+	if !lookupError {
+		t.Fatal("failed metadata callback was reported as success")
 	}
 }

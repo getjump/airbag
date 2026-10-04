@@ -9,6 +9,7 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -34,7 +35,13 @@ import (
 	"github.com/getjump/airbag/internal/taint"
 )
 
-func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
+func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (code int, runErr error) {
+	if s.RuntimeAudit == "" {
+		s.RuntimeAudit = "durable"
+	}
+	if s.RuntimeAudit != "" && s.RuntimeAudit != "durable" && s.RuntimeAudit != "buffered" {
+		return 1, fmt.Errorf("invalid runtime audit mode %q", s.RuntimeAudit)
+	}
 	gate := policy.NewGate(pol, s.Dir)
 	restoreLabels(gate, s)
 	log, err := effects.Open(s.EffectsPath())
@@ -123,7 +130,69 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		return 1, err
 	}
 	defer runtimeConn.Close()
-	go func() { _ = runtimepolicy.Serve(runtimeConn, gate, log) }()
+	var audit *effects.BufferedAudit
+	var runtimeOptions runtimepolicy.Options
+	if s.RuntimeAudit == "buffered" {
+		audit = effects.NewBufferedAudit(log, effects.BufferOptions{})
+		runtimeOptions.Audit = audit
+	}
+	if s.RuntimeProfile {
+		runtimeOptions.Profile = &runtimepolicy.Profile{}
+	}
+	runtimeDone := make(chan error, 1)
+	go func() { runtimeDone <- runtimepolicy.ServeWithOptions(runtimeConn, gate, log, runtimeOptions) }()
+	// Stop the producer before draining buffered audit. A failed flush must be
+	// visible to the caller and session status, never a successful clean stop.
+	runtimeFinished := false
+	finishRuntime := func() {
+		if runtimeFinished {
+			return
+		}
+		runtimeFinished = true
+		childRuntime.Close()
+		select {
+		case err := <-runtimeDone:
+			if err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("runtime controller: %w", err))
+			}
+		case <-time.After(30 * time.Second):
+			runtimeConn.Close()
+			runErr = errors.Join(runErr, errors.New("runtime controller shutdown timeout"))
+			<-runtimeDone
+		}
+		if audit != nil {
+			if err := audit.Close(); err != nil {
+				runErr = errors.Join(runErr, err)
+			}
+		}
+		if runtimeOptions.Profile != nil {
+			profile := struct {
+				Run       int                           `json:"run"`
+				AuditMode string                        `json:"audit_mode"`
+				Runtime   runtimepolicy.ProfileSnapshot `json:"runtime"`
+				Buffered  *effects.BufferStats          `json:"buffered,omitempty"`
+			}{Run: s.Runs, AuditMode: s.RuntimeAudit, Runtime: runtimeOptions.Profile.Snapshot()}
+			if audit != nil {
+				stats := audit.Stats()
+				profile.Buffered = &stats
+			}
+			data, err := json.MarshalIndent(profile, "", "  ")
+			if err == nil {
+				err = os.WriteFile(filepath.Join(s.Dir, fmt.Sprintf("runtime-profile-%d.json", s.Runs)), append(data, '\n'), 0o600)
+			}
+			if err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("write runtime profile: %w", err))
+			}
+		}
+		if runErr != nil {
+			code = 125
+			if s.Status == session.StatusStopped {
+				s.ExitCode = code
+				runErr = errors.Join(runErr, s.Save())
+			}
+		}
+	}
+	defer finishRuntime()
 	placeholder, err := os.Open(os.DevNull)
 	if err != nil {
 		return 1, err
@@ -184,7 +253,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if tty != nil {
 		tty.finish()
 	}
-	code := 0
+	code = 0
 	var ee *exec.ExitError
 	switch {
 	case errors.As(err, &ee):
@@ -192,10 +261,11 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	case err != nil:
 		return 1, fmt.Errorf("sandbox: %w", err)
 	}
+	finishRuntime()
 	s.Status = session.StatusStopped
 	s.ExitCode = code
 	s.Ended = time.Now()
-	return code, s.Save()
+	return code, errors.Join(runErr, s.Save())
 }
 
 func userNSHint() string {

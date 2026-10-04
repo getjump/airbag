@@ -48,7 +48,7 @@ jobs:
       matrix:
         parallelism: [1, 2]
     env:
-      BENCH_BEFORE_SHA: 543fe189b85a0e85870ee9d92244eb2d89385280
+      BENCH_BEFORE_SHA: 182ddaf0c4f8849aa7d314674a5a473c795396a4
       BENCH_SOURCE_SHA: 543fe189b85a0e85870ee9d92244eb2d89385280
     steps:
       - uses: actions/checkout@v4
@@ -61,21 +61,36 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/airbag-bench-source"
           git archive "$BENCH_SOURCE_SHA" | tar -x -C "$RUNNER_TEMP/airbag-bench-source"
-          (cd "$RUNNER_TEMP/airbag-bench-source" && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag-before" ./cmd/airbag)
+          mkdir "$RUNNER_TEMP/airbag-bench-before"
+          git archive "$BENCH_BEFORE_SHA" | tar -x -C "$RUNNER_TEMP/airbag-bench-before"
+          (cd "$RUNNER_TEMP/airbag-bench-before" && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag-before" ./cmd/airbag)
           CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag-after" ./cmd/airbag
+          CGO_ENABLED=0 go build -tags=airbag_bench -o "$RUNNER_TEMP/airbag-diagnostic" ./cmd/airbag
           sudo install -m 755 "$RUNNER_TEMP/airbag-after" /usr/local/bin/airbag
           go mod download
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo chmod 666 /dev/fuse
       - name: cold, unchanged, and incremental builds (paired)
         run: |
-          python3 test/runtime-build-bench.py \
+          diagnostic=()
+          if [ '${{ matrix.parallelism }}' = 2 ]; then
+            diagnostic=(--diagnostic "$RUNNER_TEMP/airbag-diagnostic")
+          fi
+          python3 test/runtime-build-bench.py "${diagnostic[@]}" \
             --before "$RUNNER_TEMP/airbag-before" --after "$RUNNER_TEMP/airbag-after" \
             --source "$RUNNER_TEMP/airbag-bench-source" \
             --parallelism ${{ matrix.parallelism }} --trials 2 \
             --output "$RUNNER_TEMP/build-bench-p${{ matrix.parallelism }}.jsonl"
+      - name: audit storage benchmarks (same runner)
+        if: matrix.parallelism == 2
+        run: |
+          CGO_ENABLED=0 go test ./internal/effects -run '^$' -bench '^BenchmarkAuditStorage$' \
+            -benchtime=8192x -count=3 -timeout=10m \
+            | tee "$RUNNER_TEMP/audit-storage-bench.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: runtime-build-p${{ matrix.parallelism }}
-          path: ${{ runner.temp }}/build-bench-p${{ matrix.parallelism }}.jsonl
+          path: |
+            ${{ runner.temp }}/build-bench-p${{ matrix.parallelism }}.jsonl
+            ${{ runner.temp }}/audit-storage-bench.txt

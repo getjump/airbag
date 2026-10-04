@@ -38,6 +38,8 @@ const usage = `airbag — approve outcomes, not commands
       run the agent in a branch of the workspace and $HOME (--session: on the
       branch of a stopped session, with its outbox and labels)
       --fs-policy: Linux FUSE audit/policy; --exec-policy: Linux exec notification audit/policy
+      --runtime-audit=durable|buffered: commit-before-allow or bounded background audit
+      --runtime-profile: diagnostic timings; --fs-cache=sealed: cache immutable backing files
   airbag review [ID] [--json | --attention]
                               what the agent changed, sent and queued; --json for
                               tools, --attention for only what needs a decision
@@ -147,12 +149,30 @@ func cmdRun(args []string) (int, error) {
 	strict := fs.Bool("strict", false, "keep the agent from creating user namespaces; breaks the agents' own sandboxes and Chromium's sandbox")
 	filePolicy := fs.Bool("fs-policy", false, "Linux: audit and check filesystem operations on the final workspace and HOME views (requires FUSE)")
 	execPolicy := fs.Bool("exec-policy", false, "Linux: audit and check execve/execveat attempts with seccomp-notify")
+	runtimeAudit := fs.String("runtime-audit", "durable", "Linux: runtime audit durability: durable (commit before allow) or buffered (bounded queue, background commits)")
+	fileCache := fs.String("fs-cache", "off", "Linux: FUSE data cache: off or sealed (only kernel-enforced immutable files)")
+	runtimeProfile := fs.Bool("runtime-profile", false, "Linux: save runtime gate, audit and FUSE diagnostic timings in the session")
 	resume := fs.String("session", "", "run on the branch of a stopped session (its ID, or last) instead of a new one")
 	nixDaemon := fs.Bool("nix-daemon", false, "let the agent use the Nix daemon; its builds and substitutes reach the network outside airbag's proxy")
 	_ = fs.Parse(args)
-	if runtime.GOOS != "linux" && (*filePolicy || *execPolicy) {
-		return 2, errors.New("--fs-policy and --exec-policy require Linux")
+	if *runtimeAudit != "durable" && *runtimeAudit != "buffered" {
+		return 2, errors.New("--runtime-audit must be durable or buffered")
 	}
+	if *fileCache != "off" && *fileCache != "sealed" {
+		return 2, errors.New("--fs-cache must be off or sealed")
+	}
+	if runtime.GOOS != "linux" && (*filePolicy || *execPolicy || *runtimeAudit != "durable" || *fileCache != "off" || *runtimeProfile) {
+		return 2, errors.New("runtime policy, audit, cache and profile options require Linux")
+	}
+	var auditExplicit, cacheExplicit bool
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "runtime-audit" {
+			auditExplicit = true
+		}
+		if f.Name == "fs-cache" {
+			cacheExplicit = true
+		}
+	})
 	argv := fs.Args()
 	if len(argv) == 0 {
 		return 2, errors.New("usage: airbag run [flags] -- AGENT [ARGS...]")
@@ -223,6 +243,13 @@ func cmdRun(args []string) (int, error) {
 		s.Strict = s.Strict || *strict
 		s.FilePolicy = s.FilePolicy || *filePolicy
 		s.ExecPolicy = s.ExecPolicy || *execPolicy
+		if auditExplicit {
+			s.RuntimeAudit = *runtimeAudit
+		}
+		if cacheExplicit {
+			s.FileCache = *fileCache
+		}
+		s.RuntimeProfile = s.RuntimeProfile || *runtimeProfile
 		for _, f := range forwards {
 			if !slices.Contains(s.Forwards, f) {
 				s.Forwards = append(s.Forwards, f)
@@ -239,6 +266,7 @@ func cmdRun(args []string) (int, error) {
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
 			Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
 			PassEnv: passEnv, Strict: *strict, Forwards: forwards, FilePolicy: *filePolicy, ExecPolicy: *execPolicy,
+			RuntimeAudit: *runtimeAudit, FileCache: *fileCache, RuntimeProfile: *runtimeProfile,
 		}
 		if runtime.GOOS == "darwin" {
 			// The macOS prototype: the workspace branch is a clone, $HOME

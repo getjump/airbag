@@ -6,11 +6,13 @@ On Linux, two opt-in flags add policy checks while that branch is running:
 
 ```sh
 airbag run --fs-policy --exec-policy -- make test
+airbag run --fs-policy --runtime-audit=buffered --runtime-profile -- make test
 airbag log --json
 airbag review --json
 ```
 
-The flags persist across `run --session ID`. Filesystem policy needs writable
+The flags persist across `run --session ID`. `--runtime-audit=durable` restores
+commit-before-allow on a buffered session. Filesystem policy needs writable
 `/dev/fuse` and `openat2` (Linux 5.6+). Exec policy needs seccomp user notification
 with CONTINUE support (Linux 5.5+) and `process_vm_readv` permissions in the
 supervisor. Currently only native Linux amd64 and arm64 exec ABIs are supported;
@@ -68,6 +70,16 @@ copy_file_range are currently unsupported; tools need their usual fallbacks.
 The rest of the host remains governed by its existing read-only mounts; private
 scratch files in `/tmp` are outside these two filesystem policy views.
 
+Data cache retention is off by default. `--fs-cache=sealed` retains cached data
+across opens only when the **actually opened backing fd** proves irreversible
+kernel-enforced immutability: fs-verity or a fully sealed memfd. Its device/inode
+must match the FUSE node's captured identity, and size/mtime/ctime must match the
+previous open. Replacement, a changed version, a writable open or a failed proof
+returns no KEEP_CACHE flag. Policy and secret-taint checks still run on every
+open, including cache hits. Read-only mounts, permissions 0444 and ordinary Go
+module/build caches do not establish this proof and do not get this optimization.
+This mode does not promise to accelerate normal mutable build workloads.
+
 Secret taint still happens before bytes are delivered. The outer filesystem
 matches the **opened backing inode** to the secret mounts and reports the
 original caller PID/executable. It cannot mistake all reads for PID 1's own
@@ -120,7 +132,27 @@ agent view. The agent-facing shim/control socket cannot forge runtime events.
 Checks for one operation use one RPC and transaction. Independent in-flight
 operations can share a commit without a fixed batching delay. The host commits
 every evaluated decision to the append-only SQLite log (WAL, synchronous=FULL)
-before releasing any operation in that commit group. Transport timeout/loss and audit commit failures deny access.
+before releasing any operation in that commit group. This is the default
+`--runtime-audit=durable` mode. Transport timeout/loss and audit commit failures
+deny access.
+
+`--runtime-audit=buffered` keeps allow/deny/ask synchronous, but acknowledges
+ordinary runtime events after a trusted bounded queue owns them. It commits
+groups of approximately 64 events or on a 50 ms timer using the same FULL WAL
+writer. That interval is a scheduling target, **not a maximum crash-loss window**:
+slow storage and backlog can extend it. A crash can lose acknowledged ordinary
+events; live `log` and `review` only see committed records. The queue is bounded
+by 4096 events and 8 MiB of accounted payload, including an in-flight commit;
+it applies backpressure, never drops. Persistence errors latch and deny later
+runtime operations; a failed drain is reported as a failed run. Clean shutdown
+drains the queue before publishing stopped status. Non-runtime logging keeps its
+existing durable path.
+
+**Secret notifications always use a durable barrier, in either mode.** They
+flush the preceding buffered prefix and commit the taint record before bytes
+are released. The live label and connection cuts remain synchronous, including
+for subsequent checks in the same commit group. Thus resuming a session cannot
+lose an acknowledged secret read merely because ordinary audit was buffered.
 Audit records have source, PID, target, detail, and exec argv; they contain
 attempts/entry-point decisions, not proof an operation completed successfully.
 The ordinary log continues to read old sessions. `log --json` exposes context;
@@ -148,6 +180,15 @@ Directory listings stream getdents entries without an eager stat per child.
 Rename moves a tree of stable path identities instead of scanning all known
 inodes; successful deletion releases that identity subtree.
 
+`--runtime-profile` saves `runtime-profile-N.json` in the host session directory
+for run N. It aggregates callback counts, RPC round-trip wall time, policy time,
+audit acknowledgement/commit time, queue statistics and cache reasons, without
+paths or argv. Profile transport uses the protected private channel. Metrics
+overlap: a FUSE callback includes its gate/RPC wait, and RPC includes controller
+work; do not sum them as exclusive elapsed phases. READ callback time ends when
+it returns ReadResultFd and excludes the kernel's subsequent splice/read. Normal
+runs have no profiling clock calls in callbacks.
+
 `test/runtime-build-bench.py` measures real builds of Airbag, with a fixed source
 snapshot and pre/post-optimization binaries paired on the same runner. CI runs
 `go build -p 1` and `-p 2` independently, two trials per condition, with three
@@ -167,3 +208,12 @@ Networking continues to use the existing isolated network namespace and forced
 proxy. There is no direct egress interface to monitor with an additional eBPF
 backend. LLM request-content DLP is a separate future capability, not part of
 these file/process controls.
+
+A separate `-tags=airbag_bench` binary exposes filesystem-only and policy-without-
+audit ablations through `AIRBAG_BENCH_RUNTIME_STAGE`. Production binaries ignore
+that environment variable. Secret notifications keep their durable barrier even
+in ablations. CI primary before/after builds have profiling off; extra `-p 2`
+profiled runs compare durable, buffered, plain FUSE and policy/RPC without audit.
+The storage diagnostic compares actual SQLite, a simplified SQLite schema and a
+framed append journal with the same payload and acknowledgement-after-sync.
+See [audit-storage.md](audit-storage.md) for conditions, results and engine research.

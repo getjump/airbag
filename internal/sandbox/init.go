@@ -21,6 +21,7 @@ import (
 
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/control"
+	"github.com/getjump/airbag/internal/diagnostic"
 	"github.com/getjump/airbag/internal/policyfs"
 	"github.com/getjump/airbag/internal/runtimepolicy"
 	"github.com/getjump/airbag/internal/secretfs"
@@ -52,11 +53,15 @@ func Init(dir string, tty bool) {
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		fatal("protect supervisor", err)
 	}
-	client, err := runtimeClient()
+	var profile *runtimepolicy.Profile
+	if s.RuntimeProfile {
+		profile = &runtimepolicy.Profile{}
+	}
+	client, err := runtimeClient(profile)
 	if err != nil {
 		fatal("runtime channel", err)
 	}
-	if err := buildWorld(s, client); err != nil {
+	if err := buildWorld(s, client, profile); err != nil {
 		fatal("build sandbox", err)
 	}
 	if err := loopbackUp(); err != nil {
@@ -73,7 +78,14 @@ func Init(dir string, tty bool) {
 		syscall.CloseOnExec(ttyCtlFd)
 		ctl = os.NewFile(ttyCtlFd, "tty-ctl")
 	}
-	os.Exit(runAgent(s, ctl, client))
+	code := runAgent(s, ctl, client)
+	if profile != nil {
+		if err := client.ReportProfile(profile.Snapshot()); err != nil {
+			fmt.Fprintf(os.Stderr, "airbag: report runtime profile: %v\n", err)
+			code = 125
+		}
+	}
+	os.Exit(code)
 }
 
 func fatal(what string, err error) {
@@ -87,7 +99,7 @@ func fatal(what string, err error) {
 //   - agent state in $HOME passes through, credentials are hidden;
 //   - /run, /tmp, /var/tmp and /dev/shm are private, so host sockets
 //     (docker.sock, D-Bus, ssh-agent, X11, Wayland) are out of reach.
-func buildWorld(s *session.Session, client *runtimepolicy.Client) error {
+func buildWorld(s *session.Session, client *runtimepolicy.Client, profile *runtimepolicy.Profile) error {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("make mounts private: %w", err)
 	}
@@ -205,8 +217,24 @@ func buildWorld(s *session.Session, client *runtimepolicy.Client) error {
 		// Capture BOTH ready views before overmounting either. In particular,
 		// workspace commonly lives under HOME. HOME first, workspace last.
 		var views []*policyfs.View
+		check := client.CheckBatch
+		if diagnostic.Config().SkipFileGate {
+			check = func([]runtimepolicy.Request) error { return nil }
+		}
+		options := policyfs.Options{DataCache: policyfs.CacheMode(s.FileCache)}
+		if profile != nil {
+			options.Observe = func(stat policyfs.OperationStats) {
+				profile.Record("fuse."+stat.Operation, stat.Duration, uint64(stat.Requests))
+				if stat.Errno != 0 {
+					profile.Record("fuse.error."+stat.Operation, 0, 1)
+				}
+				if stat.CacheReason != "" {
+					profile.Record("cache."+stat.CacheReason, 0, 1)
+				}
+			}
+		}
 		for _, path := range []string{s.Home, s.Workspace} {
-			view, err := policyfs.Capture(path, client.CheckBatch, beforeRead)
+			view, err := policyfs.CaptureWithOptions(path, check, beforeRead, options)
 			if err != nil {
 				return fmt.Errorf("capture policy view %s: %w", path, err)
 			}
