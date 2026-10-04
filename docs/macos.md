@@ -68,7 +68,9 @@ if the export will not unmount, it says so, leaves the directory and exits 1
 on a random path, to the probe's own `mount_nfs`, refuses every other mount
 request, and takes no new connection once that mount is up. The path is
 visible in the process list while `mount_nfs` runs: a local process that reads
-it and mounts first gets the export until the probe's own mount fails. When
+it and mounts first gets the export and, through the resolve-then-use race in
+go-billy's BoundOS, possibly files outside it, for the few moments until the
+probe's own mount fails and the server drops that process's connection. When
 the probe's mount does not come up, for that or any other reason, N1 fails and
 the server closes, with every connection it took. N3 runs `claude --version`
 and `codex --version` if they are installed, which may write their own files:
