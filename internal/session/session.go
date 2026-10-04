@@ -53,6 +53,10 @@ type Meta struct {
 	// Branch: the workspace result went to this branch of the real
 	// repository (apply --branch) instead of the working tree.
 	Branch string `json:"branch,omitempty"`
+	// Baseline: real files changed after this time conflict with the
+	// branch. The session's start, or the last rollback, which put the
+	// files back as they were.
+	Baseline time.Time `json:"baseline,omitempty"`
 }
 
 type Session struct {

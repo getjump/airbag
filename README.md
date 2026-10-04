@@ -9,6 +9,7 @@ $ airbag run -- claude --dangerously-skip-permissions
 $ airbag run -- codex --dangerously-bypass-approvals-and-sandbox   # or Codex
 $ airbag review
 $ airbag apply        # or: apply -i, apply --branch NAME, or: airbag discard
+$ airbag rollback     # undo the last apply
 ```
 
 ![demo: the agent deletes src, reads .env, tries to send it out, plants a line in ~/.bashrc and pushes; airbag review shows all of it; discard, and nothing happened](demo/demo.gif)
@@ -167,6 +168,12 @@ ended up in the diff. `apply` refuses to overwrite files you changed on the host
 while the agent worked. `apply -i` goes through the changes one by one (git
 internals and caches come as one piece each) and keeps the rejected ones in the
 session; `apply --only PATH` takes just part of the branch.
+
+An apply is all or nothing: before a real file changes, what was there moves into
+the session, so a step that fails puts back the ones before it. `airbag rollback`
+undoes the last apply the same way, and the agent's changes go back into the session
+to apply again or discard; a file you edited after the apply is left as it is. A
+push that already ran is not undone.
 
 `apply --branch NAME` leaves your working tree alone and puts the result on a new
 branch of the repository instead: the agent's commits, fetched with their history,

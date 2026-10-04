@@ -52,6 +52,17 @@ for want in "~ README.md" "+ new.txt" "- old.txt" ".git/hooks/post-checkout  per
 $rev"
 done
 
+# rollback undoes the apply, and the changes come back to the session.
+"$AIRBAG" apply --yes >/dev/null
+rb=$("$AIRBAG" rollback)
+echo "$rb" | grep -q "Rolled back" || fail "rollback: $rb"
+[ "$(cat README.md)" = hello ] || fail "README not restored by rollback"
+[ -f old.txt ] && [ ! -e new.txt ] || fail "files not restored by rollback"
+[ ! -s "$HOME/.airbag-e2e-rc" ] || fail "~ not restored by rollback"
+[ ! -f .git/hooks/post-checkout ] || fail "hook left behind by rollback"
+[ "$(git rev-parse HEAD)" = "$before" ] || fail "HEAD not restored by rollback"
+"$AIRBAG" review | grep -qF "~ README.md" || fail "changes not back in the session after rollback"
+
 applied=$("$AIRBAG" apply --yes)
 echo "$applied" | grep -q "left pending" || fail "intent ran under --yes although the agent added a git hook: $applied"
 [ "$(cat README.md)" = changed ] || fail "README not applied"

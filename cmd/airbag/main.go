@@ -33,9 +33,13 @@ const usage = `airbag — approve outcomes, not commands
       run the agent in a branch of the workspace and $HOME
   airbag review [ID]          what the agent changed, sent and queued
   airbag diff [ID] [PATH...]  unified diff of changed files
-  airbag apply [ID] [-i] [--only PATH]... [--yes] [--force]
+  airbag apply [ID] [-i] [--only PATH]... [--yes] [--force] [--trust-git]
                               write the branch (or part of it) to the real files,
                               then run the outbox
+  airbag apply [ID] --branch NAME
+                              put the result on a new git branch instead;
+                              the working tree is not touched
+  airbag rollback [ID]        undo the last apply; its changes go back to the session
   airbag discard [ID] [--yes] throw the branch away
   airbag ls                   list sessions
   airbag log [ID]             raw effect log
@@ -79,6 +83,8 @@ func main() {
 		err = cmdApply(args)
 	case "discard":
 		err = cmdDiscard(args)
+	case "rollback":
+		err = cmdRollback(args)
 	case "ls", "list":
 		err = cmdList()
 	case "log":
@@ -342,6 +348,48 @@ func cmdApply(args []string) error {
 	defer out.Flush()
 	return apply.Apply(s, cs, box, apply.Options{
 		Yes: *yes, Force: *force, Interactive: *inter, Only: only, Branch: *branch, TrustGit: *trustGit, In: os.Stdin, Out: out})
+}
+
+// cmdRollback undoes the last apply: of session ID, or of the newest
+// session of this workspace that was applied, fully or in part.
+func cmdRollback(args []string) error {
+	var s *session.Session
+	var err error
+	if len(args) > 0 {
+		s, err = session.Load(filepath.Join(session.Root(), args[0]))
+	} else {
+		s, err = lastApplied()
+	}
+	if err != nil {
+		return err
+	}
+	var done []string
+	for _, it := range listIntents(s) {
+		if it.Status == outbox.Done || it.Status == outbox.Unknown {
+			done = append(done, fmt.Sprintf("intent %s `%s` (%s)", it.ID, strings.Join(it.Argv, " "), it.Status))
+		}
+	}
+	out := term.Safe(os.Stdout)
+	defer out.Flush()
+	return apply.Rollback(s, done, out)
+}
+
+func lastApplied() (*session.Session, error) {
+	cwd, _ := os.Getwd()
+	ws := workspace(cwd)
+	all, err := session.List()
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range all {
+		if s.Workspace != ws || s.Status == session.StatusDiscarded {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(s.Dir, "undo")); err == nil {
+			return s, nil
+		}
+	}
+	return nil, fmt.Errorf("no applied session for %s", ws)
 }
 
 // listIntents reads a session's outbox; a session without one has none.

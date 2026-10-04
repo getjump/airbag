@@ -42,6 +42,10 @@ type Conflict struct {
 // Overlay reads the live workspace, so the agent's version was based
 // on the old file; applying it would silently drop the human's edit.
 func Conflicts(s *session.Session, cs []review.Change) []Conflict {
+	since := s.Created
+	if !s.Baseline.IsZero() {
+		since = s.Baseline
+	}
 	var out []Conflict
 	for _, c := range cs {
 		st, err := os.Lstat(c.Path)
@@ -59,10 +63,10 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 				continue
 			}
 			if st.IsDir() && (c.Kind == review.Deleted || c.Kind == review.Replaced) {
-				if p := changedInside(c.Path, s.Created); p != "" {
+				if p := changedInside(c.Path, since); p != "" {
 					out = append(out, Conflict{p, "changed on the host during the session, inside a directory the agent removed"})
 				}
-			} else if !st.IsDir() && changedAfter(c.Path, s.Created) {
+			} else if !st.IsDir() && changedAfter(c.Path, since) {
 				out = append(out, Conflict{c.Path, "changed on the host during the session"})
 			}
 		}
@@ -99,6 +103,10 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
 	}
+	if g := interrupted(s); g != nil {
+		return fmt.Errorf("an apply of session %s started %s did not finish; run `airbag rollback %s` to undo its part, then apply again",
+			s.ID, g.Started.Format("15:04:05"), s.ID)
+	}
 	if s.Status == session.StatusApplied {
 		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
 	}
@@ -121,9 +129,22 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 		return fmt.Errorf("nothing applied; rerun with --force to overwrite, or discard the session")
 	}
-	for _, c := range picked {
-		if err := applyOne(c); err != nil {
-			return fmt.Errorf("%s: %w (earlier changes are already applied)", c.Path, err)
+	if len(picked) > 0 {
+		gen, err := beginGeneration(s)
+		if err != nil {
+			return fmt.Errorf("start the undo journal: %w", err)
+		}
+		for _, c := range picked {
+			if err := gen.apply(c); err != nil {
+				left, rerr := gen.rollback(o.Out)
+				if rerr != nil || left > 0 {
+					return fmt.Errorf("%s: %w; rolling back what was applied also failed (%v), see `airbag rollback %s`", c.Path, err, rerr, s.ID)
+				}
+				return fmt.Errorf("%s: %w; nothing applied, the changes are back in the session", c.Path, err)
+			}
+		}
+		if err := gen.finish(); err != nil {
+			return err
 		}
 	}
 	forget(picked)
