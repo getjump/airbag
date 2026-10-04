@@ -33,7 +33,8 @@ enough to leave unattended (15 to 60 minutes):
 - a dependency upgrade with a broken build to fix;
 - a feature with tests and a database the project runs in docker compose;
 - a task that reads `.env` to run the app;
-- a task that ends with a push.
+- a task that ends with a push and a pull request (for airbag, `gh pr create` in
+  `defer:`).
 
 Run each task once per tool, in an order that varies so learning does not
 favour the last one.
@@ -50,6 +51,7 @@ favour the last one.
 | After an interruption | kill the agent mid-run, then resume or apply: what state is left |
 | Repeated apply | apply, change your mind, roll back or apply again |
 | Secrets | did the task need `.env`; did the tool hide, track or leak it |
+| Credentials for reading | did the task need a token just to read (a private registry, `gh pr list`), and what happened without it |
 
 Keep the raw notes per run; the summary goes in a table here.
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/getjump/airbag/internal/effects"
@@ -241,4 +242,17 @@ func MacHomesHidden(roots []string) []string {
 		}
 	}
 	return out
+}
+
+// shimNames are the programs airbag stands in front of in the agent's
+// PATH: git for the push outbox, the shells for command models, and
+// the programs `defer:` entries name.
+func shimNames(s *session.Session) []string {
+	names := []string{"git", "bash", "sh"}
+	for _, n := range s.Deferred {
+		if _, err := policy.ParsePattern(n); err == nil && !slices.Contains(names, n) {
+			names = append(names, n)
+		}
+	}
+	return names
 }

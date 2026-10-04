@@ -98,7 +98,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		return 1, err
 	}
 	defer box.Close()
-	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate}
+	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate, Root: s.CloneDir()}
 	go func() { _ = ctl.Serve(cl) }()
 
 	self, err := os.Executable()
@@ -112,7 +112,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 			return 1, err
 		}
 	}
-	for _, name := range []string{"git", "bash", "sh"} {
+	for _, name := range shimNames(s) {
 		link := filepath.Join(binDir, name)
 		_ = os.Remove(link)
 		if err := os.Symlink(self, link); err != nil {

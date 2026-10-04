@@ -172,8 +172,15 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	}
 
 	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))
+	secrets := knownSecrets(s.Workspace)
 	for _, in := range intents {
-		fmt.Fprintf(w, "  %-4s %-44s %s\n", in.ID, strings.Join(in.Argv, " "), in.Status)
+		fmt.Fprintf(w, "  %-4s %-44s %s\n", in.ID, outbox.Line(in.Argv), in.Status)
+		if len(in.Files) > 0 {
+			fmt.Fprintf(w, "       runs only on these as queued: %s\n", strings.Join(fileNames(in.Files), ", "))
+		}
+		if intentHasSecret(in, secrets) {
+			fmt.Fprintf(w, "       ! carries a value from a secret file\n")
+		}
 	}
 
 	if att := Attention(cs); len(att) > 0 {
@@ -440,4 +447,25 @@ func Diff(w io.Writer, c Change) {
 	cmd := exec.Command("diff", "-u", "--label", "a/"+display(c), "--label", "b/"+display(c), a, b)
 	cmd.Stdout, cmd.Stderr = w, w
 	_ = cmd.Run() // diff exits 1 when files differ
+}
+
+func fileNames(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// intentHasSecret: an intent runs on the host and sends what its
+// command line says, so a secret value in it leaves when it runs.
+func intentHasSecret(in outbox.Intent, secrets []string) bool {
+	line := strings.Join(in.Argv, " ")
+	for _, v := range secrets {
+		if strings.Contains(line, v) {
+			return true
+		}
+	}
+	return false
 }

@@ -59,6 +59,9 @@ type Meta struct {
 	// Forwards: TCP ports the agent reaches on its own loopback
 	// (tcp://HOST:PORT in allow), each relayed by airbag to HOST:PORT.
 	Forwards []Forward `json:"forwards,omitempty"`
+	// Deferred: programs with a shim in the sandbox, because a
+	// `defer:` entry in airbag.yaml holds some of their calls.
+	Deferred []string `json:"deferred,omitempty"`
 	// Clone: the workspace branch is a full copy (an APFS clone on
 	// macOS) at CloneDir, not an overlayfs upper layer.
 	Clone bool `json:"clone,omitempty"`

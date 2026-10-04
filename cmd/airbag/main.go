@@ -65,6 +65,10 @@ func main() {
 		shim.Shell(name, os.Args[1:])
 		return
 	}
+	if shim.IsDeferred(filepath.Base(os.Args[0])) {
+		shim.Deferred(filepath.Base(os.Args[0]), os.Args[1:])
+		return
+	}
 	if len(os.Args) >= 4 && os.Args[1] == "hook" {
 		cmdHook(os.Args[2], os.Args[3])
 		return
@@ -249,6 +253,14 @@ func cmdRun(args []string) (int, error) {
 	}
 	if len(pol.Sources) > 1 {
 		fmt.Fprintf(os.Stderr, "airbag: policy: %s\n", strings.Join(pol.Sources, " + "))
+	}
+	// The current policy decides which programs get a shim, for a
+	// resumed session too.
+	if d := pol.DeferPrograms(); !slices.Equal(d, s.Deferred) {
+		s.Deferred = d
+		if err := s.Save(); err != nil {
+			return 1, err
+		}
 	}
 	code, err := sandbox.Run(s, proxy.Allowlist(s.Allow), pol)
 	if err != nil {

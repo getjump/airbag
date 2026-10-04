@@ -2,8 +2,8 @@
 
 **Approve outcomes, not commands.** Start a long agent task without permission
 prompts and do something else. The agent works in a copy-on-write branch of your
-workspace and `$HOME`, `git push` waits in an outbox, and every host it reaches is
-logged. When you come back, one review shows what changed and what is waiting:
+workspace and `$HOME`, `git push` and the commands you name wait in an outbox, and
+every host it reaches is logged. When you come back, one review shows what changed and what is waiting:
 apply it, take it onto a git branch, or throw it away.
 
 ```console
@@ -50,10 +50,10 @@ Tools that also let you decide after the run, at least for files:
 | [AgentFS](https://github.com/tursodatabase/agentfs) | copy-on-write branch of the working directory (SQLite delta), `agentfs diff`; no apply command | not controlled | run as they happen | not handled |
 | [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) in clone mode, or [Code Airlock](https://github.com/Trivo25/code-airlock) on top of it | microVM with a private clone, host repo read-only; review and merge with `git fetch`, `git diff` | allowlist through a proxy | not held | proxy injects credentials, values stay outside the VM |
 | Claude Code sandbox and checkpoints | writes in the workspace, `/rewind` restores the agent's own file edits, not Bash's | allowlist through a proxy, asks for new domains | auto mode's classifier blocks some | denied or masked behind a proxy |
-| airbag | copy-on-write branch of the workspace and `$HOME`; persistence flagged; apply all, part or none, or onto a git branch; `rollback` | allowlist, every host logged, mirror, cut on a secret read | `git push` queued in the outbox, run after review; publishing fails at the read-only mirror; calls to allowed hosts happen when made, a rule can `ask` | hidden; a read labels the session and narrows egress |
+| airbag | copy-on-write branch of the workspace and `$HOME`; persistence flagged; apply all, part or none, or onto a git branch; `rollback` | allowlist, every host logged, mirror, cut on a secret read | `git push` and the commands `defer:` names (`gh pr create`) queued in the outbox, run after review; other publishing fails at the read-only mirror; calls to allowed hosts happen when made, a rule can `ask` | hidden; a read labels the session and narrows egress |
 
 What airbag adds is around the branch rather than the branch itself: the outbox
-that holds `git push` until review, the `$HOME` branch with persistence called out,
+that holds `git push` and the commands you name until review, the `$HOME` branch with persistence called out,
 a label that follows a secret read through the rest of the session, and one review
 that works the same for any agent, on your own toolchain without a VM. The result
 goes onto your files or onto a git branch, and an apply can be rolled back.
@@ -68,7 +68,7 @@ October 2026, from each project's documentation.)
 | | Until you decide | Examples |
 |---|---|---|
 | Stays local until `airbag apply` | the workspace and `$HOME` | edits, deletions, new files, a line in `~/.bashrc` |
-| Waits in the outbox, runs after review | what airbag intercepts | `git push` |
+| Waits in the outbox, runs after review | what airbag intercepts | `git push`, and the calls `defer:` names, such as `gh pr create` or `npm publish` |
 | Decided when it happens, by the allowlist and policy | every other network request | model API calls, a request to a host you allowed, packages through the mirror; `ask` holds a call until you approve it |
 
 A call to an outside service cannot be held or undone after the fact, so for those
@@ -106,7 +106,8 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   it. Pushing around the shim fails at the proxy. If the session put git config or
   hooks into the repository, its pushes wait for `airbag apply --trust-git` and
   run with hooks off. A push cut off by a crash is reported as of unknown outcome
-  and never run again.
+  and never run again. Other commands wait there when `defer:` names them
+  ([below](#deferred-commands)).
 - **No credentials.** `~/.ssh`, `~/.aws`, `gh`, `docker`, `kube` and similar are
   hidden, and so are credential-like environment variables (`*TOKEN*`,
   `*SECRET*`, `*API_KEY*`, ...) except the agents' own API keys; `--pass-env NAME`
@@ -236,6 +237,48 @@ the command runs; Codex gets the same through its hooks. The repository's file i
 agent cannot loosen its own rules, and a change to it shows up in review as
 `persist`.
 
+### Deferred commands
+
+A command that acts on the world with your credentials, such as opening a pull
+request or publishing a package, fails in the sandbox: the agent has neither the
+token nor the network for it. `defer:` lets such calls wait in the outbox instead:
+
+```yaml
+defer:
+  - gh pr create
+  - gh release create
+  - npm publish
+```
+
+Each entry is a program and the words that pick its calls: `gh pr create` holds
+`gh pr create --title x` and `gh -R org/repo pr create`, while `gh pr list` runs
+in the sandbox as before. airbag puts a shim for the program first in the agent's
+PATH. The agent gets `queued as intent i-N` and carries on; review lists the call
+with the files it names. A call by full path (`/usr/bin/gh`) skips the shim and runs
+in the sandbox, so `defer:` is a convenience: the boundary is still that the agent
+holds no credentials.
+
+The command runs on your machine, with your environment and credentials, after
+`airbag apply` has written the files:
+
+- you confirm each one; `--yes` does not run them;
+- the program comes from your PATH, never from the workspace;
+- files it names in the workspace must hold what they held when it was queued,
+  and a file outside the workspace is refused when the agent queues the call
+  (`/tmp` in the sandbox is not yours); pass text inline or put the file in the
+  workspace; a call that names a secret file (`.env`, a key) is refused;
+- after a failure the rest wait, since a pull request without its push means
+  nothing; after `apply --branch` they all wait, because the working tree is not
+  the result; if the session changed `.git/config` or hooks, they wait for
+  `--trust-git`, as pushes do, and run with hooks and fsmonitor off;
+- rules see the call as an `intent.cmd` effect, so
+  `'"untrusted" in session.labels && effect.kind == "intent.cmd"'` can refuse
+  it, and review flags a call that carries a value from your secret files.
+
+It reads the workspace as applied, as it would if you ran it yourself after
+merging: `npm publish` runs the scripts in `package.json`, `make release` the
+`Makefile`. Review those first.
+
 Which tools an agent may call is the agent's own setting (Claude Code's
 permissions, Codex's configuration), and airbag does not duplicate it. airbag
 governs the effects any tool has: files, network, processes and secrets.
@@ -264,10 +307,10 @@ Linux VM setup that works today; see [docs/macos.md](docs/macos.md).
 ## Status
 
 Early v0, not yet tried by anyone outside the project. Working on Linux: sandbox,
-branch, proxy with allowlist and address checks, mirror, git push outbox, review
-(text, `--attention`, `--json`), diff, apply with conflict check (all or nothing),
-`apply --branch`, `rollback`, `run --session`, `tcp://` forwards, discard. On macOS:
-a prototype (see above). Claude Code gets airbag's hooks as
+branch, proxy with allowlist and address checks, mirror, outbox for git push and
+`defer:` commands, review (text, `--attention`, `--json`), diff, apply with conflict
+check (all or nothing), `apply --branch`, `rollback`, `run --session`, `tcp://`
+forwards, discard. On macOS: a prototype (see above). Claude Code gets airbag's hooks as
 read-only managed settings, Codex as a read-only `/etc/codex/requirements.toml`
 (unless the host has its own), so the review shows which tool call changed which
 file. Codex's own SQLite state folds into one review line.

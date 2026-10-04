@@ -49,13 +49,17 @@ type File struct {
 	Allow []string `yaml:"allow"`
 	// Hide: more paths to hide from the agent, relative to $HOME or
 	// absolute. Hiding only takes away, so the repository may add some.
-	Hide  []string `yaml:"hide"`
+	Hide []string `yaml:"hide"`
+	// Defer: commands that wait in the outbox instead of running, each
+	// a program and the words that select its calls ("gh pr create").
+	Defer []string `yaml:"defer"`
 	Rules []Rule   `yaml:"rules"`
 }
 
 type Policy struct {
 	Allow   []string
 	Hide    []string
+	Defer   []Pattern
 	Rules   []Rule
 	Sources []string
 }
@@ -138,6 +142,13 @@ func Load(workspace, home string) (*Policy, error) {
 		p.Sources = append(p.Sources, path)
 		p.Allow = append(p.Allow, f.Allow...)
 		p.Hide = append(p.Hide, f.Hide...)
+		for _, d := range f.Defer {
+			pat, err := ParsePattern(d)
+			if err != nil {
+				return nil, fmt.Errorf("%s: defer %q: %w", path, d, err)
+			}
+			p.Defer = append(p.Defer, pat)
+		}
 		for i, r := range f.Rules {
 			if r.Name == "" {
 				r.Name = fmt.Sprintf("%s#%d", filepath.Base(path), i+1)
@@ -155,7 +166,9 @@ func (p *Policy) add(r Rule) error {
 	switch r.Verdict {
 	case Allow, Deny, Ask:
 	case "defer":
-		r.Verdict = Ask // only git push can wait in the outbox for now
+		// What waits is chosen by `defer:` entries, which put a shim in
+		// front of the program; a rule cannot reach a call without one.
+		r.Verdict = Ask
 	default:
 		return fmt.Errorf("verdict %q: want allow, deny or ask", r.Verdict)
 	}

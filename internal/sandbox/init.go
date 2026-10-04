@@ -288,7 +288,7 @@ func privateRun(s *session.Session) error {
 			return err
 		}
 	}
-	for _, name := range []string{"git", "bash", "sh"} {
+	for _, name := range shimNames(s) {
 		if err := os.Symlink(airbagBinInside, filepath.Join(shim.BinDir, name)); err != nil {
 			return err
 		}

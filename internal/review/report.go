@@ -84,8 +84,11 @@ type ReportEffect struct {
 
 type ReportIntent struct {
 	ID     string   `json:"id"`
+	Kind   string   `json:"kind"` // git.push, or cmd for a `defer:` entry
 	Argv   []string `json:"argv"`
 	Status string   `json:"status"`
+	// Files: workspace files the command runs only on, with SHA-256.
+	Files map[string]string `json:"files,omitempty"`
 }
 
 // manyDeletions is when deletions in the workspace become one item.
@@ -165,11 +168,15 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			r.Attention = append(r.Attention, ReportItem{What: "blocked", Target: e.Target, Why: e.Verdict + " by " + orUnnamed(e.Reason)})
 		}
 	}
+	secrets := knownSecrets(s.Workspace)
 	for _, in := range intents {
-		r.Outbox = append(r.Outbox, ReportIntent{ID: in.ID, Argv: in.Argv, Status: in.Status})
+		r.Outbox = append(r.Outbox, ReportIntent{ID: in.ID, Kind: in.Kind, Argv: in.Argv, Status: in.Status, Files: in.Files})
+		if in.Status == outbox.Pending && intentHasSecret(in, secrets) {
+			r.Attention = append(r.Attention, ReportItem{What: "secret", Target: in.ID, Why: "`" + outbox.Line(in.Argv) + "` carries a value from a secret file"})
+		}
 		switch in.Status {
 		case outbox.Pending:
-			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "`" + strings.Join(in.Argv, " ") + "` waits for apply"})
+			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "`" + outbox.Line(in.Argv) + "` waits for apply"})
 		case outbox.Unknown:
 			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "outcome unknown: " + in.Output})
 		}

@@ -34,3 +34,10 @@ func TestGitPush(t *testing.T) {
 		}
 	}
 }
+
+func TestLine(t *testing.T) {
+	got := Line([]string{"gh", "pr", "create", "--title", "Fix retry", "--body", "it's", ""})
+	if want := `gh pr create --title 'Fix retry' --body 'it'\''s' ''`; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
