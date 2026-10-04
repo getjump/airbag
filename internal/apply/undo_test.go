@@ -2,6 +2,7 @@ package apply
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,5 +221,181 @@ func TestCloneApplyRollback(t *testing.T) {
 	}
 	if back := scan(t, s); len(back) != 3 {
 		t.Fatalf("changes not back after rollback: %v", back)
+	}
+}
+
+// appliedReplacedDir lays out a clone session in which the agent
+// replaced the user's file d with a directory holding d/inner.txt, and
+// applies it. It returns the real path of d.
+func appliedReplacedDir(t *testing.T) (*session.Session, string) {
+	t.Helper()
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	for p, data := range map[string]string{
+		filepath.Join(ws, "d"):                        "user file\n",
+		filepath.Join(s.CloneDir(), "d", "inner.txt"): "agent\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { box.Close() })
+	if got := scan(t, s); got["d"] != review.Replaced || got[filepath.Join("d", "inner.txt")] != review.Added {
+		t.Fatalf("scan %v", got)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	d := filepath.Join(ws, "d")
+	if read(t, filepath.Join(d, "inner.txt")) != "agent\n" {
+		t.Fatal("replaced directory not applied")
+	}
+	return s, d
+}
+
+// keptVersion returns the version from before the apply that the last
+// generation of s still holds for path, or fails.
+func keptVersion(t *testing.T, s *session.Session, path string) (*generation, string) {
+	t.Helper()
+	gs, err := listGenerations(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gs) == 0 {
+		t.Fatalf("no generation left: the version of %s from before the apply is gone", path)
+	}
+	g, err := loadGeneration(gs[len(gs)-1].dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range g.Entries {
+		if e.Path == path {
+			if e.Saved == "" {
+				t.Fatalf("%s: entry kept without its previous version", path)
+			}
+			return g, read(t, e.Saved)
+		}
+	}
+	t.Fatalf("generation %s does not keep %s: %+v", g.dir, path, g.Entries)
+	return nil, ""
+}
+
+// A file the user adds inside a replaced directory after the apply
+// survives the rollback; the directory stays, with the user's file from
+// before the apply kept.
+func TestRollbackKeepsFileAddedToReplacedDir(t *testing.T) {
+	s, d := appliedReplacedDir(t)
+	added := filepath.Join(d, "user.txt")
+	if err := os.WriteFile(added, []byte("added after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, added); got != "added after\n" {
+		t.Fatalf("rollback lost a file added after the apply: %s = %q\n%s", added, got, out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(d, "inner.txt")); err == nil {
+		t.Errorf("the agent's file inside the directory was not rolled back")
+	}
+	if want := "left as is (holds files added or changed after the apply): " + d; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q: %s", want, out.String())
+	}
+	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+		t.Fatalf("version of %s from before the apply = %q", d, prev)
+	}
+}
+
+// A file inside a replaced directory that the rollback leaves, because
+// the user edited it after the apply, is not deleted when the rollback
+// reaches the directory.
+func TestRollbackKeepsLaterEditInsideReplacedDir(t *testing.T) {
+	s, d := appliedReplacedDir(t)
+	inner := filepath.Join(d, "inner.txt")
+	if err := os.WriteFile(inner, []byte("edited after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, inner); got != "edited after\n" {
+		t.Fatalf("rollback lost a file it had left: %s = %q\n%s", inner, got, out.String())
+	}
+	for _, want := range []string{
+		"left as is (changed after the apply): " + inner,
+		"left as is (holds files added or changed after the apply): " + d,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q: %s", want, out.String())
+		}
+	}
+	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+		t.Fatalf("version of %s from before the apply = %q", d, prev)
+	}
+}
+
+// A partial rollback keeps the version from before the apply of each
+// path it left, and a second rollback neither fails nor loses it.
+func TestPartialRollbackKeepsPreviousVersion(t *testing.T) {
+	s, box := undoSession(t)
+	ws := s.Workspace
+	mod := filepath.Join(ws, "mod.txt")
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if err := os.WriteFile(mod, []byte("edited after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for round := 1; round <= 2; round++ {
+		out.Reset()
+		if err := Rollback(s, nil, &out); err != nil {
+			t.Fatalf("rollback %d: %v\n%s", round, err, out.String())
+		}
+		if got := read(t, mod); got != "edited after\n" {
+			t.Fatalf("rollback %d overwrote a later edit: %q", round, got)
+		}
+		g, prev := keptVersion(t, s, mod)
+		if prev != "user\n" {
+			t.Fatalf("rollback %d: version of mod.txt from before the apply = %q", round, prev)
+		}
+		var journal struct {
+			Partial bool `json:"partial"`
+		}
+		if b, err := os.ReadFile(filepath.Join(g.dir, "journal.json")); err != nil || json.Unmarshal(b, &journal) != nil {
+			t.Fatalf("rollback %d: read the journal: %v", round, err)
+		}
+		if !journal.Partial || len(g.Entries) != 1 {
+			t.Fatalf("rollback %d: generation not trimmed to the path left: partial=%v entries=%+v", round, journal.Partial, g.Entries)
+		}
+		saved := g.Entries[0].Saved
+		if !strings.HasPrefix(saved, filepath.Join(g.dir, "saved")+string(filepath.Separator)) {
+			t.Errorf("rollback %d: previous version kept outside the generation: %s", round, saved)
+		}
+		if want := "its version from before the apply is kept at " + saved; !strings.Contains(out.String(), want) {
+			t.Errorf("rollback %d: output lacks %q: %s", round, want, out.String())
+		}
+	}
+	// The rest was rolled back by the first round.
+	if read(t, filepath.Join(ws, "del.txt")) != "keep me\n" {
+		t.Fatal("del.txt not restored")
+	}
+	if _, err := os.Stat(filepath.Join(ws, "sub")); err == nil {
+		t.Fatal("sub/ left behind")
 	}
 }
