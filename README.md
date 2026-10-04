@@ -50,10 +50,10 @@ Tools that also let you decide after the run, at least for files:
 | [AgentFS](https://github.com/tursodatabase/agentfs) | copy-on-write branch of the working directory (SQLite delta), `agentfs diff`; no apply command | not controlled | run as they happen | not handled |
 | [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) in clone mode, or [Code Airlock](https://github.com/Trivo25/code-airlock) on top of it | microVM with a private clone, host repo read-only; review and merge with `git fetch`, `git diff` | allowlist through a proxy | not held | proxy injects credentials, values stay outside the VM |
 | Claude Code sandbox and checkpoints | writes in the workspace, `/rewind` restores the agent's own file edits, not Bash's | allowlist through a proxy, asks for new domains | auto mode's classifier blocks some | denied or masked behind a proxy |
-| airbag | copy-on-write branch of the workspace and `$HOME`; persistence flagged; apply all, part or none, or onto a git branch; `rollback` | allowlist, every host logged, mirror, cut on a secret read | queued in the outbox, run after review | hidden; a read labels the session and narrows egress |
+| airbag | copy-on-write branch of the workspace and `$HOME`; persistence flagged; apply all, part or none, or onto a git branch; `rollback` | allowlist, every host logged, mirror, cut on a secret read | `git push` queued in the outbox, run after review; publishing fails at the read-only mirror; calls to allowed hosts happen when made, a rule can `ask` | hidden; a read labels the session and narrows egress |
 
 What airbag adds is around the branch rather than the branch itself: the outbox
-for actions that leave the machine, the `$HOME` branch with persistence called out,
+that holds `git push` until review, the `$HOME` branch with persistence called out,
 a label that follows a secret read through the rest of the session, and one review
 that works the same for any agent, on your own toolchain without a VM. The result
 goes onto your files or onto a git branch, and an apply can be rolled back.
