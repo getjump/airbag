@@ -48,6 +48,9 @@ type Mirror struct {
 	// session gets only what is already cached: no request it shapes
 	// leaves the machine.
 	Tainted func() string
+	// Pinned: artifacts the real workspace's lock files name, which a
+	// tainted session may still fetch (pins.go).
+	Pinned Pins
 }
 
 func (m *Mirror) tainted() bool { return m.Tainted != nil && m.Tainted() != "" }
@@ -209,10 +212,15 @@ func (m *Mirror) pass(w http.ResponseWriter, r *http.Request, url string, rewrit
 func (m *Mirror) cached(w http.ResponseWriter, r *http.Request, registry, url, what string) {
 	path := m.cachePath(registry, url)
 	hit := true
+	pinned := ""
 	if _, err := os.Stat(path); err != nil {
 		if m.tainted() {
-			m.refuse(w, url)
-			return
+			lock, ok := m.Pinned.Has(strings.ReplaceAll(url, "%2f", "/"))
+			if !ok {
+				m.refuse(w, url)
+				return
+			}
+			pinned = lock
 		}
 		hit = false
 		resp, err := m.Client.Get(url)
@@ -251,6 +259,8 @@ func (m *Mirror) cached(w http.ResponseWriter, r *http.Request, registry, url, w
 		reason := "fetched"
 		if hit {
 			reason = "cached"
+		} else if pinned != "" {
+			reason = "fetched after the secret read: pinned by " + pinned
 		}
 		m.Log.Add(effects.Effect{Kind: "pkg.fetch", Target: what, Verdict: "allow", Reason: reason})
 	}

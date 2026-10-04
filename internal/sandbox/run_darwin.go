@@ -75,6 +75,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	px.Gate = gate
 	mr := mirror.New(filepath.Join(session.Root(), "mirror"), log)
 	mr.Tainted = gate.Tainted
+	mr.Pinned = mirror.FindPins(s.Workspace) // read from the real workspace, before the agent starts
 	px.Mirror = mr
 	gate.Labels().OnAdd(func(l taint.Label, _ string) {
 		if l == taint.Secret {

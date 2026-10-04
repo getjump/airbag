@@ -126,7 +126,10 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   FUSE (`.env` and `.env.*` at any depth, private keys, `.npmrc`, `.pypirc`,
   cloud credentials, `*.tfvars`). The first read by anything but airbag taints
   the session: commands that send data out are refused, only model APIs stay
-  reachable, and the mirror serves only what it has cached. The read returns only
+  reachable, and the mirror serves only what it has cached or what the workspace's
+  lock files pin (`package-lock.json`, `yarn.lock`, `go.sum`, `uv.lock`, read from the
+  real workspace before the agent starts, so a build from the lock file keeps
+  working). The read returns only
   after airbag has recorded the taint and closed connections opened earlier to
   other hosts. Without FUSE the secret files are hidden instead. Known secret
   values are masked in the output of shell commands; the agent's own file tools are
@@ -285,8 +288,9 @@ append-only, so `sqlite3` answers questions the review does not.
 Not yet: secret handles (the agent sees a placeholder, airbag substitutes the
 value at an allowed boundary), passing Codex's SQLite state through (transcripts
 in `~/.codex/sessions` survive a discard, its thread index and memories do not). Tools that ignore the mirror settings cannot reach registries; `--allow HOST`
-opens one directly. After a secret read the mirror serves only its cache, not
-what a lockfile pins but nobody fetched yet.
+opens one directly. After a secret read the mirror serves its cache and what the
+lock files pin; pnpm-lock.yaml, poetry.lock and hashed requirements files are not
+read yet.
 
 ## Threat model
 
