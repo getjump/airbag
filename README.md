@@ -82,11 +82,12 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   reachable, and the mirror serves only what it has cached. The read returns only
   after airbag has recorded the taint and closed connections opened earlier to
   other hosts. Output going back to the agent has known secret values masked.
-- **No sandbox inside the sandbox.** The agent cannot create user namespaces,
-  so the kernel features only a user namespace exposes stay out of its reach.
-  The agents' own sandboxes need them: Codex's `--sandbox` modes fail inside
-  airbag, so run Codex with `--dangerously-bypass-approvals-and-sandbox`
-  (airbag is the sandbox), or pass `airbag run --allow-userns`.
+- **A strict mode.** `airbag run --strict` also keeps the agent from creating
+  user namespaces, so the kernel features only a user namespace exposes stay
+  out of its reach. It is off by default because common tools need them:
+  Codex's own `--sandbox` modes and Chromium's sandbox fail under it (run
+  Codex with `--dangerously-bypass-approvals-and-sandbox`, Chromium with
+  `--no-sandbox`).
 - **Its own state.** Transcripts and logins (`~/.claude/projects`, `~/.codex/sessions`,
   tokens) pass through, so discarding a branch does not log you out.
 

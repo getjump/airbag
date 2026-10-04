@@ -15,8 +15,8 @@ bubblewrap cannot create overlay mounts at all.
 Two things to do instead:
 
 1. Take bubblewrap's `--disable-userns` idea now: keep the agent from creating
-   user namespaces of its own (see the last section). Done: on by default,
-   `airbag run --allow-userns` lifts it.
+   user namespaces of its own (see the last section). Done as
+   `airbag run --strict`, off by default.
 2. Revisit when Ubuntu LTS ships bubblewrap 0.10 or later. With `--overlay`
    in bubblewrap, a hybrid (bubblewrap for namespaces and binds, an airbag
    helper inside for the rest) becomes worth measuring.
@@ -61,13 +61,21 @@ agent-cannot-nest
 
 The agent's own namespace is still created; the agent cannot create another.
 That closes a large kernel surface to whatever runs inside. airbag does this
-by default; `airbag run --allow-userns` lifts it.
+under `airbag run --strict`.
 
-The cost: an agent's own sandbox built on bubblewrap cannot start inside
-airbag. Checked with Codex 0.160: `codex exec -s workspace-write` fails with
-`bwrap: Creating new namespace failed: nesting depth or
-/proc/sys/user/max_user_namespaces exceeded`, and runs with `--allow-userns`.
-airbag warns when Codex starts without
-`--dangerously-bypass-approvals-and-sandbox`. Claude Code with
-`sandbox.enabled` in project settings still ran its Bash tool in the same
-check; whether its sandbox engaged there is not established.
+It is not the default, because of what it breaks, checked inside airbag:
+
+- Codex 0.160's own sandbox: `codex exec -s workspace-write` fails with
+  `bwrap: Creating new namespace failed: nesting depth or
+  /proc/sys/user/max_user_namespaces exceeded`. airbag warns when Codex starts
+  under `--strict` without `--dangerously-bypass-approvals-and-sandbox`.
+- Headless Chromium (Playwright's build): `No usable sandbox!`. It runs with
+  Chromium's `--no-sandbox`, as in Docker.
+
+Claude Code with `sandbox.enabled` in project settings still ran its Bash tool
+under the limit; whether its sandbox engaged there is not established.
+Rootless podman and nix's build sandbox use user namespaces too; not checked.
+
+airbag's own boundaries do not depend on the limit: an agent with a user
+namespace of its own still cannot unmount the locked mounts, reach the network
+other than through the proxy, or read secret files around FUSE.

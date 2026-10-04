@@ -116,7 +116,7 @@ func cmdRun(args []string) (int, error) {
 	noHome := fs.Bool("no-home", false, "do not branch $HOME (it stays read-only)")
 	var passEnv stringList
 	fs.Var(&passEnv, "pass-env", "give the agent this credential-like environment variable (repeatable)")
-	allowUserns := fs.Bool("allow-userns", false, "let the agent create user namespaces; the agents' own sandboxes (bubblewrap) need them")
+	strict := fs.Bool("strict", false, "keep the agent from creating user namespaces; breaks the agents' own sandboxes and Chromium's sandbox")
 	_ = fs.Parse(args)
 	argv := fs.Args()
 	if len(argv) == 0 {
@@ -144,16 +144,16 @@ func cmdRun(args []string) (int, error) {
 		UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 		Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
 		Passthrough: sandbox.DefaultPassthrough, Hidden: sandbox.DefaultHidden,
-		PassEnv: passEnv, AllowUserns: *allowUserns,
+		PassEnv: passEnv, Strict: *strict,
 	})
 	if err != nil {
 		return 1, err
 	}
 	if filepath.Base(argv[0]) == "codex" && !slices.Contains(argv, "--dangerously-bypass-approvals-and-sandbox") && !slices.Contains(argv, "--yolo") {
-		if *allowUserns {
-			fmt.Fprintln(os.Stderr, "airbag: tip: Codex's own sandbox asks per command and cuts the network; airbag already branches the machine, so --dangerously-bypass-approvals-and-sandbox leaves the review to the end")
+		if *strict {
+			fmt.Fprintln(os.Stderr, "airbag: warning: Codex's own sandbox cannot start under --strict (no user namespaces), so its commands will fail; airbag is the sandbox, run codex with --dangerously-bypass-approvals-and-sandbox")
 		} else {
-			fmt.Fprintln(os.Stderr, "airbag: warning: Codex's own sandbox cannot start here (the agent may not create user namespaces), so its commands will fail; airbag is the sandbox, run codex with --dangerously-bypass-approvals-and-sandbox (or airbag run --allow-userns)")
+			fmt.Fprintln(os.Stderr, "airbag: tip: Codex's own sandbox asks per command and cuts the network; airbag already branches the machine, so --dangerously-bypass-approvals-and-sandbox leaves the review to the end")
 		}
 	}
 	fmt.Fprintf(os.Stderr, "airbag: session %s · branch of %s%s · network: allowlist only\n",

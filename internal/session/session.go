@@ -42,8 +42,8 @@ type Meta struct {
 	Hidden []string `json:"hidden"`
 	// Credential-like environment variables passed to the agent anyway.
 	PassEnv []string `json:"pass_env,omitempty"`
-	// AllowUserns lets the agent create user namespaces of its own.
-	AllowUserns bool `json:"allow_userns,omitempty"`
+	// Strict keeps the agent from creating user namespaces.
+	Strict bool `json:"strict,omitempty"`
 }
 
 type Session struct {

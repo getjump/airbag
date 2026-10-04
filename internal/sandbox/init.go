@@ -366,12 +366,13 @@ func startBridge() error {
 // uid, so tools that refuse to run as root (Claude Code's bypass mode)
 // work, and the mounts above are locked against the agent.
 //
-// Unless the session allows it, the agent's namespace is the last one:
-// the limit set here (as bubblewrap's --disable-userns does) keeps the
-// agent from creating user namespaces, and with them most of the kernel
-// surface that is reachable only from inside one.
+// In strict mode the agent's namespace is the last one: the limit set
+// here (as bubblewrap's --disable-userns does) keeps the agent from
+// creating user namespaces, and with them the kernel surface reachable
+// only from inside one. It is off by default because the agents' own
+// sandboxes and Chromium's sandbox need user namespaces.
 func runAgent(s *session.Session) int {
-	if !s.AllowUserns {
+	if s.Strict {
 		if err := os.WriteFile("/proc/sys/user/max_user_namespaces", []byte("1"), 0); err != nil {
 			fmt.Fprintf(os.Stderr, "airbag: warning: the agent can create user namespaces: %v\n", err)
 		}
