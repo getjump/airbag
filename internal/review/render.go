@@ -1,0 +1,224 @@
+package review
+
+import (
+	"fmt"
+	"io"
+	"net"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/outbox"
+	"github.com/getjump/airbag/internal/session"
+)
+
+// Noise: caches in $HOME are folded into one line per directory.
+var homeNoise = []string{".cache/", ".npm/", "go/pkg/", ".cargo/registry/", ".local/share/", ".local/state/", ".rustup/"}
+
+const maxListed = 40
+
+func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect, intents []outbox.Intent) {
+	dur := "running"
+	if !s.Ended.IsZero() {
+		dur = s.Ended.Sub(s.Created).Round(time.Second).String()
+	}
+	fmt.Fprintf(w, "Session %s · %s · %s · exit %d · %s\n\n", s.ID, strings.Join(s.Argv, " "), dur, s.ExitCode, s.Status)
+
+	var ws, home []Change
+	for _, c := range cs {
+		if c.Layer == "ws" {
+			ws = append(ws, c)
+		} else {
+			home = append(home, c)
+		}
+	}
+
+	fmt.Fprintf(w, "Workspace  %s\n", s.Workspace)
+	var gitInternal int
+	var listed []Change
+	for _, c := range ws {
+		if strings.HasPrefix(c.Rel, ".git/") && len(c.Flags) == 0 {
+			gitInternal++
+			continue
+		}
+		listed = append(listed, c)
+	}
+	a, m, d := counts(listed)
+	line := fmt.Sprintf("  Files    +%d ~%d -%d", a, m, d)
+	if gitInternal > 0 {
+		line += fmt.Sprintf("    (git internals: %d files)", gitInternal)
+	}
+	fmt.Fprintln(w, line)
+	list(w, listed, "")
+
+	if s.OverHome {
+		fmt.Fprintf(w, "\nHome       %d changes outside the workspace\n", len(home))
+		folded := map[string]int{}
+		var shown []Change
+		for _, c := range home {
+			if dir := noiseDir(c.Rel); dir != "" && !flagged(c) {
+				folded[dir+"… (cache)"]++
+				continue
+			}
+			if repo := gitDir(c.Rel); repo != "" && !flagged(c) {
+				folded[repo+"… (git internals)"]++
+				continue
+			}
+			shown = append(shown, c)
+		}
+		list(w, shown, "~/")
+		for _, dir := range sortedKeys(folded) {
+			fmt.Fprintf(w, "  · ~/%s %d files\n", dir, folded[dir])
+		}
+	}
+
+	allowed, denied := map[string]int{}, map[string]int{}
+	for _, e := range effs {
+		if e.Kind != "net.egress" {
+			continue
+		}
+		host, _, err := net.SplitHostPort(e.Target)
+		if err != nil {
+			host = e.Target
+		}
+		if e.Verdict == "deny" {
+			denied[e.Target]++
+		} else {
+			allowed[host]++
+		}
+	}
+	fmt.Fprintf(w, "\nNetwork    %d allowed%s\n", total(allowed), hostList(allowed))
+	if len(denied) > 0 {
+		fmt.Fprintf(w, "           %d denied%s\n", total(denied), hostList(denied))
+	}
+
+	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))
+	for _, in := range intents {
+		fmt.Fprintf(w, "  %-4s %-44s %s\n", in.ID, strings.Join(in.Argv, " "), in.Status)
+	}
+
+	if att := Attention(cs); len(att) > 0 {
+		fmt.Fprintf(w, "\nAttention\n")
+		for _, c := range att {
+			fmt.Fprintf(w, "  ! %-40s %s\n", display(c), strings.Join(c.Flags, ", "))
+		}
+	}
+	if d > 50 {
+		fmt.Fprintf(w, "  ! %d files deleted in the workspace\n", d)
+	}
+	fmt.Fprintf(w, "\nNext: airbag diff [path] · airbag apply · airbag discard\n")
+}
+
+func counts(cs []Change) (a, m, d int) {
+	for _, c := range cs {
+		if c.IsDir() && c.Kind != Replaced {
+			continue
+		}
+		switch c.Kind {
+		case Added:
+			a++
+		case Modified, Replaced:
+			m++
+		case Deleted:
+			d++
+		}
+	}
+	return
+}
+
+func list(w io.Writer, all []Change, prefix string) {
+	var cs []Change
+	for _, c := range all {
+		// New directories are implied by the files inside them.
+		if !(c.IsDir() && c.Kind == Added && len(c.Flags) <= 1) {
+			cs = append(cs, c)
+		}
+	}
+	for i, c := range cs {
+		if i == maxListed {
+			fmt.Fprintf(w, "  … and %d more\n", len(cs)-maxListed)
+			return
+		}
+		mark := map[string]string{Added: "+", Modified: "~", Deleted: "-", Replaced: "!"}[c.Kind]
+		name := prefix + c.Rel
+		if c.IsDir() {
+			name += "/"
+		}
+		flags := ""
+		if f := withoutOutside(c.Flags); len(f) > 0 {
+			flags = "  " + strings.Join(f, ", ")
+		}
+		fmt.Fprintf(w, "  %s %s%s\n", mark, name, flags)
+	}
+}
+
+func display(c Change) string {
+	if c.Layer == "home" {
+		return "~/" + c.Rel
+	}
+	return c.Rel
+}
+
+func flagged(c Change) bool { return len(withoutOutside(c.Flags)) > 0 }
+
+func withoutOutside(fl []string) []string {
+	var out []string
+	for _, f := range fl {
+		if f != "outside workspace" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// gitDir returns the repository dir for paths inside .git or *.git.
+func gitDir(rel string) string {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	for i, p := range parts[:len(parts)-1] {
+		if p == ".git" || strings.HasSuffix(p, ".git") {
+			return strings.Join(parts[:i+1], "/") + "/"
+		}
+	}
+	return ""
+}
+
+func noiseDir(rel string) string {
+	for _, p := range homeNoise {
+		if strings.HasPrefix(rel+"/", p) {
+			return p
+		}
+	}
+	return ""
+}
+
+func total(m map[string]int) int {
+	n := 0
+	for _, v := range m {
+		n += v
+	}
+	return n
+}
+
+func hostList(m map[string]int) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := sortedKeys(m)
+	sort.SliceStable(keys, func(i, j int) bool { return m[keys[i]] > m[keys[j]] })
+	var parts []string
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s ×%d", k, m[k]))
+	}
+	return ": " + strings.Join(parts, ", ")
+}
+
+func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
