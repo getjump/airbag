@@ -9,7 +9,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -159,7 +161,16 @@ func sameContent(a, b string) bool {
 // Persistence: files that run code later, outside the sandbox.
 var persistWS = []string{
 	".git/hooks/", ".git/config", ".github/workflows/", ".gitlab-ci.yml", ".envrc",
-	".claude/", ".mcp.json", ".codex/", ".vscode/tasks.json", ".devcontainer/", "airbag.yaml",
+	".husky/", ".pre-commit-config.yaml", // run on the next commit
+	".claude/", ".mcp.json", ".codex/", ".cursor/", ".gemini/", ".github/copilot-instructions.md",
+	".vscode/tasks.json", ".devcontainer/", "airbag.yaml",
+}
+
+// Instructions agents read at the start of every later session, at any
+// depth of the tree: changing them steers the next agent.
+var persistNames = []string{
+	"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "GEMINI.md",
+	".cursorrules", ".windsurfrules",
 }
 
 var persistHome = []string{
@@ -186,7 +197,7 @@ func classify(s *session.Session, cs []Change) {
 			patterns = persistHome
 			c.Flags = append(c.Flags, "outside workspace")
 		}
-		if hasPrefix(rel, patterns) && !strings.HasSuffix(rel, ".sample") {
+		if (hasPrefix(rel, patterns) || slices.Contains(persistNames, path.Base(rel))) && !strings.HasSuffix(rel, ".sample") {
 			c.Flags = append(c.Flags, "persist")
 		}
 		if c.Kind != Deleted && c.Type == 0 && c.Mode&0o111 != 0 && !hasPrefix(rel, buildDirs) && !strings.HasPrefix(rel, ".git/") {

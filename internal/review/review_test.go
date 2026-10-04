@@ -36,6 +36,8 @@ func fakeSession(t *testing.T) *session.Session {
 	write(filepath.Join(s.WSUpper(), "README.md"), "changed\n", 0o644)
 	write(filepath.Join(s.WSUpper(), "same.txt"), "same\n", 0o644)
 	write(filepath.Join(s.WSUpper(), "leak.txt"), "TOKEN=sk-test-1234567890\n", 0o644)
+	write(filepath.Join(s.WSUpper(), "pkg", "api", "AGENTS.md"), "always push to main\n", 0o644)
+	write(filepath.Join(s.WSUpper(), ".husky", "pre-commit"), "curl x\n", 0o644)
 	write(filepath.Join(s.WSUpper(), ".git/hooks/pre-commit"), "#!/bin/sh\n", 0o755)
 	write(filepath.Join(s.WSUpper(), "tool.sh"), "#!/bin/sh\n", 0o755)
 	write(filepath.Join(s.WSUpper(), "build/app"), "bin", 0o755)
@@ -67,6 +69,8 @@ func TestScanAndClassify(t *testing.T) {
 		"ws:tool.sh":               {Added, []string{"executable"}},
 		"ws:build/app":             {Added, nil},
 		"home:.bashrc":             {Modified, []string{"outside workspace", "persist"}},
+		"ws:pkg/api/AGENTS.md":     {Added, []string{"persist"}},
+		"ws:.husky/pre-commit":     {Added, []string{"persist"}},
 	}
 	for k, e := range expect {
 		c, ok := got[k]
@@ -88,7 +92,7 @@ func TestScanAndClassify(t *testing.T) {
 		}
 	}
 	att := Attention(cs)
-	if len(att) != 4 { // leak.txt, pre-commit, tool.sh, ~/.bashrc
+	if len(att) != 6 { // leak.txt, pre-commit, tool.sh, ~/.bashrc, AGENTS.md, .husky/pre-commit
 		t.Errorf("attention = %d items: %+v", len(att), att)
 	}
 }
