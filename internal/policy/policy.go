@@ -143,7 +143,8 @@ func (p *Policy) add(r Rule) error {
 type Input struct {
 	Effect  models.Effect
 	Argv    []string // the command that produces it, if any
-	Tainted bool
+	Tainted bool     // session holds the "secret" label (kept for brevity)
+	Labels  []string // all session labels, for `session.labels`
 }
 
 type Decision struct {
@@ -158,7 +159,7 @@ func (p *Policy) Decide(in Input) Decision {
 	vars := map[string]any{
 		"effect":  map[string]string{"kind": in.Effect.Kind, "target": in.Effect.Target, "detail": in.Effect.Detail},
 		"command": map[string]any{"argv": in.Argv, "line": strings.Join(in.Argv, " ")},
-		"session": map[string]any{"tainted": in.Tainted},
+		"session": map[string]any{"tainted": in.Tainted, "labels": in.Labels},
 	}
 	best := Decision{Verdict: Allow}
 	rank := map[string]int{Allow: 1, Ask: 2, Deny: 3}

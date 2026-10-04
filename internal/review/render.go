@@ -117,6 +117,17 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	if len(reads) > 0 {
 		fmt.Fprintf(w, "\nSecrets    read: %s\n           egress was limited to model APIs and cached packages from then on\n", strings.Join(reads, ", "))
 	}
+	var untrusted []string
+	seenU := map[string]bool{}
+	for _, e := range effs {
+		if e.Kind == "label" && e.Verdict == "untrusted" && !seenU[e.Target] {
+			seenU[e.Target] = true
+			untrusted = append(untrusted, e.Target)
+		}
+	}
+	if len(untrusted) > 0 {
+		fmt.Fprintf(w, "\nUntrusted  input pulled from: %s\n", strings.Join(untrusted, ", "))
+	}
 	var pkgs []string
 	seenPkg := map[string]bool{}
 	for _, e := range effs {

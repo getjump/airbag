@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/getjump/airbag/internal/taint"
 )
 
 // Gate applies a policy during a session and handles "ask": the action
@@ -15,41 +17,23 @@ import (
 // `airbag approve a-N`, and the retry passes.
 type Gate struct {
 	*Policy
-	mu      sync.Mutex
-	dir     string
-	tainted string // what secret the session read, if any
-	onTaint []func(source string)
+	mu     sync.Mutex
+	dir    string
+	labels *taint.Set
 }
 
-// OnTaint registers f to run when the session is first tainted, before
-// Taint returns.
-func (g *Gate) OnTaint(f func(source string)) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.onTaint = append(g.onTaint, f)
-}
+// Labels is the session's label set, shared with the proxy and review.
+func (g *Gate) Labels() *taint.Set { return g.labels }
+
+// Mark records that source gave the session a label; it returns true
+// the first time that label appears.
+func (g *Gate) Mark(label taint.Label, source string) bool { return g.labels.Add(label, source) }
 
 // Taint marks the session as having read a secret.
-func (g *Gate) Taint(source string) {
-	g.mu.Lock()
-	if g.tainted != "" {
-		g.mu.Unlock()
-		return
-	}
-	g.tainted = source
-	fs := g.onTaint
-	g.mu.Unlock()
-	for _, f := range fs {
-		f(source)
-	}
-}
+func (g *Gate) Taint(source string) { g.labels.Add(taint.Secret, source) }
 
-// Tainted returns what tainted the session, or "".
-func (g *Gate) Tainted() string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.tainted
-}
+// Tainted returns the first secret the session read, or "".
+func (g *Gate) Tainted() string { return g.labels.Source(taint.Secret) }
 
 type Request struct {
 	ID       string    `json:"id"`
@@ -61,7 +45,9 @@ type Request struct {
 	Approved bool      `json:"approved"`
 }
 
-func NewGate(p *Policy, sessionDir string) *Gate { return &Gate{Policy: p, dir: sessionDir} }
+func NewGate(p *Policy, sessionDir string) *Gate {
+	return &Gate{Policy: p, dir: sessionDir, labels: taint.NewSet()}
+}
 
 func asksPath(dir string) string { return filepath.Join(dir, "asks.json") }
 
@@ -69,6 +55,7 @@ func asksPath(dir string) string { return filepath.Join(dir, "asks.json") }
 // allow when the human already approved this exact effect.
 func (g *Gate) Check(in Input) (Decision, string) {
 	in.Tainted = in.Tainted || g.Tainted() != ""
+	in.Labels = g.labels.Labels()
 	d := g.Decide(in)
 	if d.Verdict != Ask {
 		return d, ""

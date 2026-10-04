@@ -3,9 +3,11 @@ package policy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/getjump/airbag/internal/models"
+	"github.com/getjump/airbag/internal/taint"
 )
 
 func TestLoadAndDecide(t *testing.T) {
@@ -63,16 +65,21 @@ func TestBadRule(t *testing.T) {
 	}
 }
 
-func TestOnTaint(t *testing.T) {
+func TestLabelsAndTaint(t *testing.T) {
 	g := NewGate(&Policy{}, t.TempDir())
 	var got []string
-	g.OnTaint(func(src string) { got = append(got, src) })
+	g.Labels().OnAdd(func(l taint.Label, src string) { got = append(got, string(l)+":"+src) })
 	g.Taint(".env")
-	if len(got) != 1 || got[0] != ".env" {
-		t.Fatalf("OnTaint ran %v times before Taint returned", got)
+	g.Taint(".env.local") // same label again: no second callback
+	g.Mark(taint.Untrusted, "example.com")
+	if len(got) != 2 || got[0] != "secret:.env" || got[1] != "untrusted:example.com" {
+		t.Fatalf("OnAdd fired %v", got)
 	}
-	g.Taint(".env.local")
-	if len(got) != 1 || g.Tainted() != ".env" {
-		t.Fatalf("second taint: callbacks %v, tainted %q", got, g.Tainted())
+	if g.Tainted() != ".env" {
+		t.Fatalf("Tainted = %q", g.Tainted())
+	}
+	labels := strings.Join(g.Labels().Labels(), ",")
+	if labels != "secret,untrusted" {
+		t.Fatalf("labels = %q", labels)
 	}
 }

@@ -88,6 +88,16 @@ rules:
     verdict: deny
 ```
 
+Rules can also read the session's labels, `session.labels`: `secret` once
+the session read a secret file, `untrusted` once it pulled content from a web
+host. That keeps outside input from driving an irreversible effect:
+
+```yaml
+  - name: no-push-after-web
+    when: '"untrusted" in session.labels && effect.kind == "intent.git_push"'
+    verdict: deny
+```
+
 Verdicts are `allow`, `deny` and `ask`; a deny anywhere wins. An `ask` blocks the
 command and tells the agent to have you run `airbag approve a-N`; after that the
 retry passes. For Claude Code the answer arrives through a PreToolUse hook, before
@@ -119,7 +129,7 @@ config core.hooksPath` persists), and known secret values (from `.env` and
 credential-like variables) are masked in output that goes back to the agent.
 
 Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `test/policy-e2e.sh`,
-`test/partial-e2e.sh`, `test/secret-e2e.sh`, `test/mirror-e2e.sh`,
+`test/partial-e2e.sh`, `test/secret-e2e.sh`, `test/taint-e2e.sh`, `test/mirror-e2e.sh`,
 `python3 test/ctrlc.py`, `test/claude-e2e.sh` and `test/codex-e2e.sh` (the real
 Claude Code and Codex binaries against `test/mockapi`, a scripted mock of the
 Messages and Responses APIs). With a real login, follow [docs/manual-test.md](docs/manual-test.md).

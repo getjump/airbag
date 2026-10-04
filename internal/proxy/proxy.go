@@ -18,6 +18,7 @@ import (
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
 	"github.com/getjump/airbag/internal/policy"
+	"github.com/getjump/airbag/internal/taint"
 )
 
 // DefaultAllow covers model APIs.
@@ -147,6 +148,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "allow"})
+	// Talking to a host that is neither a model API nor a registry
+	// brings outside data into the session: label it untrusted, so a
+	// rule can keep that data from driving an irreversible effect.
+	if p.Gate != nil && !Allowlist(DefaultAllow).Allows(host) && !Registries.Allows(host) {
+		if p.Gate.Mark(taint.Untrusted, host) {
+			p.Log.Add(effects.Effect{Kind: "label", Target: host, Verdict: "untrusted"})
+		}
+	}
 	if r.Method == http.MethodConnect {
 		p.connect(w, r, host)
 		return
