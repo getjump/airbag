@@ -346,10 +346,16 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 				continue
 			}
 			v, ok := getPath(branch, ch.path)
+			bv, inBase := getPath(base, ch.path)
 			if !ok {
-				continue // a removed key is a change for review, not a write
+				// Missing from the branch: the agent removed it (a change
+				// for review, never written back), or the host added it
+				// during the run, which the branch copy takes.
+				if rv, inReal := getPath(real, ch.path); !inBase && inReal && setPath(branch, ch.path, rv) == nil {
+					rebased = true
+				}
+				continue
 			}
-			bv, _ := getPath(base, ch.path)
 			if canon(v) == canon(bv) {
 				// The agent did not change it; the host did. The host's
 				// value stays, and the branch copy takes it, so review

@@ -567,3 +567,23 @@ func TestWriteBackBaseWhenNoRealFile(t *testing.T) {
 		t.Fatalf("real file = %v, want the host's counter kept and the agent's new id written", got)
 	}
 }
+
+// A benign key the host added during the run, absent from the base and
+// the branch, is not an agent's deletion: the branch copy takes it, so
+// review shows only what the agent changed.
+func TestWriteBackHostAddedKeyIsNotADeletion(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"userID":"u"}`)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"userID":"u","mcpServers":{}}`) // the agent's change
+	writeCfg(t, realPath, `{"userID":"u","numStartups":4}`)   // a host session added a counter
+	WriteBackConfigs(s)
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+	flags := strings.Join(configFlags(c), "; ")
+	if strings.Contains(flags, "numStartups") || !strings.Contains(flags, "mcpServers") {
+		t.Fatalf("flags = %q, want only the agent's mcpServers change", flags)
+	}
+	if got := readCfg(t, realPath); got["numStartups"] != float64(4) {
+		t.Fatalf("real file = %v, want the host's counter kept", got)
+	}
+}
