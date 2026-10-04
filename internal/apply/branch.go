@@ -147,6 +147,11 @@ func agentHead(s *session.Session) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The agent wrote what HEAD holds, and it goes to git on this
+	// machine as an argument: "--output=..." would be an option there.
+	if !isObjectID(sha) {
+		return "", errors.New("HEAD does not name a commit")
+	}
 	real, err := git(s.Workspace, nil, "rev-parse", "HEAD")
 	if err == nil && strings.TrimSpace(real) == sha {
 		return "", nil
@@ -303,6 +308,19 @@ func notIgnored(ws string, cs []review.Change) ([]review.Change, error) {
 	}
 	sort.Slice(keep, func(i, j int) bool { return keep[i].Rel < keep[j].Rel })
 	return keep, nil
+}
+
+// isObjectID reports whether s is a SHA-1 or SHA-256 object name.
+func isObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func isGitPath(rel string) bool {
