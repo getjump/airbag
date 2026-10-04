@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -1005,5 +1006,93 @@ func TestRollbackKeepsTempNamedFileAfterFinishedApply(t *testing.T) {
 	}
 	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
 		t.Fatalf("version of %s from before the apply = %q", d, prev)
+	}
+}
+
+// Inside a replaced directory, apply -i's diff is against the real
+// files: an edit shows as one, an unchanged file not at all, a removed
+// one as deleted. --only cannot take a path inside the directory, which
+// applies whole: it names the directory instead, and nothing is applied.
+func TestApplyReviewsReplacedDirAgainstRealFiles(t *testing.T) {
+	s, box, src := overlayReplacedDir(t,
+		map[string]string{"auth.go": "check(token)\nreturn ok\n", "same.go": "package same\n", "gone.go": "package gone\n"},
+		map[string]string{"auth.go": "check(token)\nreturn true\n", "same.go": "package same\n"})
+	var out bytes.Buffer
+	err := Apply(s, mustScan(t, s), box, Options{Interactive: true, In: strings.NewReader("d\nn\n"), Out: &out})
+	if err != nil {
+		t.Fatal(err, out.String())
+	}
+	for _, want := range []string{"! src/ (directory replaced)", "-return ok", "+return true", "-package gone"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("apply -i's diff lacks %q:\n%s", want, out.String())
+		}
+	}
+	for _, not := range []string{"+check(token)", "package same"} {
+		if strings.Contains(out.String(), not) {
+			t.Errorf("apply -i's diff shows %q, which did not change:\n%s", not, out.String())
+		}
+	}
+
+	out.Reset()
+	err = Apply(s, mustScan(t, s), box, Options{Yes: true, Only: []string{"src/auth.go"}, Out: &out})
+	if err == nil || !strings.Contains(err.Error(), "replaced as a whole") || !strings.Contains(err.Error(), "airbag apply --only src`") {
+		t.Fatalf("--only src/auth.go: err = %v, want a refusal naming --only src\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(src, "gone.go")); got != "package gone\n" {
+		t.Fatalf("--only src/auth.go applied the replacement: src/gone.go = %q", got)
+	}
+	if gs, _ := listGenerations(s); len(gs) != 0 {
+		t.Fatalf("--only src/auth.go started an apply: %v", gs)
+	}
+
+	out.Reset()
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Only: []string{"src"}, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	for rel, want := range map[string]string{"auth.go": "check(token)\nreturn true\n", "same.go": "package same\n"} {
+		if got := read(t, filepath.Join(src, rel)); got != want {
+			t.Errorf("after --only src, src/%s = %q, want the agent's %q", rel, got, want)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(src, "gone.go")); err == nil {
+		t.Errorf("after --only src, src/gone.go is still there")
+	}
+	if want := "Applied 3 changes."; !strings.Contains(out.String(), want) { // src/, gone.go, auth.go
+		t.Errorf("output lacks %q: %s", want, out.String())
+	}
+}
+
+// apply --branch puts all of a replaced directory on the branch, the
+// files the same as before included, and none of the user's others.
+func TestBranchHasAllOfReplacedDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	s, _, src := overlayReplacedDir(t,
+		map[string]string{"auth.go": "check(token)\nreturn ok\n", "same.go": "package same\n", "gone.go": "package gone\n"},
+		map[string]string{"auth.go": "check(token)\nreturn true\n", "same.go": "package same\n", "new.go": "package new\n"})
+	ws := s.Workspace
+	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"add", "-A"},
+		{"-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "init"}} {
+		if out, err := exec.Command("git", append([]string{"-C", ws}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	var out bytes.Buffer
+	if err := ApplyBranch(s, mustScan(t, s), "agent", Options{Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	ls, err := exec.Command("git", "-C", ws, "ls-tree", "-r", "--name-only", "agent", "src").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Fields(string(ls)), []string{"src/auth.go", "src/link", "src/new.go", "src/same.go"}; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("branch has %v in src, want the agent's %v", got, want)
+	}
+	if b, _ := exec.Command("git", "-C", ws, "show", "agent:src/auth.go").Output(); string(b) != "check(token)\nreturn true\n" {
+		t.Errorf("branch's src/auth.go = %q", b)
+	}
+	if got := read(t, filepath.Join(src, "gone.go")); got != "package gone\n" {
+		t.Errorf("--branch touched the working tree: src/gone.go = %q", got)
 	}
 }

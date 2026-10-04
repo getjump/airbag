@@ -55,6 +55,10 @@ type ReportChange struct {
 	Kind  string   `json:"kind"`  // added, modified, deleted, replaced
 	Type  string   `json:"type"`  // file, dir, symlink
 	Flags []string `json:"flags,omitempty"`
+	// In: the replaced directory the path is inside, which applies as a
+	// whole; kind compares the path with the real one (deleted: the
+	// replacement removes the user's path).
+	In string `json:"in,omitempty"`
 }
 
 // ReportItem is one thing the human should decide on.
@@ -115,6 +119,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 		r.Steps = []steps.Step{}
 	}
 	deleted := 0
+	cs = Shown(cs)
 	for _, c := range cs {
 		typ := "file"
 		switch c.Type {
@@ -123,7 +128,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 		case fs.ModeSymlink:
 			typ = "symlink"
 		}
-		r.Changes = append(r.Changes, ReportChange{Layer: c.Layer, Path: filepath.ToSlash(c.Rel), Kind: c.Kind, Type: typ, Flags: c.Flags})
+		r.Changes = append(r.Changes, ReportChange{Layer: c.Layer, Path: filepath.ToSlash(c.Rel), Kind: c.Kind, Type: typ, Flags: c.Flags, In: filepath.ToSlash(c.In)})
 		if c.Layer == "ws" && c.Kind == Deleted && !strings.HasPrefix(c.Rel, ".git/") {
 			deleted++
 		}

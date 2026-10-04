@@ -131,10 +131,11 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if err != nil {
 		return err
 	}
-	var picked []review.Change
+	var all []review.Change
 	for _, u := range chosen {
-		picked = append(picked, u.Changes...)
+		all = append(all, u.Changes...)
 	}
+	picked := review.ToApply(all)
 	if cf := Conflicts(s, picked); len(cf) > 0 && !o.Force {
 		fmt.Fprintf(o.Out, "Conflicts: %d files changed on the host while the agent worked:\n", len(cf))
 		for _, c := range cf {
@@ -166,8 +167,8 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if gitTouched(picked) {
 		s.GitTouched = true
 	}
-	if len(picked) > 0 {
-		fmt.Fprintf(o.Out, "Applied %d changes.\n", len(picked))
+	if n := len(review.Shown(all)); n > 0 {
+		fmt.Fprintf(o.Out, "Applied %d changes.\n", n)
 	}
 
 	rest, err := review.Scan(s)
@@ -177,7 +178,7 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if len(rest) == 0 {
 		s.Status = session.StatusApplied
 	} else {
-		fmt.Fprintf(o.Out, "%d changes stay in session %s: airbag apply -i, or airbag discard.\n", len(rest), s.ID)
+		fmt.Fprintf(o.Out, "%d changes stay in session %s: airbag apply -i, or airbag discard.\n", len(review.Shown(rest)), s.ID)
 	}
 	if err := s.Save(); err != nil {
 		return err
@@ -200,9 +201,15 @@ func choose(units []Unit, in *bufio.Reader, o Options) ([]Unit, error) {
 	if len(o.Only) > 0 {
 		var out []Unit
 		for _, u := range units {
-			if u.matches(o.Only) {
-				out = append(out, u)
+			if !u.matches(o.Only) {
+				continue
 			}
+			if p := u.inside(o.Only); p != "" {
+				r := display(u.Changes[0])
+				return nil, fmt.Errorf("--only %s: that is inside %s/, which the agent replaced as a whole; "+
+					"`airbag apply --only %s` applies all of it (airbag review lists what it adds, changes and removes); nothing applied", p, r, r)
+			}
+			out = append(out, u)
 		}
 		if len(out) == 0 {
 			return nil, fmt.Errorf("no changes match %s", strings.Join(o.Only, " "))
@@ -212,7 +219,7 @@ func choose(units []Unit, in *bufio.Reader, o Options) ([]Unit, error) {
 	if !o.Interactive {
 		n := 0
 		for _, u := range units {
-			n += len(u.Changes)
+			n += len(review.Shown(u.Changes))
 			if len(u.Flags) > 0 && !o.Yes {
 				fmt.Fprintf(o.Out, "  ! %-40s %s\n", u.Title, strings.Join(u.Flags, ", "))
 			}
@@ -240,7 +247,7 @@ func choose(units []Unit, in *bufio.Reader, o Options) ([]Unit, error) {
 			out = append(out, u)
 		case "n", "no", "":
 		case "d", "diff":
-			for _, c := range u.Changes {
+			for _, c := range review.Shown(u.Changes) {
 				review.Diff(o.Out, c)
 			}
 			i--

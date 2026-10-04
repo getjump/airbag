@@ -27,6 +27,10 @@ const (
 	Modified = "modified"
 	Deleted  = "deleted"
 	Replaced = "replaced" // a directory whose old contents are gone
+	// Same: a path inside a replaced directory that the agent's version
+	// holds just as the real one does. Review does not show it; apply
+	// writes it with the rest of the directory.
+	Same = "same"
 )
 
 type Change struct {
@@ -38,15 +42,48 @@ type Change struct {
 	Type  fs.FileMode // fs.ModeDir, fs.ModeSymlink or 0 for files
 	Mode  fs.FileMode
 	Flags []string
+	// In: the replaced directory this path is inside, as a path in the
+	// layer; "" when none. Applying that directory writes all of the
+	// agent's version of it and removes the rest, so inside one Kind
+	// says what that does to the real path: Same, Modified (with a diff
+	// against the real file), Added, or Deleted for a path of the user's
+	// that the agent's version lacks or has as another type.
+	In string
 }
 
 func (c Change) IsDir() bool { return c.Type == fs.ModeDir }
 
+// Shown returns the changes review shows: all but the paths inside a
+// replaced directory that stay as they are.
+func Shown(cs []Change) []Change {
+	var out []Change
+	for _, c := range cs {
+		if c.Kind != Same {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// ToApply returns the changes apply writes: all but the deletions
+// listed inside a replaced directory, which applying the directory
+// itself carries out.
+func ToApply(cs []Change) []Change {
+	var out []Change
+	for _, c := range cs {
+		if !(c.In != "" && c.Kind == Deleted) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // Scan walks both upper layers. Whiteouts are deletions, opaque
-// directories replace their lower counterpart. What is inside such a
-// directory is compared with nothing, as the agent saw it: each entry
-// is added, even one the same as the file it replaces, so that applying
-// the directory writes all of the agent's version.
+// directories replace their lower counterpart. Every entry inside such
+// a directory is a change, even one the same as the real file at its
+// path (Same), so that applying the directory writes all of the agent's
+// version; each is compared with that real file for review, which also
+// lists the user's paths the replacement removes (see Change.In).
 func Scan(s *session.Session) ([]Change, error) {
 	if s.Clone {
 		out, err := ScanTree("ws", s.Workspace, s.CloneDir())
@@ -62,7 +99,7 @@ func Scan(s *session.Session) ([]Change, error) {
 		layers = append(layers, struct{ name, upper, lower string }{"home", s.HomeUpper(), s.Home})
 	}
 	for _, l := range layers {
-		var replaced []string // opaque directories found so far, as paths with a trailing slash
+		var replaced []Change // opaque directories found so far
 		err := filepath.WalkDir(l.upper, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -79,9 +116,15 @@ func Scan(s *session.Session) ([]Change, error) {
 			c.Mode = info.Mode().Perm()
 			lst, lerr := os.Lstat(c.Path)
 			for _, r := range replaced {
-				if strings.HasPrefix(p, r) {
-					lst, lerr = nil, fs.ErrNotExist // hidden from the agent by r
+				if strings.HasPrefix(p, r.Upper+string(filepath.Separator)) {
+					c.In = r.Rel
 				}
+			}
+			if c.In != "" {
+				if inReplaced(&c, info, lst, lerr) {
+					out = append(out, c)
+				}
+				return nil
 			}
 			switch {
 			case isWhiteout(info):
@@ -93,7 +136,10 @@ func Scan(s *session.Session) ([]Change, error) {
 				c.Type = fs.ModeDir
 				if isOpaque(p) && lerr == nil {
 					c.Kind = Replaced
-					replaced = append(replaced, p+string(filepath.Separator))
+					replaced = append(replaced, c)
+					out = append(out, c)
+					out = append(out, removedBy(c)...)
+					return nil
 				} else if lerr != nil {
 					c.Kind = Added
 				} else {
@@ -128,6 +174,71 @@ func Scan(s *session.Session) ([]Change, error) {
 	}
 	classify(s, out)
 	return out, nil
+}
+
+// inReplaced sets what applying the replaced directory around c does
+// to c's real path, which may hold the same, something else or
+// nothing. A path the agent's version has as another type than the
+// real one is Added, and removedBy lists the real one as deleted. It
+// reports false for a whiteout: under an opaque directory there is
+// nothing for it to hide, and what is gone is listed by removedBy.
+func inReplaced(c *Change, info fs.FileInfo, lst fs.FileInfo, lerr error) bool {
+	c.Kind = Added
+	switch {
+	case isWhiteout(info):
+		return false
+	case info.IsDir():
+		c.Type = fs.ModeDir
+		if lerr == nil && lst.IsDir() {
+			c.Kind = Same
+			if lst.Mode().Perm() != c.Mode {
+				c.Kind = Modified
+			}
+		}
+	case info.Mode()&fs.ModeSymlink != 0:
+		c.Type = fs.ModeSymlink
+		if lerr == nil && lst.Mode()&fs.ModeSymlink != 0 {
+			old, _ := os.Readlink(c.Path)
+			cur, _ := os.Readlink(c.Upper)
+			c.Kind = Modified
+			if old == cur {
+				c.Kind = Same
+			}
+		}
+	default:
+		if lerr == nil && lst.Mode().IsRegular() {
+			c.Kind = Modified
+			if lst.Mode().Perm() == c.Mode && sameContent(c.Path, c.Upper) {
+				c.Kind = Same
+			}
+		}
+	}
+	return true
+}
+
+// removedBy lists the user's paths that applying the replaced directory
+// r removes: each real path inside r that the agent's version lacks or
+// has as another type. A directory is one entry, as a deleted one is
+// elsewhere.
+func removedBy(r Change) []Change {
+	var out []Change
+	_ = filepath.WalkDir(r.Path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == r.Path {
+			return nil
+		}
+		rel, _ := filepath.Rel(r.Path, p)
+		up := filepath.Join(r.Upper, rel)
+		if ust, err := os.Lstat(up); err == nil && !isWhiteout(ust) && ust.Mode().Type() == d.Type() {
+			return nil // compared from the agent's side
+		}
+		out = append(out, Change{Layer: r.Layer, Rel: filepath.Join(r.Rel, rel), Path: p, Upper: up,
+			Kind: Deleted, Type: d.Type(), In: r.Rel})
+		if d.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return out
 }
 
 func isWhiteout(info fs.FileInfo) bool {
@@ -183,6 +294,9 @@ func classify(s *session.Session, cs []Change) {
 	secrets := knownSecrets(s.Workspace)
 	for i := range cs {
 		c := &cs[i]
+		if c.Kind == Same {
+			continue // not a change: as the user has it
+		}
 		rel := filepath.ToSlash(c.Rel)
 		if c.IsDir() {
 			rel += "/"

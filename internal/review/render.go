@@ -3,7 +3,9 @@ package review
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -42,6 +44,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	}
 	fmt.Fprintf(w, "Session %s · %s · %s · exit %d · %s\n\n", s.ID, strings.Join(s.Argv, " "), dur, s.ExitCode, s.Status)
 
+	cs = Shown(cs)
 	var ws, home []Change
 	for _, c := range cs {
 		if c.Layer == "ws" {
@@ -432,11 +435,42 @@ func renderShell(w io.Writer, effs []effects.Effect) {
 	}
 }
 
-// Diff writes a unified diff of one change.
+// Diff writes a unified diff of one change, after a line for a change
+// of mode, which a diff of the content does not show.
 func Diff(w io.Writer, c Change) {
-	if c.IsDir() {
-		fmt.Fprintf(w, "%s %s/ (directory %s)\n", map[string]string{Added: "+", Deleted: "-", Replaced: "!"}[c.Kind], display(c), c.Kind)
+	if c.Kind == Same {
 		return
+	}
+	mode := ""
+	if st, err := os.Lstat(c.Path); err == nil && c.Kind == Modified && st.Mode().Type() == c.Type && st.Mode().Perm() != c.Mode {
+		mode = fmt.Sprintf("mode %04o → %04o", st.Mode().Perm(), c.Mode)
+	}
+	if c.IsDir() {
+		what := "directory " + c.Kind
+		if mode != "" {
+			what += ": " + mode
+		}
+		fmt.Fprintf(w, "%s %s/ (%s)\n", map[string]string{Added: "+", Modified: "~", Deleted: "-", Replaced: "!"}[c.Kind], display(c), what)
+		return
+	}
+	if c.Type == fs.ModeSymlink {
+		// diff would follow the links and compare what they point to.
+		old, oerr := os.Readlink(c.Path)
+		cur, _ := os.Readlink(c.Upper)
+		switch {
+		case c.Kind == Added:
+			fmt.Fprintf(w, "+ %s (symlink to %s)\n", display(c), cur)
+		case c.Kind == Deleted:
+			fmt.Fprintf(w, "- %s (symlink to %s)\n", display(c), old)
+		case oerr != nil:
+			fmt.Fprintf(w, "~ %s (symlink to %s, was not a symlink)\n", display(c), cur)
+		default:
+			fmt.Fprintf(w, "~ %s (symlink to %s, was to %s)\n", display(c), cur, old)
+		}
+		return
+	}
+	if mode != "" {
+		fmt.Fprintf(w, "~ %s (%s)\n", display(c), mode)
 	}
 	a, b := c.Path, c.Upper
 	switch c.Kind {

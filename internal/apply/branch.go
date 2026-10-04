@@ -202,7 +202,7 @@ func commitLeftovers(s *session.Session, cs []review.Change, base string) (strin
 
 	var drop []string
 	var keep []review.Change
-	for _, c := range cs {
+	for _, c := range review.ToApply(cs) {
 		if c.Layer != "ws" || isGitPath(c.Rel) {
 			continue
 		}

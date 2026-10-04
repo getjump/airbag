@@ -126,12 +126,30 @@ func (u Unit) matches(paths []string) bool {
 	return false
 }
 
+// inside returns the path of paths that names something inside the
+// directory u replaces, when none names the directory itself or one
+// above it: a replacement applies whole or not at all.
+func (u Unit) inside(paths []string) string {
+	r := u.Changes[0]
+	if r.Kind != review.Replaced || (Unit{Changes: u.Changes[:1]}).matches(paths) {
+		return ""
+	}
+	for _, p := range paths {
+		if (Unit{Changes: u.Changes[1:]}).matches([]string{p}) {
+			return p
+		}
+	}
+	return ""
+}
+
 // forget removes applied changes from the branch so they no longer show
-// up in review. Children go before their directories.
+// up in review. Children go before their directories. A replaced
+// directory was applied whole, so all of it goes, whiteouts left in it
+// included.
 func forget(cs []review.Change) {
 	for i := len(cs) - 1; i >= 0; i-- {
 		c := cs[i]
-		if c.IsDir() && c.Kind != review.Deleted {
+		if c.IsDir() && c.Kind != review.Deleted && c.Kind != review.Replaced {
 			_ = os.Remove(c.Upper) // only if empty
 			continue
 		}

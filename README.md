@@ -182,6 +182,12 @@ while the agent worked. `apply -i` goes through the changes one by one (git
 internals and caches come as one piece each) and keeps the rejected ones in the
 session; `apply --only PATH` takes just part of the branch.
 
+A directory the agent removed and made again (`! src/`, replaced) applies as one
+piece: the real one becomes exactly the agent's. Review still compares each file
+in it with yours, so an edit shows as `~` with its diff, a file left as it was does
+not show, and your files the agent's version lacks show as `-`. `apply --only` with
+a path inside such a directory refuses and names the directory to apply instead.
+
 An apply is all or nothing: before a real file changes, what was there moves into
 the session, so a step that fails puts back the ones before it. `airbag rollback`
 undoes the last apply the same way, and the agent's changes go back into the session

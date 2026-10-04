@@ -274,7 +274,7 @@ func cmdRun(args []string) (int, error) {
 	cs, _ := review.Scan(s)
 	intents := listIntents(s)
 	nws, nhome := 0, 0
-	for _, c := range cs {
+	for _, c := range review.Shown(cs) {
 		if c.Layer == "ws" {
 			nws++
 		} else {
@@ -381,8 +381,10 @@ func cmdDiff(args []string) error {
 	}
 	out := term.Safe(os.Stdout)
 	defer out.Flush()
-	for _, c := range cs {
-		if c.IsDir() || !matches(c, args) || (strings.HasPrefix(c.Rel, ".git/") && len(args) == 0) {
+	for _, c := range review.Shown(cs) {
+		// A new directory shows through its files; a replaced, deleted
+		// or re-moded one gets a line of its own.
+		if (c.IsDir() && c.Kind == review.Added) || !matches(c, args) || (strings.HasPrefix(c.Rel, ".git/") && len(args) == 0) {
 			continue
 		}
 		review.Diff(out, c)

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
@@ -194,6 +196,150 @@ func TestReport(t *testing.T) {
 	for _, k := range []string{"changes", "attention", "network", "secrets_read", "untrusted_from", "packages", "blocked", "outbox", "steps"} {
 		if _, ok := back[k]; !ok {
 			t.Errorf("JSON lacks %s", k)
+		}
+	}
+}
+
+// replacedSession lays out a session in which the agent replaced the
+// user's src with a directory of its own (opaque in the upper layer):
+// one line of auth.go edited, same.go and sub/c.go as they were, mode.sh
+// made executable, link pointing elsewhere, new.go new, kind a file
+// where the user has a directory, gone.go and old/ missing.
+func replacedSession(t *testing.T) *session.Session {
+	t.Helper()
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	root := t.TempDir()
+	ws := filepath.Join(root, "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: filepath.Join(root, "home")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, up := filepath.Join(ws, "src"), filepath.Join(s.WSUpper(), "src")
+	for dir, files := range map[string]map[string]string{
+		src: {"auth.go": "check(token)\nreturn ok\n", "same.go": "package same\n", "sub/c.go": "package c\n",
+			"mode.sh": "echo hi\n", "gone.go": "package gone\n", "old/x.go": "package old\n", "kind/k.go": "package k\n"},
+		up: {"auth.go": "check(token)\nreturn true\n", "same.go": "package same\n", "sub/c.go": "package c\n",
+			"mode.sh": "echo hi\n", "new.go": "package new\n", "kind": "a file now\n"},
+	} {
+		for rel, data := range files {
+			p := filepath.Join(dir, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.Chmod(filepath.Join(up, "mode.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for dir, target := range map[string]string{src: "same.go", up: "auth.go"} {
+		if err := os.Symlink(target, filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := unix.Setxattr(up, "user.overlay.opaque", []byte("y"), 0); err != nil {
+		t.Skipf("cannot mark a directory opaque here: %v", err)
+	}
+	return s
+}
+
+// Inside a directory the agent replaced, review compares each path with
+// the real one, as anywhere else: an edited file is modified, with a
+// real diff, an unchanged one is not shown, and the user's files the
+// replacement removes are listed as deleted. So are --json and the
+// attention list.
+func TestReviewComparesReplacedDirWithRealFiles(t *testing.T) {
+	s := replacedSession(t)
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diff strings.Builder
+	for _, c := range cs {
+		Diff(&diff, c)
+	}
+	for _, want := range []string{"-return ok", "+return true", "-package gone", "~ src/mode.sh (mode 0644 → 0755)",
+		"- src/old/ (directory deleted)", "~ src/link (symlink to auth.go, was to same.go)"} {
+		if !strings.Contains(diff.String(), want) {
+			t.Errorf("diff lacks %q:\n%s", want, diff.String())
+		}
+	}
+	for _, not := range []string{"+check(token)", "package same", "package c"} {
+		if strings.Contains(diff.String(), not) {
+			t.Errorf("diff shows %q, which did not change:\n%s", not, diff.String())
+		}
+	}
+
+	var text strings.Builder
+	Render(&text, s, cs, nil, nil, nil)
+	for _, want := range []string{"Files    +2 ~4 -3", "! src/", "~ src/auth.go", "- src/gone.go", "- src/old/"} {
+		if !strings.Contains(text.String(), want) {
+			t.Errorf("review lacks %q:\n%s", want, text.String())
+		}
+	}
+	if strings.Contains(text.String(), "same.go") {
+		t.Errorf("review lists src/same.go, which did not change:\n%s", text.String())
+	}
+
+	r := BuildReport(s, cs, nil, nil, nil)
+	var got []string
+	for _, c := range r.Changes {
+		got = append(got, c.Kind+" "+c.Path)
+	}
+	want := []string{
+		"replaced src", "deleted src/gone.go", "deleted src/kind", "deleted src/old",
+		"modified src/auth.go", "added src/kind", "modified src/link", "modified src/mode.sh", "added src/new.go",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("--json changes:\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+	var att []string
+	for _, a := range r.Attention {
+		att = append(att, a.Target+": "+a.Why)
+	}
+	if strings.Join(att, "; ") != "src/mode.sh: executable" {
+		t.Errorf("attention = %v, want only src/mode.sh: executable", att)
+	}
+}
+
+// The scan still holds every path of the agent's replaced directory,
+// so that apply writes all of it: the unchanged ones as Same, which
+// review leaves out. The deletions it lists are for review only.
+func TestScanKeepsAllOfReplacedDirForApply(t *testing.T) {
+	s := replacedSession(t)
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kind := map[string]string{}
+	for _, c := range cs {
+		if c.Kind != Replaced && c.In != "src" {
+			t.Errorf("%s %s: In = %q, want src", c.Kind, c.Rel, c.In)
+		}
+		kind[filepath.ToSlash(c.Rel)] += c.Kind + " "
+	}
+	for rel, want := range map[string]string{"src/same.go": "same ", "src/sub": "same ", "src/sub/c.go": "same ", "src/auth.go": "modified "} {
+		if kind[rel] != want {
+			t.Errorf("%s: %q in the scan, want %q", rel, kind[rel], want)
+		}
+	}
+	for _, c := range Shown(cs) {
+		if c.Kind == Same {
+			t.Errorf("review shows %s, which is the same", c.Rel)
+		}
+	}
+	applied := map[string]bool{}
+	for _, c := range ToApply(cs) {
+		if c.Kind == Deleted {
+			t.Errorf("apply gets the listed deletion %s; applying src removes it already", c.Rel)
+		}
+		applied[filepath.ToSlash(c.Rel)] = true
+	}
+	for _, rel := range []string{"src", "src/auth.go", "src/same.go", "src/sub", "src/sub/c.go", "src/mode.sh", "src/link", "src/new.go", "src/kind"} {
+		if !applied[rel] {
+			t.Errorf("apply would not write %s", rel)
 		}
 	}
 }
