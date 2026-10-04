@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/getjump/airbag/internal/seatbelt"
@@ -29,6 +30,7 @@ var macStateWriteFiles = []string{".claude.json"}
 var stateReadOnly = []string{
 	".claude/settings.json", ".claude/settings.local.json", ".claude/hooks", ".claude/agents",
 	".claude/skills", ".claude/commands", ".claude/plugins", ".claude/CLAUDE.md",
+	".claude/rules", ".claude/output-styles", ".claude/workflows", ".claude/agent-memory",
 	".codex/config.toml", ".codex/hooks.json", ".codex/rules", ".codex/AGENTS.md",
 }
 
@@ -77,6 +79,9 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 	for _, h := range s.BranchHoles {
 		p.NoWrite = append(p.NoWrite, filepath.Join(home, h))
 	}
+	// Every project's memory/, not only this workspace's: they are all
+	// loaded into later sessions of their project.
+	p.NoWriteRegex = append(p.NoWriteRegex, "^"+regexp.QuoteMeta(home)+`/\.claude/projects/[^/]+/memory(/|$)`)
 	for _, h := range s.Hidden {
 		p.NoRead = append(p.NoRead, filepath.Join(home, h))
 	}

@@ -35,6 +35,9 @@ func TestMacProfile(t *testing.T) {
 	has := func(rule, path string) bool {
 		return strings.Contains(text, "("+rule+" (subpath \""+path+"\"))") || strings.Contains(text, "("+rule+" (literal \""+path+"\"))")
 	}
+	if !strings.Contains(text, `/\.claude/projects/[^/]+/memory(/|$)"))`) {
+		t.Error("profile does not deny every project's memory/")
+	}
 	clone, _ := filepath.EvalSymlinks(s.CloneDir())
 	if clone == "" {
 		clone = s.CloneDir()
@@ -48,6 +51,7 @@ func TestMacProfile(t *testing.T) {
 		{"allow file-write*", filepath.Join(home, ".claude/projects/"+ClaudeProjectSlug(ws))},
 		{"deny file-write*", filepath.Join(home, ".claude/projects/"+ClaudeProjectSlug(ws)+"/memory")},
 		{"deny file-write*", filepath.Join(home, ".claude/settings.json")},
+		{"deny file-write*", filepath.Join(home, ".claude/rules")},
 		{"deny file-write*", filepath.Join(home, ".codex/config.toml")},
 		{"deny file-read*", filepath.Join(home, ".ssh")},
 		{"deny file-read*", filepath.Join(home, ".config/sops")},

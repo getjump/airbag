@@ -157,18 +157,27 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
 - **Its own state.** Only what must survive a discard passes straight through to the
   real `$HOME`: the login (`~/.claude/.credentials.json`, `~/.codex/auth.json`, so a
   discard does not log you out), the current workspace's Claude Code transcripts
-  (`~/.claude/projects/<this project>/`, so `--session` resumes after a discard) and
+  (`~/.claude/projects/<this project>/`, so `claude --resume` works after a discard) and
   Codex's transcripts (`~/.codex/sessions`, which Codex keys by date, not by project,
-  so these are not narrowed to the workspace). Everything else an agent keeps in
+  so these are not narrowed to the workspace). Mind what that means: a transcript the
+  agent wrote, resumed later outside airbag (`claude --continue`, `codex resume`),
+  brings that conversation back, so resume a sandboxed session inside airbag
+  (`airbag run --session`), and a login the agent changed inside a session is the
+  login your next host session uses. A path with a symlink in it (say `~/.claude`
+  pointing into a dotfiles repository) is not passed through: it stays in the branch,
+  or is read-only where the link leads out of `$HOME`. A session started by an older
+  airbag, resumed now, gets today's narrower list. Everything else an agent keeps in
   `$HOME` — other projects' transcripts, sessions, shell snapshots, file history,
   todos, caches — goes through the branch: review folds it into one `agent state`
   line and a discard drops it. A project's `memory/` (instructions loaded into later
   sessions) stays in the branch too, flagged `agent instructions`, so you see it and
   a discard drops it. `~/.claude.json` also goes through the branch; at session end
   airbag copies back only an allowlist of benign keys it rewrites every run (counters,
-  ids, login metadata) and leaves any other change — an MCP server, a tool permission,
-  a trust decision — in the branch, shown in review by key name (never value) and
-  flagged `persist` when it can run code or change trust. On the macOS prototype,
+  ids, migration markers) and leaves any other change — an MCP server, a tool
+  permission, a trust decision, the logged-in account — in the branch, shown in review
+  by key name (never value) and flagged `persist` when it can run code or change
+  trust; airbag's own write-back is not taken for a host edit at apply, any later
+  host edit is. On the macOS prototype,
   which has no branch of `$HOME`, this narrowing is only partial; see
   [docs/macos.md](docs/macos.md).
 
