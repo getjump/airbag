@@ -82,7 +82,10 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	if err := os.MkdirAll(filepath.Join(g.dir, "saved"), 0o700); err != nil {
 		return nil, err
 	}
-	return g, g.save()
+	if err := g.save(); err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 func (g *generation) save() error {
@@ -96,11 +99,11 @@ func (g *generation) save() error {
 		return err
 	}
 	if _, err := f.Write(b); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -421,7 +424,7 @@ func applyTemp(p string, d fs.DirEntry, copying map[string]bool) bool {
 func removeTemps(dir string, copying map[string]bool) {
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && applyTemp(p, d, copying) {
-			_ = os.Remove(p)
+			_ = os.Remove(p) //nolint:gosec // the rollback runs after the session stopped: nothing from the sandbox can swap a path during the walk
 		}
 		return nil
 	})
@@ -506,16 +509,16 @@ func giveBack(e genEntry, clone bool) error {
 	if clone && e.Kind == review.Deleted {
 		return nil // absent from the clone is what a deletion is
 	}
-	if err := os.MkdirAll(filepath.Dir(e.Upper), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(e.Upper), 0o755); err != nil { //nolint:gosec // a directory of the session's upper layer, inside the 0700 session dir
 		return err
 	}
 	switch {
 	case e.Kind == review.Deleted:
 		// overlayfs's whiteout: a 0:0 character device (unprivileged
 		// since Linux 5.8).
-		return unix.Mknod(e.Upper, syscall.S_IFCHR|0o000, 0)
+		return unix.Mknod(e.Upper, syscall.S_IFCHR, 0)
 	case e.Type == fs.ModeDir:
-		if err := os.MkdirAll(e.Upper, 0o755); err != nil {
+		if err := os.MkdirAll(e.Upper, 0o755); err != nil { //nolint:gosec // a directory of the session's upper layer, inside the 0700 session dir
 			return err
 		}
 		if e.Kind == review.Replaced {
@@ -550,7 +553,7 @@ func fingerprint(p string) string {
 	if err != nil {
 		return "unreadable"
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	h := sha256.New()
 	_, _ = io.Copy(h, f)
 	return fmt.Sprintf("file:%o:%s", st.Mode().Perm(), hex.EncodeToString(h.Sum(nil)))
@@ -591,7 +594,7 @@ func copyTree(from, to string) error {
 			if err != nil {
 				return err
 			}
-			return os.Symlink(t, dst)
+			return os.Symlink(t, dst) //nolint:gosec // copies run after the session stopped: nothing from the sandbox can swap a path during the walk
 		case info.Mode().IsRegular():
 			return copyFile(p, dst, info.Mode().Perm())
 		}

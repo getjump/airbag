@@ -51,7 +51,7 @@ func Deferred(name string, args []string) {
 		fmt.Fprintf(os.Stderr, "airbag: %s not found\n", name)
 		os.Exit(127)
 	}
-	err = syscall.Exec(real, argv, os.Environ())
+	err = syscall.Exec(real, argv, os.Environ()) //nolint:gosec // the shim becomes the program it stands in for, inside the sandbox
 	fmt.Fprintf(os.Stderr, "airbag: exec %s: %v\n", name, err)
 	os.Exit(126)
 }
@@ -101,7 +101,7 @@ func hashFile(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err

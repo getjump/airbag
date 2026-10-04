@@ -19,7 +19,7 @@ func testBox(t *testing.T) (*session.Session, *outbox.Box) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { box.Close() })
+	t.Cleanup(func() { _ = box.Close() })
 	return &session.Session{Meta: session.Meta{ID: "s-test", Workspace: ws}}, box
 }
 

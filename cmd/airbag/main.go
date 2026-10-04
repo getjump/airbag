@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -299,7 +300,7 @@ func cmdHook(agent, event string) {
 
 // workspace is the git toplevel, or the current directory.
 func workspace(cwd string) string {
-	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	out, err := exec.CommandContext(context.Background(), "git", "-C", cwd, "rev-parse", "--show-toplevel").Output() //nolint:gosec // git in the user's own working directory
 	if err == nil {
 		if p := strings.TrimSpace(string(out)); p != "" {
 			return p
@@ -431,7 +432,7 @@ func cmdApply(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	out := term.Safe(os.Stdout)
 	defer out.Flush()
 	return apply.Apply(s, cs, box, apply.Options{
@@ -454,7 +455,7 @@ func cmdRollback(args []string) error {
 	var done []string
 	for _, it := range listIntents(s) {
 		if it.Status == outbox.Done || it.Status == outbox.Unknown {
-			done = append(done, fmt.Sprintf("intent %s `%s` (%s)", it.ID, strings.Join(it.Argv, " "), it.Status))
+			done = append(done, fmt.Sprintf("intent %s `%s` (%s)", it.ID, strings.Join(it.Argv, " "), it.Status)) //nolint:gocritic // backquotes for display, as in apply's messages; %#q would switch to Go quoting
 		}
 	}
 	out := term.Safe(os.Stdout)
@@ -486,7 +487,7 @@ func listIntents(s *session.Session) []outbox.Intent {
 	if err != nil {
 		return nil
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	intents, _ := box.List()
 	return intents
 }
@@ -552,7 +553,10 @@ func cmdApprove(args []string) error {
 		return err
 	}
 	if id == "" {
-		asks, _ := policy.ReadAsks(s.Dir)
+		asks, err := policy.ReadAsks(s.Dir)
+		if err != nil {
+			return err
+		}
 		n := 0
 		for _, a := range asks {
 			if !a.Approved {

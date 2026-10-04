@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"unsafe"
 
@@ -68,7 +69,7 @@ func ttyFilter(abis []archIoctl) []unix.SockFilter {
 	var p []unix.SockFilter
 	var toCheck []int
 	for _, a := range abis {
-		p = append(p, ld(offArch), jeq(a.arch, 0, uint8(len(a.nrs)+2)), ld(offNr))
+		p = append(p, ld(offArch), jeq(a.arch, 0, jump(len(a.nrs)+2)), ld(offNr))
 		for _, nr := range a.nrs {
 			toCheck = append(toCheck, len(p))
 			p = append(p, jeq(nr, 0, 0))
@@ -78,7 +79,7 @@ func ttyFilter(abis []archIoctl) []unix.SockFilter {
 	p = append(p, ret(unix.SECCOMP_RET_ALLOW))
 	check := len(p)
 	for _, i := range toCheck {
-		p[i].Jt = uint8(check - i - 1)
+		p[i].Jt = jump(check - i - 1)
 	}
 	p = append(p,
 		ld(offArg1Low),
@@ -88,6 +89,16 @@ func ttyFilter(abis []archIoctl) []unix.SockFilter {
 		ret(seccompDeny),
 	)
 	return p
+}
+
+// jump is a BPF jump offset, which has 8 bits. The filter is a few
+// dozen instructions: an offset that does not fit is a bug here, and
+// wrapped it would jump somewhere else.
+func jump(n int) uint8 {
+	if n < 0 || n > math.MaxUint8 {
+		panic(fmt.Sprintf("seccomp: a jump over %d instructions", n))
+	}
+	return uint8(n)
 }
 
 // restrictAgent sets no_new_privs and installs the filter on every
@@ -104,9 +115,12 @@ func restrictAgent() error {
 	if len(p) == 1 {
 		return nil // an architecture without a filter: only no_new_privs
 	}
-	prog := unix.SockFprog{Len: uint16(len(p)), Filter: &p[0]}
+	if len(p) > unix.BPF_MAXINSNS {
+		return fmt.Errorf("seccomp: a filter of %d instructions", len(p))
+	}
+	prog := unix.SockFprog{Len: uint16(len(p)), Filter: &p[0]} //nolint:gosec // at most BPF_MAXINSNS, checked above
 	_, _, e := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER,
-		unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog)))
+		unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog))) //nolint:gosec // seccomp(2) takes a pointer to the program; KeepAlive below
 	runtime.KeepAlive(p)
 	if e != 0 {
 		return fmt.Errorf("seccomp: %w", e)

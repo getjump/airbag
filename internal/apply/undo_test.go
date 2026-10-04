@@ -3,6 +3,7 @@ package apply
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,7 +49,7 @@ func undoSession(t *testing.T) (*session.Session, *outbox.Box) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { box.Close() })
+	t.Cleanup(func() { _ = box.Close() })
 	return s, box
 }
 
@@ -132,6 +133,29 @@ func TestApplyIsAllOrNothing(t *testing.T) {
 	}
 }
 
+// A failed step says what the rollback left, without a "<nil>" for a
+// rollback that left paths but returned no error.
+func TestApplyFailedMessage(t *testing.T) {
+	step, busy := errors.New("disk full"), errors.New("busy")
+	for _, c := range []struct {
+		left int
+		rerr error
+		want string
+	}{
+		{0, nil, "nothing applied"},
+		{2, nil, "left 2 paths as they are"},
+		{1, busy, "also failed (busy)"},
+	} {
+		err := applyFailed("a.txt", "s1", step, c.left, c.rerr)
+		if msg := err.Error(); !strings.Contains(msg, c.want) || strings.Contains(msg, "nil") {
+			t.Errorf("left=%d rerr=%v: %q", c.left, c.rerr, msg)
+		}
+		if !errors.Is(err, step) || (c.rerr != nil && !errors.Is(err, c.rerr)) {
+			t.Errorf("left=%d rerr=%v: %v does not wrap its causes", c.left, c.rerr, err)
+		}
+	}
+}
+
 // A file changed after the apply is left as it is.
 func TestRollbackKeepsLaterEdits(t *testing.T) {
 	s, box := undoSession(t)
@@ -196,7 +220,7 @@ func TestCloneApplyRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	got := scan(t, s)
 	if len(got) != 3 || got["mod.txt"] != review.Modified || got["new.txt"] != review.Added || got["del.txt"] != review.Deleted {
 		t.Fatalf("scan %v", got)
@@ -252,7 +276,7 @@ func appliedReplacedDir(t *testing.T, inner string) (*session.Session, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { box.Close() })
+	t.Cleanup(func() { _ = box.Close() })
 	if got := scan(t, s); got["d"] != review.Replaced || got[filepath.Join("d", inner)] != review.Added {
 		t.Fatalf("scan %v", got)
 	}
@@ -563,7 +587,7 @@ func appliedOverlayReplacedDir(t *testing.T) (*session.Session, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { box.Close() })
+	t.Cleanup(func() { _ = box.Close() })
 	if got := scan(t, s); got["src"] != review.Replaced || got[filepath.Join("src", "new.go")] != review.Added {
 		t.Fatalf("scan %v", got)
 	}
@@ -737,7 +761,7 @@ func TestRollbackKeepsFileInReplacedDirWithoutPrevious(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	cs := mustScan(t, s)
 	if err := os.Remove(d); err != nil { // gone before the apply
 		t.Fatal(err)
@@ -837,7 +861,7 @@ func overlayReplacedDir(t *testing.T, real, agent map[string]string) (*session.S
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { box.Close() })
+	t.Cleanup(func() { _ = box.Close() })
 	return s, box, src
 }
 

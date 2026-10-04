@@ -44,7 +44,7 @@ func TestDiscardKeepsVersionsARollbackLeft(t *testing.T) {
 	if err := apply.Apply(s, cs, box, apply.Options{Yes: true, Force: true, Out: &out}); err != nil {
 		t.Fatal(err, out.String())
 	}
-	box.Close()
+	_ = box.Close()
 	if err := os.WriteFile(mod, []byte("edited after\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

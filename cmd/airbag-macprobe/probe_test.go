@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -91,7 +92,7 @@ func TestTree(t *testing.T) {
 }
 
 func TestProxy(t *testing.T) {
-	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	echo, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,8 +108,8 @@ func TestProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer px.Close()
-	c, err := net.Dial("tcp", px.l.Addr().String())
+	defer func() { _ = px.Close() }()
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", px.l.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,9 +118,10 @@ func TestProxy(t *testing.T) {
 	_, _ = io.WriteString(c, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n\r\n")
 	br := bufio.NewReader(c)
 	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("CONNECT %v %v", resp, err)
 	}
+	resp.Body.Close() // empty: the tunnel follows the header
 	_, _ = io.WriteString(c, "ping\n")
 	if l, _ := br.ReadString('\n'); l != "ping\n" {
 		t.Fatalf("echo %q", l)
@@ -140,7 +142,7 @@ func TestNFSServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	path, err := srv.Arm()
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +159,9 @@ func TestNFSServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = w.Write([]byte("new"))
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if got, _ := os.ReadFile(filepath.Join(dir, "new.txt")); string(got) != "new" {
 		t.Fatalf("export has %q", got)
 	}
@@ -256,14 +260,14 @@ func TestExportStaysInside(t *testing.T) {
 		}
 		if f, err := fs.Open(name); err == nil {
 			b, _ := io.ReadAll(f)
-			f.Close()
+			_ = f.Close()
 			if string(b) == "s3cret" {
 				t.Errorf("Open(%q) read the file outside the export", name)
 			}
 		}
 		if f, err := fs.Create(name); err == nil {
 			_, _ = f.Write([]byte("x"))
-			f.Close()
+			_ = f.Close()
 		}
 		ch := fs.(billy.Change)
 		_ = ch.Chmod(name, 0o666)
@@ -311,12 +315,25 @@ func TestPlatformTrust(t *testing.T) {
 
 // nfsMount sends srv a MOUNT for path, on a connection of its own,
 // through an NFS client library.
+// dialNFS connects an NFS client to srv. The client binds a random
+// local port of its own and, unprivileged, does not try another when
+// that one is taken, which a run of many connections can hit.
+func dialNFS(t *testing.T, srv *nfsServer) *rpc.Client {
+	t.Helper()
+	for i := 0; ; i++ {
+		c, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
+		if err == nil {
+			return c
+		}
+		if i == 10 || !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatal(err)
+		}
+	}
+}
+
 func nfsMount(t *testing.T, srv *nfsServer, path string) (*nfsc.Target, error) {
 	t.Helper()
-	c, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := dialNFS(t, srv)
 	t.Cleanup(c.Close)
 	m := nfsc.Mount{Client: c}
 	return m.Mount(path, rpc.AuthNull)
@@ -328,7 +345,7 @@ func readNFS(t *testing.T, target *nfsc.Target, name string) string {
 	if err != nil {
 		t.Fatalf("open %s: %v", name, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	b, _ := io.ReadAll(f)
 	return string(b)
 }
@@ -355,13 +372,10 @@ func TestNFSGrantsOneMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	_, err = nfsMount(t, srv, "/")
 	refused(t, "Mount(/) before Arm", err)
-	early, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	early := dialNFS(t, srv)
 	defer early.Close()
 	path, err := srv.Arm()
 	if err != nil {
@@ -405,7 +419,7 @@ func TestNFSSeal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	path, err := srv.Arm()
 	if err != nil {
 		t.Fatal(err)
@@ -418,7 +432,7 @@ func TestNFSSeal(t *testing.T) {
 	if b := readNFS(t, target, "/hello.txt"); b != "hi\n" {
 		t.Fatalf("the open client lost the export: read %q", b)
 	}
-	if c2, err := net.DialTimeout("tcp", srv.l.Addr().String(), 2*time.Second); err == nil {
+	if c2, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(t.Context(), "tcp", srv.l.Addr().String()); err == nil {
 		c2.Close()
 		t.Fatal("a new client connected after Seal")
 	}
@@ -436,9 +450,9 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	addr := srv.l.Addr().String()
-	idle, err := net.Dial("tcp", addr)
+	idle, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,13 +479,18 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 	// gives up, so a read that has not come back within 2 s counts as one
 	// that got nothing.
 	got := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		f, err := target.Open("/hello.txt")
 		if err == nil {
-			f.Close()
+			_ = f.Close()
 		}
 		got <- err
 	}()
+	// The test ends when the read has given up, so it leaves no
+	// goroutine behind.
+	defer func() { <-done }()
 	select {
 	case err := <-got:
 		if err == nil {
@@ -479,7 +498,7 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 	}
-	if c, err := net.DialTimeout("tcp", addr, 2*time.Second); err == nil {
+	if c, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(t.Context(), "tcp", addr); err == nil {
 		c.Close()
 		t.Error("a new client connected after Close")
 	}
