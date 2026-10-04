@@ -48,8 +48,8 @@ would bring it back; please read it before starting on one of those.
 one Seatbelt profile around the agent, uses an APFS clone as the branch and the
 proxy on a localhost port. It is built and unit-tested on Linux and has not run
 on a Mac yet. Run it with Claude Code or Codex and report what the page asks
-for. The probe in `cmd/airbag-macprobe` (the macos-probe PR) decides whether the
-workspace branch moves to NFS on localhost, as AgentFS does.
+for. The probe in `cmd/airbag-macprobe` decides whether the workspace branch
+moves to NFS on localhost, as AgentFS does.
 
 **Use it on real work.** [docs/evaluation.md](docs/evaluation.md) is the plan
 for telling whether airbag is worth using against a worktree with the agent's
