@@ -270,7 +270,10 @@ func SnapshotConfigs(s *session.Session) {
 		raw, err := readRegular(filepath.Join(s.Home, cf.path))
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			raw = []byte("{}") // no real file yet: every key the agent writes is its own
+			// No real file yet: every key the agent writes is its own.
+			// The base is empty (read as {}), which also records that
+			// the file was absent: one that existed is never empty here.
+			raw = nil
 		case err != nil:
 			_ = os.Remove(base) // not a readable regular file: no base, a two-way merge
 			continue
@@ -279,6 +282,25 @@ func SnapshotConfigs(s *session.Session) {
 			_ = os.WriteFile(base, raw, 0o600)
 		}
 	}
+}
+
+// RemovedOnHost reports whether path is an agent config that existed
+// when the session's last run began and is gone from the real $HOME
+// now: the host removed it, so the branch copy is not a new file.
+func RemovedOnHost(s *session.Session, path string) bool {
+	for i := range jsonConfigs {
+		cf := &jsonConfigs[i]
+		if filepath.Join(s.Home, cf.path) != path {
+			continue
+		}
+		raw, err := readRegular(basePath(s, cf))
+		if err != nil || len(raw) == 0 {
+			return false
+		}
+		_, err = os.Lstat(path)
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return false
 }
 
 func basePath(s *session.Session, cf *jsonConfig) string {
@@ -309,6 +331,11 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 	// stands in, as a two-way merge.
 	baseRaw, err := readRegular(basePath(s, cf))
 	haveBase := err == nil
+	// An empty base: the real file was absent when the run began.
+	absentAtStart := haveBase && len(baseRaw) == 0
+	if absentAtStart {
+		baseRaw = []byte("{}")
+	}
 	if haveBase {
 		if _, err := topLevel(baseRaw); err != nil {
 			return "", false
@@ -322,7 +349,7 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		}
 		out = append(out, '\n')
 		if os.WriteFile(basePath(s, cf), out, 0o600) == nil {
-			baseRaw, haveBase = out, true
+			baseRaw, haveBase, absentAtStart = out, true, false
 		}
 	}
 	for range 3 {
@@ -330,13 +357,12 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		if err != nil {
 			return "", false // a symlink or other non-regular file: leave it alone
 		}
-		if !exists && haveBase {
-			// The base has keys, so the file was there when the run
-			// began: the host removed it since. That is a host edit;
-			// write nothing back, and the branch copy waits for review.
-			if b, _ := topLevel(baseRaw); len(b) > 0 {
-				return "", false
-			}
+		if !exists && haveBase && !absentAtStart {
+			// The file was there when the run began (its base is not
+			// empty): the host removed it since. That is a host edit;
+			// write nothing back, and the branch copy waits for review
+			// (apply reports the removal, RemovedOnHost).
+			return "", false
 		}
 		realRaw := []byte("{}")
 		real := map[string]json.RawMessage{}

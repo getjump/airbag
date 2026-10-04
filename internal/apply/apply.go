@@ -66,8 +66,13 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 		exists := err == nil
 		switch c.Kind {
 		case review.Added:
-			if exists && !(c.IsDir() && st.IsDir()) {
+			switch {
+			case exists && !(c.IsDir() && st.IsDir()):
 				out = append(out, Conflict{c.Path, "created on the host during the session"})
+			case !exists && review.RemovedOnHost(s, c.Path):
+				// An agent config the host removed: the branch copy
+				// reads as new, but applying it would undo the removal.
+				out = append(out, Conflict{c.Path, "deleted on the host during the session"})
 			}
 		default:
 			if !exists {

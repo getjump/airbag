@@ -668,3 +668,45 @@ func TestWriteBackHostRemovedFile(t *testing.T) {
 		t.Fatalf("the branch copy is gone: %v", err)
 	}
 }
+
+// An empty config that existed at the start and that the host removed
+// is told apart from one that never existed: it is not recreated
+// either, and apply sees the removal.
+func TestWriteBackHostRemovedEmptyFile(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{}`)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"numStartups":1}`)
+	if err := os.Remove(realPath); err != nil {
+		t.Fatal(err)
+	}
+	WriteBackConfigs(s)
+	if _, err := os.Lstat(realPath); !os.IsNotExist(err) {
+		t.Fatalf("the write-back recreated a config the host removed (err %v)", err)
+	}
+	if !RemovedOnHost(s, realPath) {
+		t.Fatal("RemovedOnHost = false for a config the host removed")
+	}
+}
+
+// A config absent at the start is not "removed on the host".
+func TestRemovedOnHostNotForANewFile(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"mcpServers":{}}`)
+	if RemovedOnHost(s, realPath) {
+		t.Fatal("RemovedOnHost = true for a config that never existed")
+	}
+}
+
+// With no real config at the start or at write-back, the agent's
+// benign keys still create it: that is the first run, not a removal.
+func TestWriteBackCreatesConfigWhenAbsent(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"numStartups":1}`)
+	WriteBackConfigs(s)
+	if got := readCfg(t, realPath); got["numStartups"] != float64(1) {
+		t.Fatalf("real file = %v, want the agent's counter written", got)
+	}
+}

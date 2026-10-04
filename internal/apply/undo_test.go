@@ -1031,3 +1031,38 @@ func TestRollbackKeepsTempNamedFileAfterFinishedApply(t *testing.T) {
 		t.Fatalf("version of %s from before the apply = %q", d, prev)
 	}
 }
+
+// An agent config the host removed during the session reads as a new
+// file in the branch; apply reports the removal instead of bringing
+// the old settings back.
+func TestConflictConfigRemovedOnHost(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(p, data string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	real := filepath.Join(home, ".claude.json")
+	put(real, `{"mcpServers":{"x":{}}}`)
+	review.SnapshotConfigs(s)
+	put(filepath.Join(s.HomeUpper(), ".claude.json"), `{"mcpServers":{"x":{}},"numStartups":1}`)
+	if err := os.Remove(real); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, c := range Conflicts(s, mustScan(t, s)) {
+		found = found || c.Path == real
+	}
+	if !found {
+		t.Fatal("no conflict for a config the host removed during the session")
+	}
+}
