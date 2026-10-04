@@ -273,8 +273,11 @@ Linux VM setup that works today; see [docs/macos.md](docs/macos.md).
 
 ## Status
 
-Early v0. Working: sandbox, branch, proxy with allowlist, git push outbox, review,
-diff, apply with conflict check, discard. Claude Code gets airbag's hooks as
+Early v0, not yet tried by anyone outside the project. Working on Linux: sandbox,
+branch, proxy with allowlist and address checks, mirror, git push outbox, review
+(text, `--attention`, `--json`), diff, apply with conflict check (all or nothing),
+`apply --branch`, `rollback`, `run --session`, `tcp://` forwards, discard. On macOS:
+a prototype (see above). Claude Code gets airbag's hooks as
 read-only managed settings, Codex as a read-only `/etc/codex/requirements.toml`
 (unless the host has its own), so the review shows which tool call changed which
 file. Codex's own SQLite state folds into one review line.
@@ -285,11 +288,10 @@ credential-like variables) are masked in its output. The models are predictions
 for review and early refusals; scripts and programs they do not cover are
 `opaque`, and the boundary for those is the sandbox, the proxy and FUSE.
 
-Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `test/policy-e2e.sh`,
-`test/partial-e2e.sh`, `test/secret-e2e.sh`, `test/taint-e2e.sh`, `test/mirror-e2e.sh`,
-`python3 test/ctrlc.py`, `test/claude-e2e.sh` and `test/codex-e2e.sh` (the real
-Claude Code and Codex binaries against `test/mockapi`, a scripted mock of the
-Messages and Responses APIs). With a real login, follow [docs/manual-test.md](docs/manual-test.md).
+Tests: `go test ./...`, then as a regular user every `test/*e2e.sh` and
+`python3 test/ctrlc.py` (CI runs them on each push); `test/claude-e2e.sh` and
+`test/codex-e2e.sh` drive the real Claude Code and Codex binaries against
+`test/mockapi`, a scripted mock of the Messages and Responses APIs. With a real login, follow [docs/manual-test.md](docs/manual-test.md).
 
 Each session keeps one SQLite database, `effects.db`: the effect log and the
 outbox, with the history of every intent's status. Triggers make all of it
