@@ -7,10 +7,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -36,10 +39,15 @@ var Registries = Allowlist{
 
 type Allowlist []string
 
+// Allows reports whether host is allowed; an entry's port, if any, is
+// checked by AllowsPort.
 func (a Allowlist) Allows(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	for _, p := range a {
-		p = strings.ToLower(p)
+		if h, _, err := net.SplitHostPort(p); err == nil {
+			p = h
+		}
+		p = strings.ToLower(strings.Trim(p, "[]"))
 		if p == host || (strings.HasPrefix(p, "*.") && strings.HasSuffix(host, p[1:])) {
 			return true
 		}
@@ -60,6 +68,8 @@ type Proxy struct {
 
 	mu    sync.Mutex
 	flows map[*flow]bool // open tunnels and forwarded requests
+	// forbid vets the address a connection is about to use (guard.go).
+	forbid func(netip.Addr) string
 }
 
 type flow struct {
@@ -103,7 +113,7 @@ func (p *Proxy) Cut(keep Allowlist, reason string) {
 }
 
 func New(allow Allowlist, log *effects.Log) *Proxy {
-	return &Proxy{Allow: allow, Log: log, Upstream: func(u *url.URL) (*url.URL, error) {
+	return &Proxy{Allow: allow, Log: log, forbid: forbidden, Upstream: func(u *url.URL) (*url.URL, error) {
 		return http.ProxyFromEnvironment(&http.Request{URL: u})
 	}}
 }
@@ -131,6 +141,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "host not in allowlist"})
 		http.Error(w, "airbag: egress to "+host+" denied by policy (host not in allowlist)", http.StatusForbidden)
+		return
+	}
+	port := r.URL.Port()
+	if r.Method == http.MethodConnect {
+		_, port, _ = net.SplitHostPort(r.Host)
+	} else if port == "" {
+		port = "80"
+	}
+	if !slices.Contains(webPorts, port) && !p.Allow.AllowsPort(host, port) {
+		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "port not allowed"})
+		http.Error(w, "airbag: port "+port+" on "+host+" denied by policy (only 80 and 443 unless the allowlist names the port: --allow "+host+":"+port+")", http.StatusForbidden)
 		return
 	}
 	if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
@@ -163,10 +184,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.forward(w, r, host)
 }
 
+// refuse answers a connection the address guard stopped.
+func (p *Proxy) refuse(w http.ResponseWriter, target, host string, err error) bool {
+	var b *blockedAddr
+	if !errors.As(err, &b) {
+		return false
+	}
+	p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "address: " + b.why})
+	http.Error(w, "airbag: "+host+" "+b.Error(), http.StatusForbidden)
+	return true
+}
+
 func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string) {
-	up, err := p.dial(r.Host)
+	up, err := p.dial(r.Host, !p.Allow.explicitIP(host))
 	if err != nil {
-		http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
+		if !p.refuse(w, r.Host, host, err) {
+			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
+		}
 		return
 	}
 	hj, ok := w.(http.Hijacker)
@@ -186,14 +220,15 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string) {
 }
 
 // dial opens a TCP stream to hostport, through the host's upstream
-// proxy when the host environment has one.
-func (p *Proxy) dial(hostport string) (net.Conn, error) {
+// proxy when the host environment has one. The upstream proxy is the
+// user's own and is not checked; it resolves the target itself.
+func (p *Proxy) dial(hostport string, check bool) (net.Conn, error) {
 	pu, err := p.Upstream(&url.URL{Scheme: "https", Host: hostport})
 	if err != nil {
 		return nil, err
 	}
 	if pu == nil {
-		return net.DialTimeout("tcp", hostport, 15*time.Second)
+		return p.dialer(check).Dial("tcp", hostport)
 	}
 	c, err := net.DialTimeout("tcp", pu.Host, 15*time.Second)
 	if err != nil {
@@ -223,8 +258,6 @@ func (p *Proxy) dial(hostport string) (net.Conn, error) {
 	return c, nil
 }
 
-var transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
-
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -235,9 +268,21 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string) {
 	for _, h := range []string{"Proxy-Connection", "Proxy-Authorization", "Connection", "Keep-Alive", "Te", "Trailer", "Upgrade"} {
 		out.Header.Del(h)
 	}
-	resp, err := transport.RoundTrip(out)
+	pu, err := p.Upstream(out.URL)
 	if err != nil {
 		http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	tr := &http.Transport{DialContext: p.dialContext(!p.Allow.explicitIP(host))}
+	if pu != nil {
+		tr = &http.Transport{Proxy: http.ProxyURL(pu)}
+	}
+	defer tr.CloseIdleConnections()
+	resp, err := tr.RoundTrip(out)
+	if err != nil {
+		if !p.refuse(w, r.Host, host, err) {
+			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
+		}
 		return
 	}
 	defer resp.Body.Close()

@@ -68,7 +68,11 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
 - **One way out.** The sandbox has no network interface besides loopback and no
   DNS. Traffic leaves only through airbag's proxy, which allows model APIs
   (`--allow HOST` adds more) and logs every host. Package registries are reached
-  only through the mirror.
+  only through the mirror. Allowed hosts are reached on ports 80 and 443;
+  another port needs an entry that names it (`--allow git.corp:8443`). An
+  allowed name that resolves to this machine, loopback, link-local (cloud
+  metadata) or multicast is refused: the address is checked as the proxy
+  connects, so a DNS answer cannot change between check and use.
 - **A package mirror.** Go, npm, pip, uv and yarn go through
   `http://airbag.mirror`, a read-only caching mirror of proxy.golang.org, npm and
   PyPI. Review lists every package and version the agent pulled; artifacts are

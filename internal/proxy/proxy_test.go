@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -71,7 +72,7 @@ func TestConnectTunnel(t *testing.T) {
 	}()
 
 	log, _ := newLog(t)
-	p := New(Allowlist{"127.0.0.1"}, log)
+	p := New(Allowlist{"127.0.0.1:*"}, log)
 	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -115,8 +116,9 @@ func TestCutOnTaint(t *testing.T) {
 		}
 	}()
 	log, path := newLog(t)
-	p := New(Allowlist{"127.0.0.1", "localhost"}, log)
+	p := New(Allowlist{"127.0.0.1:*", "localhost:*"}, log)
 	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	p.forbid = func(netip.Addr) string { return "" } // localhost stands in for a remote host
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -165,5 +167,100 @@ func TestCutOnTaint(t *testing.T) {
 	}
 	if len(cuts) != 1 || !strings.HasPrefix(cuts[0], "127.0.0.1:") || !strings.HasSuffix(cuts[0], "secret-taint") {
 		t.Fatalf("cut effects = %v", cuts)
+	}
+}
+
+func TestForbidden(t *testing.T) {
+	for addr, bad := range map[string]bool{
+		"127.0.0.1": true, "127.1.2.3": true, "::1": true, "::ffff:127.0.0.1": true,
+		"0.0.0.0": true, "0.1.2.3": true, "::": true,
+		"169.254.169.254": true, "fe80::1": true, "fd00:ec2::254": true, "100.100.100.200": true,
+		"224.0.0.1": true, "255.255.255.255": true, "64:ff9b::7f00:1": true,
+		"93.184.215.14": false, "10.1.2.3": false, "192.168.77.1": false, "2606:4700::1111": false,
+	} {
+		if got := forbidden(netip.MustParseAddr(addr)) != ""; got != bad {
+			t.Errorf("forbidden(%s) = %v, want %v", addr, got, bad)
+		}
+	}
+}
+
+func TestAllowsPort(t *testing.T) {
+	a := Allowlist{"example.com", "*.corp.test:8443", "db.test:*", "[::1]:5432"}
+	for _, c := range []struct {
+		host, port string
+		want       bool
+	}{
+		{"example.com", "443", true}, {"example.com", "80", true}, {"example.com", "8443", false},
+		{"git.corp.test", "8443", true}, {"git.corp.test", "443", true}, {"git.corp.test", "22", false},
+		{"db.test", "5432", true}, {"::1", "5432", true}, {"other.test", "443", false},
+	} {
+		if got := a.AllowsPort(c.host, c.port); got != c.want {
+			t.Errorf("AllowsPort(%s, %s) = %v, want %v", c.host, c.port, got, c.want)
+		}
+	}
+	if !a.explicitIP("::1") || a.explicitIP("example.com") || a.explicitIP("127.0.0.1") {
+		t.Error("explicitIP")
+	}
+}
+
+// A name allowed by the user that resolves to the host itself is
+// refused at connect time, and a port beyond 80 and 443 needs an entry
+// that names it.
+func TestGuard(t *testing.T) {
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			c, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	log, path := newLog(t)
+	p := New(Allowlist{"localhost:*", "example.test"}, log)
+	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() { _ = p.Serve(l) }()
+
+	connect := func(target string) (int, string) {
+		c, err := net.Dial("tcp", l.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		_, _ = c.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+	_, port, _ := net.SplitHostPort(echo.Addr().String())
+	if code, body := connect("localhost:" + port); code != 403 || !strings.Contains(body, "loopback") {
+		t.Errorf("localhost: %d %q", code, body)
+	}
+	if code, body := connect("example.test:8443"); code != 403 || !strings.Contains(body, "port 8443") {
+		t.Errorf("example.test:8443: %d %q", code, body)
+	}
+	log.Close()
+	effs, _ := effects.Read(path)
+	var reasons []string
+	for _, e := range effs {
+		if e.Verdict == "deny" {
+			reasons = append(reasons, e.Reason)
+		}
+	}
+	if strings.Join(reasons, ",") != "address: loopback,port not allowed" {
+		t.Errorf("deny reasons = %v", reasons)
 	}
 }
