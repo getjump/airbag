@@ -2,11 +2,13 @@ package apply
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -220,5 +222,788 @@ func TestCloneApplyRollback(t *testing.T) {
 	}
 	if back := scan(t, s); len(back) != 3 {
 		t.Fatalf("changes not back after rollback: %v", back)
+	}
+}
+
+// appliedReplacedDir lays out a clone session in which the agent
+// replaced the user's file d with a directory holding the file inner
+// (a path inside d), and applies it. It returns the real path of d.
+func appliedReplacedDir(t *testing.T, inner string) (*session.Session, string) {
+	t.Helper()
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	for p, data := range map[string]string{
+		filepath.Join(ws, "d"):                  "user file\n",
+		filepath.Join(s.CloneDir(), "d", inner): "agent\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { box.Close() })
+	if got := scan(t, s); got["d"] != review.Replaced || got[filepath.Join("d", inner)] != review.Added {
+		t.Fatalf("scan %v", got)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	d := filepath.Join(ws, "d")
+	if read(t, filepath.Join(d, inner)) != "agent\n" {
+		t.Fatal("replaced directory not applied")
+	}
+	return s, d
+}
+
+// keptVersion returns the version from before the apply that the last
+// generation of s still holds for path, or fails.
+func keptVersion(t *testing.T, s *session.Session, path string) (*generation, string) {
+	t.Helper()
+	gs, err := listGenerations(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gs) == 0 {
+		t.Fatalf("no generation left: the version of %s from before the apply is gone", path)
+	}
+	g, err := loadGeneration(gs[len(gs)-1].dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range g.Entries {
+		if e.Path == path {
+			if e.Saved == "" {
+				t.Fatalf("%s: entry kept without its previous version", path)
+			}
+			return g, read(t, e.Saved)
+		}
+	}
+	t.Fatalf("generation %s does not keep %s: %+v", g.dir, path, g.Entries)
+	return nil, ""
+}
+
+// A file the user adds inside a replaced directory after the apply
+// survives the rollback; the directory stays whole, the agent's file in
+// it included, with the user's file from before the apply kept.
+func TestRollbackKeepsFileAddedToReplacedDir(t *testing.T) {
+	s, d := appliedReplacedDir(t, "inner.txt")
+	added := filepath.Join(d, "user.txt")
+	if err := os.WriteFile(added, []byte("added after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, added); got != "added after\n" {
+		t.Fatalf("rollback lost a file added after the apply: %s = %q\n%s", added, got, out.String())
+	}
+	if got := read(t, filepath.Join(d, "inner.txt")); got != "agent\n" {
+		t.Errorf("the directory is not left as is: the agent's inner.txt = %q\n%s", got, out.String())
+	}
+	if want := "left as is (holds files added or changed after the apply): " + d; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q: %s", want, out.String())
+	}
+	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+		t.Fatalf("version of %s from before the apply = %q", d, prev)
+	}
+}
+
+// A file inside a replaced directory that the rollback leaves, because
+// the user edited it after the apply, is not deleted when the rollback
+// reaches the directory.
+func TestRollbackKeepsLaterEditInsideReplacedDir(t *testing.T) {
+	s, d := appliedReplacedDir(t, "inner.txt")
+	inner := filepath.Join(d, "inner.txt")
+	if err := os.WriteFile(inner, []byte("edited after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, inner); got != "edited after\n" {
+		t.Fatalf("rollback lost a file it had left: %s = %q\n%s", inner, got, out.String())
+	}
+	for _, want := range []string{
+		"left as is (changed after the apply): " + inner,
+		"left as is (holds files added or changed after the apply): " + d,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q: %s", want, out.String())
+		}
+	}
+	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+		t.Fatalf("version of %s from before the apply = %q", d, prev)
+	}
+}
+
+// A replaced directory holding a directory the apply created inside it
+// is restored in one rollback: once that directory is gone (it is
+// empty), so is the replaced one, and the user's file is back.
+func TestRollbackRestoresReplacedDirWithSubdir(t *testing.T) {
+	s, d := appliedReplacedDir(t, filepath.Join("sub", "inner.txt"))
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, d); got != "user file\n" {
+		t.Fatalf("%s not restored: %q\n%s", d, got, out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(d, "sub")); err == nil {
+		t.Errorf("the agent's directory %s/sub was not rolled back", d)
+	}
+	if strings.Contains(out.String(), "left as is") {
+		t.Errorf("rollback left paths although nothing changed after the apply:\n%s", out.String())
+	}
+	if gs, err := listGenerations(s); err != nil || len(gs) != 0 {
+		t.Fatalf("rollback not complete: generations %v (%v)\n%s", gs, err, out.String())
+	}
+}
+
+// A file the user puts after the apply where the apply had made a
+// directory, inside a replaced directory, survives the rollback; the
+// replaced directory stays, with the user's file from before the apply
+// kept.
+func TestRollbackKeepsFileInPlaceOfMadeDir(t *testing.T) {
+	s, d := appliedReplacedDir(t, filepath.Join("sub", "inner.txt"))
+	sub := filepath.Join(d, "sub")
+	if err := os.RemoveAll(sub); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sub, []byte("user's own\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, sub); got != "user's own\n" {
+		t.Fatalf("rollback lost a file the user put in place of a directory it made: %s = %q\n%s", sub, got, out.String())
+	}
+	if want := "left as is (holds files added or changed after the apply): " + d; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q: %s", want, out.String())
+	}
+	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+		t.Fatalf("version of %s from before the apply = %q", d, prev)
+	}
+}
+
+// A partial rollback keeps the version from before the apply of each
+// path it left, and a second rollback neither fails nor loses it.
+func TestPartialRollbackKeepsPreviousVersion(t *testing.T) {
+	s, box := undoSession(t)
+	ws := s.Workspace
+	mod := filepath.Join(ws, "mod.txt")
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if err := os.WriteFile(mod, []byte("edited after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for round := 1; round <= 2; round++ {
+		out.Reset()
+		if err := Rollback(s, nil, &out); err != nil {
+			t.Fatalf("rollback %d: %v\n%s", round, err, out.String())
+		}
+		if got := read(t, mod); got != "edited after\n" {
+			t.Fatalf("rollback %d overwrote a later edit: %q", round, got)
+		}
+		g, prev := keptVersion(t, s, mod)
+		if prev != "user\n" {
+			t.Fatalf("rollback %d: version of mod.txt from before the apply = %q", round, prev)
+		}
+		var journal struct {
+			Partial bool `json:"partial"`
+		}
+		if b, err := os.ReadFile(filepath.Join(g.dir, "journal.json")); err != nil || json.Unmarshal(b, &journal) != nil {
+			t.Fatalf("rollback %d: read the journal: %v", round, err)
+		}
+		if !journal.Partial || len(g.Entries) != 1 {
+			t.Fatalf("rollback %d: generation not trimmed to the path left: partial=%v entries=%+v", round, journal.Partial, g.Entries)
+		}
+		saved := g.Entries[0].Saved
+		if !strings.HasPrefix(saved, filepath.Join(g.dir, "saved")+string(filepath.Separator)) {
+			t.Errorf("rollback %d: previous version kept outside the generation: %s", round, saved)
+		}
+		if want := "its version from before the apply is kept at " + saved; !strings.Contains(out.String(), want) {
+			t.Errorf("rollback %d: output lacks %q: %s", round, want, out.String())
+		}
+	}
+	// The rest was rolled back by the first round.
+	if read(t, filepath.Join(ws, "del.txt")) != "keep me\n" {
+		t.Fatal("del.txt not restored")
+	}
+	if _, err := os.Stat(filepath.Join(ws, "sub")); err == nil {
+		t.Fatal("sub/ left behind")
+	}
+}
+
+// A directory the apply made inside a replaced directory, which the
+// first rollback cannot remove because the user put a file in it, is
+// still known as the apply's: once the user removes that file, a second
+// rollback takes it out and restores the user's original.
+func TestRollbackRetryRestoresReplacedDirAfterUserCleansSubdir(t *testing.T) {
+	s, d := appliedReplacedDir(t, filepath.Join("sub", "inner.txt"))
+	added := filepath.Join(d, "sub", "user.txt")
+	if err := os.WriteFile(added, []byte("added after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, added); got != "added after\n" {
+		t.Fatalf("rollback lost a file added after the apply: %s = %q\n%s", added, got, out.String())
+	}
+	if want := "left as is (holds files added or changed after the apply): " + d; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q: %s", want, out.String())
+	}
+	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+		t.Fatalf("version of %s from before the apply = %q", d, prev)
+	}
+	if err := os.Remove(added); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, d); got != "user file\n" {
+		t.Fatalf("second rollback did not restore %s: %q\n%s", d, got, out.String())
+	}
+	if gs, err := listGenerations(s); err != nil || len(gs) != 0 {
+		t.Fatalf("second rollback not complete: generations %v (%v)\n%s", gs, err, out.String())
+	}
+}
+
+// A directory the apply made, which a rollback cannot remove because
+// the user put a file in it, is still known as the apply's while the
+// generation is kept for another path: once the user removes the file,
+// the next rollback takes the directory out.
+func TestRollbackRetryRemovesMadeDirAfterUserCleansIt(t *testing.T) {
+	s, box := undoSession(t)
+	ws := s.Workspace
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	// mod.txt keeps the generation; sub/ is a directory the apply made.
+	if err := os.WriteFile(filepath.Join(ws, "mod.txt"), []byte("edited after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	added := filepath.Join(ws, "sub", "user.txt")
+	if err := os.WriteFile(added, []byte("added after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, added); got != "added after\n" {
+		t.Fatalf("rollback lost a file added after the apply: %q\n%s", got, out.String())
+	}
+	if err := os.Remove(added); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "sub")); err == nil {
+		t.Fatalf("second rollback left the directory the apply made, now empty:\n%s", out.String())
+	}
+	if got := read(t, filepath.Join(ws, "mod.txt")); got != "edited after\n" {
+		t.Fatalf("rollback overwrote a later edit: %q", got)
+	}
+}
+
+// appliedOverlayReplacedDir lays out an overlay session in which the
+// agent replaced the user's directory src (a.go, b.go) with one holding
+// new.go, as `rm -rf src` and a new src would, and applies it. It
+// returns the real path of src.
+func appliedOverlayReplacedDir(t *testing.T) (*session.Session, string) {
+	t.Helper()
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	for p, data := range map[string]string{
+		filepath.Join(ws, "src", "a.go"):            "package a\n",
+		filepath.Join(ws, "src", "b.go"):            "package b\n",
+		filepath.Join(s.WSUpper(), "src", "new.go"): "package new\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := unix.Setxattr(filepath.Join(s.WSUpper(), "src"), "user.overlay.opaque", []byte("y"), 0); err != nil {
+		t.Skipf("cannot mark a directory opaque here: %v", err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { box.Close() })
+	if got := scan(t, s); got["src"] != review.Replaced || got[filepath.Join("src", "new.go")] != review.Added {
+		t.Fatalf("scan %v", got)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	src := filepath.Join(ws, "src")
+	if read(t, filepath.Join(src, "new.go")) != "package new\n" {
+		t.Fatal("replaced directory not applied")
+	}
+	return s, src
+}
+
+// A file a tool drops into a replaced directory after the apply keeps
+// the directory as the apply left it: the agent's files stay next to
+// it, and the user's directory from before the apply is kept whole.
+// Once the file is gone, the next rollback restores the user's version.
+func TestRollbackLeavesReplacedDirWhole(t *testing.T) {
+	s, src := appliedOverlayReplacedDir(t)
+	pyc := filepath.Join(src, "__pycache__", "x.pyc")
+	if err := os.MkdirAll(filepath.Dir(pyc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pyc, []byte("cache\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, filepath.Join(src, "new.go")); got != "package new\n" {
+		t.Fatalf("rollback said it left %s as is, but took the agent's new.go out: %q\n%s", src, got, out.String())
+	}
+	if got := read(t, pyc); got != "cache\n" {
+		t.Fatalf("rollback lost a file added after the apply: %q", got)
+	}
+	if want := "left as is (holds files added or changed after the apply): " + src; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q: %s", want, out.String())
+	}
+	g, _ := keptVersion(t, s, src)
+	for _, e := range g.Entries {
+		if e.Path == src {
+			if read(t, filepath.Join(e.Saved, "a.go")) != "package a\n" || read(t, filepath.Join(e.Saved, "b.go")) != "package b\n" {
+				t.Fatalf("the user's src from before the apply is not kept whole at %s", e.Saved)
+			}
+		}
+	}
+	if err := os.RemoveAll(filepath.Dir(pyc)); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if read(t, filepath.Join(src, "a.go")) != "package a\n" || read(t, filepath.Join(src, "b.go")) != "package b\n" {
+		t.Fatalf("second rollback did not restore the user's src:\n%s", out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(src, "new.go")); err == nil {
+		t.Errorf("the agent's new.go is still in the restored src")
+	}
+	if gs, err := listGenerations(s); err != nil || len(gs) != 0 {
+		t.Fatalf("second rollback not complete: generations %v (%v)\n%s", gs, err, out.String())
+	}
+}
+
+// crashAt turns the last generation of s into one that stopped while
+// copying path: the step is unfinished, path is not there, and the
+// temp file copyFile was writing is left next to it.
+func crashAt(t *testing.T, s *session.Session, path string) string {
+	t.Helper()
+	stopAt(t, s, path)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(filepath.Dir(path), ".airbag-2918374650")
+	if err := os.WriteFile(tmp, []byte("half of the agent's"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return tmp
+}
+
+// stopAt turns the last generation of s into one that stopped at the
+// step for path: the journal does not record it as done.
+func stopAt(t *testing.T, s *session.Session, path string) {
+	t.Helper()
+	gs, err := listGenerations(s)
+	if err != nil || len(gs) == 0 {
+		t.Fatal("no generation", err)
+	}
+	g, err := loadGeneration(gs[len(gs)-1].dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Complete = false
+	for i := range g.Entries {
+		if g.Entries[i].Path == path {
+			g.Entries[i].After = ""
+		}
+	}
+	if err := g.save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A temp file an apply that was stopped left inside a replaced
+// directory is the apply's, not the user's: rollback removes it and
+// restores the user's version.
+func TestRollbackRemovesApplyTempInReplacedDir(t *testing.T) {
+	s, d := appliedReplacedDir(t, filepath.Join("sub", "inner.txt"))
+	crashAt(t, s, filepath.Join(d, "sub", "inner.txt"))
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, d); got != "user file\n" {
+		t.Fatalf("%s not restored: %q\n%s", d, got, out.String())
+	}
+	if gs, err := listGenerations(s); err != nil || len(gs) != 0 {
+		t.Fatalf("rollback not complete: generations %v (%v)\n%s", gs, err, out.String())
+	}
+}
+
+// Only a temp file named as copyFile names them, in the directory of a
+// copy step that did not finish, counts as the apply's; a user's file
+// with a similar name keeps the directory as it is.
+func TestRollbackKeepsUserFileNamedLikeTemp(t *testing.T) {
+	for _, name := range []string{".airbag-notes", filepath.Join("own", ".airbag-123")} {
+		s, d := appliedReplacedDir(t, "inner.txt")
+		p := filepath.Join(d, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("mine\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := Rollback(s, nil, &out); err != nil {
+			t.Fatal(err, out.String())
+		}
+		if got := read(t, p); got != "mine\n" {
+			t.Fatalf("rollback removed the user's %s: %q\n%s", name, got, out.String())
+		}
+		if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+			t.Fatalf("version of %s from before the apply = %q", d, prev)
+		}
+	}
+}
+
+// A replaced directory with no previous version (what it replaced was
+// gone by the time of the apply) is removed by rollback only once it is
+// empty: a file the user adds to it afterwards survives.
+func TestRollbackKeepsFileInReplacedDirWithoutPrevious(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	d := filepath.Join(ws, "d")
+	for p, data := range map[string]string{d: "user file\n", filepath.Join(s.CloneDir(), "d", "inner.txt"): "agent\n"} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+	cs := mustScan(t, s)
+	if err := os.Remove(d); err != nil { // gone before the apply
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, cs, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	g, _ := loadGeneration(filepath.Join(s.Dir, "undo", "1"))
+	if len(g.Entries) == 0 || g.Entries[0].Path != d || g.Entries[0].Kind != review.Replaced || g.Entries[0].Saved != "" {
+		t.Fatalf("setup: want a replaced %s with no previous version: %+v", d, g.Entries)
+	}
+	added := filepath.Join(d, "user.txt")
+	if err := os.WriteFile(added, []byte("added after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, added); got != "added after\n" {
+		t.Fatalf("rollback lost a file added after the apply: %s = %q\n%s", added, got, out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(d, "inner.txt")); err == nil {
+		t.Errorf("the agent's inner.txt was not rolled back")
+	}
+}
+
+// A step that did not finish and had no previous version to move away
+// removes what is at its path only when that is the agent's version: a
+// file the user wrote there after the apply stopped survives.
+func TestRollbackKeepsUserFileAtUnfinishedStep(t *testing.T) {
+	for _, tc := range []struct {
+		data string
+		kept bool
+	}{{"the user's own\n", true}, {"new\n", false}} {
+		s, box := undoSession(t)
+		var out bytes.Buffer
+		if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+			t.Fatal(err, out.String())
+		}
+		p := filepath.Join(s.Workspace, "sub", "new.txt")
+		stopAt(t, s, p)
+		// A stopped apply never got to forget the agent's version.
+		if err := os.WriteFile(filepath.Join(s.WSUpper(), "sub", "new.txt"), []byte("new\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(tc.data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out.Reset()
+		if err := Rollback(s, nil, &out); err != nil {
+			t.Fatal(err, out.String())
+		}
+		got := read(t, p)
+		switch {
+		case tc.kept && got != tc.data:
+			t.Fatalf("rollback lost a file the user wrote after the apply stopped: %q\n%s", got, out.String())
+		case !tc.kept && got == tc.data:
+			t.Fatalf("rollback left the agent's version of an unfinished step:\n%s", out.String())
+		}
+	}
+}
+
+// overlayReplacedDir lays out an overlay session in which the agent
+// replaced the user's directory src, holding the files real, with one
+// holding the files agent; both also hold a symlink link to a.go. It
+// returns the real path of src.
+func overlayReplacedDir(t *testing.T, real, agent map[string]string) (*session.Session, *outbox.Box, string) {
+	t.Helper()
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	src, up := filepath.Join(ws, "src"), filepath.Join(s.WSUpper(), "src")
+	for dir, files := range map[string]map[string]string{src: real, up: agent} {
+		for rel, data := range files {
+			p := filepath.Join(dir, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink("a.go", filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := unix.Setxattr(up, "user.overlay.opaque", []byte("y"), 0); err != nil {
+		t.Skipf("cannot mark a directory opaque here: %v", err)
+	}
+	s.Baseline = time.Now() // the real files are from before the session
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { box.Close() })
+	return s, box, src
+}
+
+// When the agent replaces a directory (opaque in the upper layer), the
+// apply writes all of the agent's version, files the same as before
+// included, and nothing of the user's: the directory is what the agent
+// saw. Rollback brings the user's back.
+func TestApplyWritesAllOfReplacedDir(t *testing.T) {
+	s, box, src := overlayReplacedDir(t, map[string]string{
+		"a.go":     "package a\n",
+		"b.go":     "package b\n",
+		"sub/c.go": "package c\n",
+	}, map[string]string{
+		"a.go":     "package a\n", // the same as before
+		"new.go":   "package new\n",
+		"sub/c.go": "package c\n", // the same, in a directory not marked
+	})
+	if cf := Conflicts(s, mustScan(t, s)); len(cf) > 0 {
+		t.Fatalf("conflicts although nothing changed on the host: %+v", cf)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	for rel, want := range map[string]string{"a.go": "package a\n", "new.go": "package new\n", "sub/c.go": "package c\n"} {
+		if got := read(t, filepath.Join(src, rel)); got != want {
+			t.Errorf("after the apply src/%s = %q, want the agent's %q", rel, got, want)
+		}
+	}
+	if l, err := os.Readlink(filepath.Join(src, "link")); err != nil || l != "a.go" {
+		t.Errorf("after the apply src/link = %q (%v), want the agent's link to a.go", l, err)
+	}
+	if _, err := os.Lstat(filepath.Join(src, "b.go")); err == nil {
+		t.Errorf("src/b.go, which the agent's src does not have, is still there")
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	for rel, want := range map[string]string{"a.go": "package a\n", "b.go": "package b\n", "sub/c.go": "package c\n"} {
+		if got := read(t, filepath.Join(src, rel)); got != want {
+			t.Errorf("after the rollback src/%s = %q, want the user's %q\n%s", rel, got, want, out.String())
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(src, "new.go")); err == nil {
+		t.Errorf("src/new.go still there after the rollback")
+	}
+	if gs, err := listGenerations(s); err != nil || len(gs) != 0 {
+		t.Fatalf("rollback not complete: generations %v (%v)\n%s", gs, err, out.String())
+	}
+}
+
+// A file of the agent's that the user removed after the apply, from a
+// replaced directory, is not kept by rollback as "changed": nothing was
+// there before the apply either. Kept, it would match the user's own
+// file, the same as the agent's, once the directory is restored, and a
+// later rollback would remove that file.
+func TestRollbackKeepsUserFileSameAsAgentsRemovedOne(t *testing.T) {
+	s, box, src := overlayReplacedDir(t,
+		map[string]string{"a.go": "package a\n", "b.go": "package b\n"},
+		map[string]string{"a.go": "package a\n", "new.go": "package new\n"})
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	a := filepath.Join(src, "a.go")
+	if err := os.Remove(a); err != nil {
+		t.Fatal(err)
+	}
+	for round := 1; round <= 2; round++ {
+		out.Reset()
+		if err := Rollback(s, nil, &out); err != nil && round == 1 {
+			t.Fatal(err, out.String())
+		}
+		if got := read(t, a); got != "package a\n" {
+			t.Fatalf("after rollback %d the user's src/a.go = %q\n%s", round, got, out.String())
+		}
+	}
+	if gs, err := listGenerations(s); err != nil || len(gs) != 0 {
+		t.Fatalf("rollback not complete: generations %v (%v)", gs, err)
+	}
+}
+
+// Temp files are removed only from a replaced directory checked to hold
+// nothing but the apply's: when its previous version is gone from the
+// session, a user's file that looks like one stays.
+func TestRollbackRemovesTempsOnlyFromCheckedDir(t *testing.T) {
+	s, d := appliedReplacedDir(t, "inner.txt")
+	g, _ := keptVersion(t, s, d)
+	if err := os.RemoveAll(g.Entries[0].Saved); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(d, ".airbag-123")
+	if err := os.WriteFile(p, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, p); got != "mine\n" {
+		t.Fatalf("rollback removed the user's %s: %q\n%s", p, got, out.String())
+	}
+}
+
+// After a rollback, a directory the agent replaced is opaque again in
+// the session, though the paths inside it are given back first: review
+// shows the replacement, and applying it again gives the agent's
+// version only.
+func TestRollbackKeepsReplacedDirOpaque(t *testing.T) {
+	s, box, src := overlayReplacedDir(t,
+		map[string]string{"a.go": "package a\n", "b.go": "package b\n"},
+		map[string]string{"a.go": "package a\n", "new.go": "package new\n"})
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if read(t, filepath.Join(src, "b.go")) != "package b\n" {
+		t.Fatalf("rollback did not restore the user's src:\n%s", out.String())
+	}
+	up := filepath.Join(s.WSUpper(), "src")
+	buf := make([]byte, 8)
+	if n, err := unix.Getxattr(up, "user.overlay.opaque", buf); err != nil || n == 0 || buf[0] != 'y' {
+		t.Errorf("%s is not opaque after the rollback (%v): the session would merge it with the user's src", up, err)
+	}
+	if got := scan(t, s); got["src"] != review.Replaced || got[filepath.Join("src", "new.go")] != review.Added {
+		t.Fatalf("review does not show the replacement again: %v", got)
+	}
+	out.Reset()
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	for rel, want := range map[string]string{"a.go": "package a\n", "new.go": "package new\n"} {
+		if got := read(t, filepath.Join(src, rel)); got != want {
+			t.Errorf("after the second apply src/%s = %q, want the agent's %q", rel, got, want)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(src, "b.go")); err == nil {
+		t.Errorf("the second apply kept src/b.go, which the agent's src does not have")
+	}
+}
+
+// A finished apply leaves no temp file: after one, a file named like
+// copyFile's temp files in a replaced directory the apply copied into
+// is the user's. Rollback keeps it and leaves the directory as it is.
+func TestRollbackKeepsTempNamedFileAfterFinishedApply(t *testing.T) {
+	s, d := appliedReplacedDir(t, "inner.txt")
+	p := filepath.Join(d, ".airbag-123")
+	if err := os.WriteFile(p, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if got := read(t, p); got != "mine\n" {
+		t.Fatalf("rollback removed the user's %s: %q\n%s", p, got, out.String())
+	}
+	if want := "left as is (holds files added or changed after the apply): " + d; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q: %s", want, out.String())
+	}
+	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
+		t.Fatalf("version of %s from before the apply = %q", d, prev)
 	}
 }

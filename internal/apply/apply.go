@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -49,8 +50,17 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 	if !s.Baseline.IsZero() {
 		since = s.Baseline
 	}
+	var replaced []string
+	for _, c := range cs {
+		if c.Kind == review.Replaced {
+			replaced = append(replaced, c.Path)
+		}
+	}
 	var out []Conflict
 	for _, c := range cs {
+		if slices.ContainsFunc(replaced, func(r string) bool { return c.Path != r && within(c.Path, r) }) {
+			continue // the check of the replaced directory covers what was in it
+		}
 		st, err := os.Lstat(c.Path)
 		exists := err == nil
 		switch c.Kind {
