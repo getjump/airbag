@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"unsafe"
 
@@ -282,7 +283,7 @@ func (b *bpfBuilder) ld(off uint32) {
 // instruction, otherwise it skips it. Paired with jmp it refuses or
 // routes one syscall number in two instructions with no distance limit.
 func (b *bpfBuilder) jeqNext(k uint32) {
-	b.emit(unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: k, Jt: 0, Jf: 1})
+	b.emit(unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: k, Jt: jump(0), Jf: jump(1)})
 }
 
 // jeqAllow tests A == k; on a match it jumps to the allow label.
@@ -333,7 +334,7 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 		b.label(fmt.Sprintf("abi%d", i))
 		b.ld(offArch)
 		// If this arch matches, enter the block; otherwise jump on.
-		b.emit(unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: a.audit, Jt: 1, Jf: 0})
+		b.emit(unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: a.audit, Jt: jump(1), Jf: jump(0)})
 		b.jmp(next)
 		b.ld(offNr)
 
@@ -403,6 +404,17 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 	return b.resolve()
 }
 
+// jump is a conditional BPF jump offset, which has 8 bits. The builder
+// keeps those at 0 or 1 and makes every longer jump a BPF_JA: an offset
+// that does not fit is a bug here, and wrapped it would jump somewhere
+// else.
+func jump(n int) uint8 {
+	if n < 0 || n > math.MaxUint8 {
+		panic(fmt.Sprintf("seccomp: a jump over %d instructions", n))
+	}
+	return uint8(n)
+}
+
 // restrictAgent sets no_new_privs and installs the filter on every
 // thread of this process; the agent inherits both across fork and execve.
 // TSYNC also copies no_new_privs to the other threads, so one prctl on
@@ -418,12 +430,12 @@ func restrictAgent(strict bool) error {
 		return nil // an architecture we have no numbers for: only no_new_privs
 	}
 	p := agentFilter(abis, strict)
-	if len(p) > 4096 {
-		return fmt.Errorf("seccomp program too long: %d instructions", len(p))
+	if len(p) > unix.BPF_MAXINSNS {
+		return fmt.Errorf("seccomp: a filter of %d instructions", len(p))
 	}
-	prog := unix.SockFprog{Len: uint16(len(p)), Filter: &p[0]}
+	prog := unix.SockFprog{Len: uint16(len(p)), Filter: &p[0]} //nolint:gosec // at most BPF_MAXINSNS, checked above
 	_, _, e := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER,
-		unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog)))
+		unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog))) //nolint:gosec // seccomp(2) takes a pointer to the program; KeepAlive below
 	runtime.KeepAlive(p)
 	if e != 0 {
 		return fmt.Errorf("seccomp: %w", e)

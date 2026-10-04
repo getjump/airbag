@@ -80,7 +80,7 @@ func (b Binding) Validate() error {
 			return fmt.Errorf("%s: source %q", b.Name, b.Source)
 		}
 	default:
-		return fmt.Errorf("%s: source %q: want env:, file: or command:", b.Name, b.Source)
+		return fmt.Errorf("%s: source %q: want env:NAME, file:PATH or command:PROGRAM ARGS", b.Name, b.Source)
 	}
 	for _, e := range b.Env {
 		if !envRe.MatchString(e) {
@@ -128,11 +128,11 @@ func Resolve(source, home string) (string, error) {
 		argv := strings.Fields(rest)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // a command: source from the user's own config (credentials are user-only)
 		cmd.Stdin = nil
 		out, err := cmd.Output()
 		if err != nil {
-			return "", fmt.Errorf("%s: %v", rest, err)
+			return "", fmt.Errorf("%s: %w", rest, err)
 		}
 		v = string(out)
 	default:

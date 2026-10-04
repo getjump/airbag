@@ -1,6 +1,9 @@
+//go:build linux
+
 package sandbox
 
 import (
+	"context"
 	"io"
 	"net"
 	"strconv"
@@ -65,7 +68,7 @@ func (fw *forwarder) handle(c net.Conn) {
 		deny(d.Rule)
 		return
 	}
-	up, err := net.DialTimeout("tcp", fw.target(), 15*time.Second)
+	up, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(context.Background(), "tcp", fw.target())
 	if err != nil {
 		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "allow", Reason: "unreachable: " + err.Error()})
 		return

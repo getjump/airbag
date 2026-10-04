@@ -79,7 +79,13 @@ func (s *Server) intent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Log.Add(effects.Effect{Kind: "intent." + in.Kind, Target: fmt.Sprint(in.Argv), Verdict: "defer", Reason: in.ID})
-	_ = json.NewEncoder(w).Encode(in)
+	writeJSON(w, in)
+}
+
+// writeJSON answers with v. Once the status is out, a failed write is
+// the client's to see, as a short body.
+func writeJSON(w http.ResponseWriter, v any) {
+	_ = json.NewEncoder(w).Encode(v) //nolint:errchkjson // airbag's own types: strings, slices and time.Now()
 }
 
 // DeferReply answers a shim in front of a program a `defer:` entry
@@ -101,7 +107,7 @@ func (s *Server) deferCmd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	reply := func(d DeferReply) { _ = json.NewEncoder(w).Encode(d) }
+	reply := func(d DeferReply) { writeJSON(w, d) }
 	pattern := ""
 	if s.Gate != nil {
 		pattern = s.Gate.Defers(in.Argv)
@@ -213,7 +219,7 @@ func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 			for _, c := range cmds {
 				if d, id := s.judge(c); d.Verdict != policy.Allow {
 					s.Log.Add(effects.Effect{Kind: "tool.call", Target: p.ToolName + ": " + summary, Verdict: d.Verdict, Reason: d.Rule})
-					_ = json.NewEncoder(w).Encode(map[string]any{"hookSpecificOutput": map[string]any{
+					writeJSON(w, map[string]any{"hookSpecificOutput": map[string]any{
 						"hookEventName":            "PreToolUse",
 						"permissionDecision":       "deny",
 						"permissionDecisionReason": policy.Explain(d, id),
@@ -252,8 +258,11 @@ func (s *Server) taint(w http.ResponseWriter, r *http.Request) {
 // ReportTaint is called from the sandbox init process. It returns once
 // the host has recorded the taint.
 func ReportTaint(t Taint) error {
-	body, _ := json.Marshal(t)
-	resp, err := client(5*time.Second).Post("http://airbag/taint", "application/json", bytes.NewReader(body))
+	body, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	resp, err := post(5*time.Second, "http://airbag/taint", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -293,7 +302,7 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 			verdict = Verdict{Verdict: d.Verdict, Message: policy.Explain(d, id)}
 		}
 	}
-	_ = json.NewEncoder(w).Encode(verdict)
+	writeJSON(w, verdict)
 }
 
 // Verdict is the answer to the shell shim and to PreToolUse hooks.
@@ -335,9 +344,12 @@ func clip(s string, n int) string {
 // ReportExec is called by the shell shim inside the sandbox. Transport
 // errors count as allow: the shim is a guide, the sandbox is the wall.
 func ReportExec(e Exec) Verdict {
-	body, _ := json.Marshal(e)
 	v := Verdict{Verdict: policy.Allow}
-	resp, err := client(3*time.Second).Post("http://airbag/exec", "application/json", bytes.NewReader(body))
+	body, err := json.Marshal(e)
+	if err != nil {
+		return v
+	}
+	resp, err := post(3*time.Second, "http://airbag/exec", bytes.NewReader(body))
 	if err != nil {
 		return v
 	}
@@ -348,12 +360,22 @@ func ReportExec(e Exec) Verdict {
 
 // Hook forwards a hook event from inside the sandbox.
 func Hook(agent, event string, payload []byte) ([]byte, error) {
-	resp, err := client(5*time.Second).Post("http://airbag/hook/"+agent+"/"+event, "application/json", bytes.NewReader(payload))
+	resp, err := post(5*time.Second, "http://airbag/hook/"+agent+"/"+event, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+}
+
+// post sends a JSON body to the host side of airbag.
+func post(timeout time.Duration, url string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return client(timeout).Do(req)
 }
 
 func client(timeout time.Duration) *http.Client {
@@ -369,8 +391,11 @@ func client(timeout time.Duration) *http.Client {
 // sandbox, by the shim in front of a deferred program.
 func Defer(in outbox.Intent) (DeferReply, error) {
 	var d DeferReply
-	body, _ := json.Marshal(in)
-	resp, err := client(10*time.Second).Post("http://airbag/defer", "application/json", bytes.NewReader(body))
+	body, err := json.Marshal(in)
+	if err != nil {
+		return d, err
+	}
+	resp, err := post(10*time.Second, "http://airbag/defer", bytes.NewReader(body))
 	if err != nil {
 		return d, err
 	}
@@ -379,14 +404,17 @@ func Defer(in outbox.Intent) (DeferReply, error) {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return d, fmt.Errorf("%s", strings.TrimSpace(string(msg)))
 	}
-	return d, json.NewDecoder(resp.Body).Decode(&d)
+	err = json.NewDecoder(resp.Body).Decode(&d)
+	return d, err
 }
 
 // Submit is called from inside the sandbox.
 func Submit(in outbox.Intent) (outbox.Intent, error) {
-	c := client(10 * time.Second)
-	body, _ := json.Marshal(in)
-	resp, err := c.Post("http://airbag/intent", "application/json", bytes.NewReader(body))
+	body, err := json.Marshal(in)
+	if err != nil {
+		return in, err
+	}
+	resp, err := post(10*time.Second, "http://airbag/intent", bytes.NewReader(body))
 	if err != nil {
 		return in, err
 	}
@@ -395,5 +423,6 @@ func Submit(in outbox.Intent) (outbox.Intent, error) {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return in, fmt.Errorf("%s", strings.TrimSpace(string(msg)))
 	}
-	return in, json.NewDecoder(resp.Body).Decode(&in)
+	err = json.NewDecoder(resp.Body).Decode(&in)
+	return in, err
 }

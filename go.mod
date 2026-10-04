@@ -9,6 +9,7 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.7.2
 	github.com/willscott/go-nfs v0.0.4
 	github.com/willscott/go-nfs-client v0.0.0-20240104095149-b44639837b00
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sys v0.46.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.34.5

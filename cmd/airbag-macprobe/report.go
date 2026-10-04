@@ -162,15 +162,6 @@ func redact(r Result, rp *strings.Replacer) Result {
 	return r
 }
 
-// clip shortens command output for a reason or a detail.
-func clip(s string, max int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + " ..."
-}
-
 // firstLine is the first non-empty line of s.
 func firstLine(s string) string {
 	for _, l := range strings.Split(s, "\n") {

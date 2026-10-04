@@ -13,7 +13,10 @@ import (
 var (
 	remoteName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	remoteURL  = regexp.MustCompile(`^(https://|ssh://|git@[A-Za-z0-9][A-Za-z0-9.-]*:)[^\s]+$`)
-	refspec    = regexp.MustCompile(`^\+?[A-Za-z0-9._/@{}^~:-]+$`)
+	// A refspec, or a --force-with-lease value, never starts with "-"
+	// (after an optional "+"): git refuses such ref names anyway, and
+	// one that looks like an option is not passed to the host's git.
+	refspec = regexp.MustCompile(`^\+?[A-Za-z0-9._/@{}^~:][A-Za-z0-9._/@{}^~:-]*$`)
 )
 
 // pushFlags are the only options accepted; anything that can run a

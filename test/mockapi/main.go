@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 type call struct {
@@ -50,10 +51,7 @@ func main() {
 	http.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if *logPath != "" {
-			if f, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
-				_, _ = f.Write(append(body, '\n'))
-				f.Close()
-			}
+			appendLog(*logPath, body)
 		}
 		var req request
 		_ = json.Unmarshal(body, &req)
@@ -66,7 +64,7 @@ func main() {
 			if *verbose {
 				fmt.Fprintf(os.Stderr, "  \033[2magent ▶ %s: %s\033[0m\n", c.Name, c.summary())
 			}
-			respond(w, req.Stream, map[string]any{"type": "tool_use", "id": fmt.Sprintf("toolu_mock_%02d", done+1), "name": c.Name, "input": json.RawMessage(c.Input)}, "tool_use")
+			respond(w, req.Stream, map[string]any{"type": "tool_use", "id": fmt.Sprintf("toolu_mock_%02d", done+1), "name": c.Name, "input": c.Input}, "tool_use")
 			return
 		}
 		respond(w, req.Stream, map[string]any{"type": "text", "text": "done"}, "end_turn")
@@ -75,10 +73,7 @@ func main() {
 	http.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if *logPath != "" {
-			if f, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
-				_, _ = f.Write(append(body, '\n'))
-				f.Close()
-			}
+			appendLog(*logPath, body)
 		}
 		done := strings.Count(string(body), `"type":"function_call_output"`) + strings.Count(string(body), `"type":"custom_tool_call_output"`)
 		if *verbose {
@@ -99,8 +94,12 @@ func main() {
 		w.Header().Set("Content-Type", "text/event-stream")
 		f, _ := w.(http.Flusher)
 		send := func(data map[string]any) {
-			b, _ := json.Marshal(data)
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", data["type"], b)
+			b, err := json.Marshal(data)
+			if err != nil {
+				log.Print(err)
+				return
+			}
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", data["type"], b)
 			if f != nil {
 				f.Flush()
 			}
@@ -119,7 +118,23 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte("{}"))
 	})
-	log.Fatal(http.ListenAndServe(*addr, nil))
+	srv := &http.Server{Addr: *addr, ReadHeaderTimeout: 10 * time.Second}
+	log.Fatal(srv.ListenAndServe())
+}
+
+// appendLog adds a request body to the log the tests read. A body it
+// cannot add is reported, so a test that misses it can say why.
+func appendLog(path string, body []byte) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err == nil {
+		_, err = f.Write(append(body, '\n'))
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		log.Print(err)
+	}
 }
 
 func respond(w http.ResponseWriter, stream bool, block map[string]any, stop string) {
@@ -131,14 +146,20 @@ func respond(w http.ResponseWriter, stream bool, block map[string]any, stop stri
 		msg["content"] = []any{block}
 		msg["stop_reason"] = stop
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(msg)
+		if err := json.NewEncoder(w).Encode(msg); err != nil {
+			log.Print(err)
+		}
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	f, _ := w.(http.Flusher)
 	send := func(event string, data any) {
-		b, _ := json.Marshal(data)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+		b, err := json.Marshal(data)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		if f != nil {
 			f.Flush()
 		}

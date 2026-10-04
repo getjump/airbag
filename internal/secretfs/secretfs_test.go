@@ -42,7 +42,7 @@ func TestOpenNested(t *testing.T) {
 	var got []string
 	for _, f := range files {
 		got = append(got, filepath.ToSlash(f.Rel))
-		f.F.Close()
+		_ = f.F.Close()
 	}
 	sort.Strings(got)
 	want := []string{".env", "apps/web/.env", "deploy/prod.tfvars"}

@@ -35,7 +35,7 @@ func TestNoRawBidiInSource(t *testing.T) {
 		if !text[filepath.Ext(p)] || d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		b, err := os.ReadFile(p)
+		b, err := os.ReadFile(p) //nolint:gosec // reads this module's own source tree
 		if err != nil {
 			return err
 		}

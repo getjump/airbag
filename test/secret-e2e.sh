@@ -81,6 +81,7 @@ echo "$rev" | grep -q 'cut when a secret was read:.* example.com:443' || fail "r
 "$AIRBAG" discard --yes >/dev/null
 
 # Without FUSE the secret files are hidden, never readable untracked.
+# shellcheck disable=SC2016 # the script runs in the sandbox
 out=$(AIRBAG_NO_FUSE=1 "$AIRBAG" run -- sh -c 'cat .env apps/web/.env; echo "size=$(wc -c < .env)"' 2>&1)
 echo "$out" | grep -q 'sk-taint-0123456789\|web-nested-secret' && fail "secret readable without FUSE: $out"
 echo "$out" | grep -q 'size=0' || fail ".env not hidden without FUSE: $out"

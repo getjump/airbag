@@ -11,10 +11,12 @@ package mirror
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +65,28 @@ func (m *Mirror) refuse(w http.ResponseWriter, url string) {
 	http.Error(w, "airbag mirror: this session read a secret; only cached packages are served", http.StatusForbidden)
 }
 
+// registries are the hosts the mirror fetches from (proxy.Registries).
+var registries = map[string]bool{
+	"proxy.golang.org": true, "sum.golang.org": true,
+	"registry.npmjs.org": true, "pypi.org": true, "files.pythonhosted.org": true,
+}
+
+// fromRegistry reports whether raw is an https URL on one of the
+// registries, with no user info or port. Upstream URLs are a registry
+// joined with a path from the sandbox, which must not change the host.
+func fromRegistry(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.User == nil && u.Port() == "" && registries[u.Host]
+}
+
+// notRegistry answers a request whose upstream URL is not a registry's.
+func (m *Mirror) notRegistry(w http.ResponseWriter, r *http.Request, url string) {
+	if m.Log != nil {
+		m.Log.Add(effects.Effect{Kind: "pkg.fetch", Target: url, Verdict: "deny", Reason: "not a registry"})
+	}
+	http.NotFound(w, r)
+}
+
 func (m *Mirror) cachePath(kind, url string) string {
 	sum := sha256.Sum256([]byte(url))
 	return filepath.Join(m.Cache, kind, hex.EncodeToString(sum[:]))
@@ -95,12 +119,14 @@ func (m *Mirror) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Mirror) goproxy(w http.ResponseWriter, r *http.Request, p string) {
-	if rest, ok := strings.CutPrefix(p, "/sumdb/sum.golang.org"); ok {
-		if rest == "/supported" {
+	// The slash ends the host: "/sumdb/sum.golang.org@other.example/"
+	// is not a path on sum.golang.org.
+	if rest, ok := strings.CutPrefix(p, "/sumdb/sum.golang.org/"); ok {
+		if rest == "supported" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		m.pass(w, r, "https://sum.golang.org"+rest, nil)
+		m.pass(w, r, "https://sum.golang.org/"+rest, nil)
 		return
 	}
 	up := "https://proxy.golang.org" + p
@@ -157,6 +183,10 @@ func (m *Mirror) pypi(w http.ResponseWriter, r *http.Request, p string) {
 // The last good answer is kept, so a tainted session can still install
 // what earlier sessions resolved.
 func (m *Mirror) pass(w http.ResponseWriter, r *http.Request, url string, rewrite func([]byte) []byte) {
+	if !fromRegistry(url) {
+		m.notRegistry(w, r, url)
+		return
+	}
 	meta := m.cachePath("meta", url)
 	if m.tainted() {
 		body, err := os.ReadFile(meta)
@@ -170,7 +200,7 @@ func (m *Mirror) pass(w http.ResponseWriter, r *http.Request, url string, rewrit
 		_, _ = w.Write(body)
 		return
 	}
-	req, _ := http.NewRequestWithContext(r.Context(), r.Method, url, nil)
+	req, _ := http.NewRequestWithContext(r.Context(), r.Method, url, nil) //nolint:gosec // fromRegistry checked the host above
 	// Accept-Encoding is left to the transport, so bodies arrive plain
 	// and can be rewritten and kept.
 	for _, h := range []string{"Accept", "User-Agent", "If-None-Match", "If-Modified-Since"} {
@@ -178,7 +208,7 @@ func (m *Mirror) pass(w http.ResponseWriter, r *http.Request, url string, rewrit
 			req.Header.Set(h, v)
 		}
 	}
-	resp, err := m.Client.Do(req)
+	resp, err := m.Client.Do(req) //nolint:gosec // fromRegistry checked the host above
 	if err != nil {
 		http.Error(w, "airbag mirror: "+err.Error(), http.StatusBadGateway)
 		return
@@ -210,6 +240,10 @@ func (m *Mirror) pass(w http.ResponseWriter, r *http.Request, url string, rewrit
 
 // cached serves an immutable artifact from the cache, fetching it once.
 func (m *Mirror) cached(w http.ResponseWriter, r *http.Request, registry, url, what string) {
+	if !fromRegistry(url) {
+		m.notRegistry(w, r, url)
+		return
+	}
 	path := m.cachePath(registry, url)
 	hit := true
 	pinned := ""
@@ -223,7 +257,12 @@ func (m *Mirror) cached(w http.ResponseWriter, r *http.Request, registry, url, w
 			pinned = lock
 		}
 		hit = false
-		resp, err := m.Client.Get(url)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil) //nolint:gosec // fromRegistry checked the host above
+		if err != nil {
+			http.Error(w, "airbag mirror: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		resp, err := m.Client.Do(req) //nolint:gosec // fromRegistry checked the host above
 		if err != nil {
 			http.Error(w, "airbag mirror: "+err.Error(), http.StatusBadGateway)
 			return
@@ -243,13 +282,15 @@ func (m *Mirror) cached(w http.ResponseWriter, r *http.Request, registry, url, w
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if _, err := io.Copy(tmp, resp.Body); err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
+		_, err = io.Copy(tmp, resp.Body)
+		if cerr := tmp.Close(); err == nil {
+			err = cerr // a short write can show only here, and the cache keeps what it gets
+		}
+		if err != nil {
+			_ = os.Remove(tmp.Name())
 			http.Error(w, "airbag mirror: "+err.Error(), http.StatusBadGateway)
 			return
 		}
-		tmp.Close()
 		if err := os.Rename(tmp.Name(), path); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -275,11 +316,13 @@ func writeAtomic(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+	_, err = tmp.Write(data)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
 		return err
 	}
-	tmp.Close()
 	return os.Rename(tmp.Name(), path)
 }

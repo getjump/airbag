@@ -47,6 +47,7 @@ echo "$out" | grep -q "queued as intent i-1" || fail "git push was not queued: $
 [ ! -f .git/hooks/post-checkout ] || fail "hook installed before apply"
 
 rev=$("$AIRBAG" review)
+# shellcheck disable=SC2088 # "~/" as the review prints it
 for want in "~ README.md" "+ new.txt" "- old.txt" ".git/hooks/post-checkout  persist" "~/.airbag-e2e-rc" "denied: example.com:443" "git push origin main"; do
 	echo "$rev" | grep -qF -- "$want" || fail "review lacks '$want':
 $rev"
@@ -129,6 +130,7 @@ else
 fi
 
 # Text the agent controls is shown, not interpreted, by the terminal.
+# shellcheck disable=SC2016 # the script runs in the sandbox
 "$AIRBAG" run -- sh -c 'printf "x\033[2Jy\n" > "$(printf "esc\033]0;t\007.txt")"' >/dev/null 2>&1
 esc=$(printf '\033')
 for cmd in review diff; do
