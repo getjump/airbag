@@ -553,3 +553,17 @@ func TestWriteBackBothChangedWaitsForReview(t *testing.T) {
 		t.Fatalf("branch copy dropped: %v", err)
 	}
 }
+
+// With no real file at the start of the run, the base is empty: a file the
+// host creates meanwhile keeps its values where the agent's differ.
+func TestWriteBackBaseWhenNoRealFile(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"numStartups":1,"userID":"u"}`)
+	writeCfg(t, realPath, `{"numStartups":5}`) // a host session created it meanwhile
+	WriteBackConfigs(s)
+	got := readCfg(t, realPath)
+	if got["numStartups"] != float64(5) || got["userID"] != "u" {
+		t.Fatalf("real file = %v, want the host's counter kept and the agent's new id written", got)
+	}
+}

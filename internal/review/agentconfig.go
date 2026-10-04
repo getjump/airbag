@@ -268,8 +268,11 @@ func SnapshotConfigs(s *session.Session) {
 		}
 		base := basePath(s, cf)
 		raw, err := readRegular(filepath.Join(s.Home, cf.path))
-		if err != nil {
-			_ = os.Remove(base) // no readable real file: the base is empty
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			raw = []byte("{}") // no real file yet: every key the agent writes is its own
+		case err != nil:
+			_ = os.Remove(base) // not a readable regular file: no base, a two-way merge
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(base), 0o700); err == nil {
@@ -367,7 +370,7 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		if rebased {
 			if out, err := marshalJSON(branch, "  "); err == nil {
 				out = append(out, '\n')
-				if err := os.WriteFile(branchPath, out, 0o600); err == nil {
+				if err := writeAtomic(branchPath, out, func() bool { return true }); err == nil {
 					branchRaw = out
 				}
 			}

@@ -61,6 +61,8 @@ var persistHomeTable = []persistence{
 		".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/", ".claude/agents/",
 		".claude/skills/", ".claude/commands/", ".claude/plugins/", ".claude/CLAUDE.md",
 		".claude/rules/", ".claude/output-styles/", ".claude/workflows/", ".claude/agent-memory/",
+		// The cache of server-managed settings, applied at startup.
+		".claude/remote-settings.json",
 		".codex/config.toml", ".codex/hooks.json", ".codex/rules/", ".codex/AGENTS.md",
 		".gemini/", ".cursor/", ".config/airbag/",
 	}},

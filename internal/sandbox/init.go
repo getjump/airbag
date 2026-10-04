@@ -153,6 +153,9 @@ func buildWorld(s *session.Session) error {
 				continue
 			}
 			src := filepath.Join(s.Home, h)
+			if err := noSymlinkSoFar(s.Home, h); err != nil {
+				return fmt.Errorf("branch hole ~/%s: %w", h, err)
+			}
 			if _, err := os.Lstat(src); errors.Is(err, os.ErrNotExist) {
 				// An earlier run of this session deleted the hole or its
 				// parent (a project directory that was not passed through
@@ -404,6 +407,26 @@ func noSymlink(root, rel string) error {
 	for _, part := range strings.Split(filepath.Clean(rel), "/") {
 		p = filepath.Join(p, part)
 		st, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("~/%s is a symlink", strings.TrimPrefix(p, root+"/"))
+		}
+	}
+	return nil
+}
+
+// noSymlinkSoFar is noSymlink for the components of rel that exist: a
+// path about to be created must not lead through a symlink.
+func noSymlinkSoFar(root, rel string) error {
+	p := root
+	for _, part := range strings.Split(filepath.Clean(rel), "/") {
+		p = filepath.Join(p, part)
+		st, err := os.Lstat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
