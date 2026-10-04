@@ -79,6 +79,20 @@ func NewCA(hosts []string) (*CA, error) {
 		}
 		tmpl.PermittedDNSDomains = append(tmpl.PermittedDNSDomains, strings.TrimPrefix(host, "*"))
 	}
+	// A constraint limits only the kind of name it is about: with DNS
+	// names alone the CA could still vouch for any IP address, with
+	// addresses alone for any DNS name. So the kind the hosts do not use
+	// is closed: every address is excluded, or the only DNS name allowed
+	// is "invalid", which never names a real site (RFC 6761).
+	if len(tmpl.PermittedIPRanges) == 0 {
+		tmpl.ExcludedIPRanges = []*net.IPNet{
+			{IP: net.IPv4zero.To4(), Mask: net.CIDRMask(0, 32)},
+			{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
+		}
+	}
+	if len(tmpl.PermittedDNSDomains) == 0 {
+		tmpl.PermittedDNSDomains = []string{"invalid"}
+	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		return nil, err
@@ -112,15 +126,17 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial(),
-		Subject:      pkix.Name{CommonName: host},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     c.cert.NotAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	if ip := net.ParseIP(host); ip != nil {
+		// No common name: OpenSSL checks a leaf's CN as a DNS name when it
+		// has no DNS name, and "10.0.0.1" is not among the permitted ones.
 		tmpl.IPAddresses = []net.IP{ip}
 	} else {
+		tmpl.Subject = pkix.Name{CommonName: host}
 		tmpl.DNSNames = []string{host}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, &key.PublicKey, c.key)
