@@ -38,12 +38,13 @@ each, in `demo/`: `sandbox`, `codex`, `ask`, `apply`, `mirror` (`demo/scenes.sh 
   `*SECRET*`, `*API_KEY*`, ...) except the agents' own API keys; `--pass-env NAME`
   keeps one. Host sockets (docker.sock, D-Bus, ssh-agent, X11, Wayland) are out of
   reach: `/run`, `/tmp` and `/dev/shm` are private.
-- **Watched secrets.** The workspace's `.env` files are served read-only through
-  FUSE. The first read by anything but airbag taints the session: commands that
-  send data out are refused, only model APIs stay reachable, and the mirror
-  serves only what it has cached. The read returns only after airbag has recorded the taint and closed
-  connections opened earlier to other hosts. Output going back to the agent has
-  known secret values masked.
+- **Watched secrets.** The workspace's secret files are served read-only through
+  FUSE (`.env` and `.env.*` at any depth, private keys, `.npmrc`, `.pypirc`,
+  cloud credentials, `*.tfvars`). The first read by anything but airbag taints
+  the session: commands that send data out are refused, only model APIs stay
+  reachable, and the mirror serves only what it has cached. The read returns only
+  after airbag has recorded the taint and closed connections opened earlier to
+  other hosts. Output going back to the agent has known secret values masked.
 - **Its own state.** Transcripts and logins (`~/.claude/projects`, `~/.codex/sessions`,
   tokens) pass through, so discarding a branch does not log you out.
 

@@ -1,7 +1,11 @@
-// Package secretfs serves the workspace's .env files through FUSE so
+// Package secretfs serves the workspace's secret files through FUSE so
 // airbag sees every read of them. Reading a secret taints the session:
 // from then on data may no longer leave the machine. The files are
 // read-only inside the sandbox.
+//
+// Covered: .env and .env.* at any depth (templates excluded), plus the
+// usual credential files a repository should not carry but sometimes
+// does (private keys, cloud credentials, .npmrc, .pypirc, *.tfvars).
 package secretfs
 
 import (
@@ -18,8 +22,8 @@ import (
 )
 
 type File struct {
-	Name string   // base name, e.g. ".env.local"
-	F    *os.File // the real file, opened before the workspace is branched
+	Rel string   // path relative to the workspace, e.g. "apps/web/.env"
+	F   *os.File // the real file, opened before the workspace is branched
 }
 
 // OnRead is called for every open, with the reader's pid as seen in the
@@ -27,24 +31,69 @@ type File struct {
 // the open, so a read whose taint was not recorded never happens.
 type OnRead func(name string, pid uint32) error
 
-// Open finds the workspace's .env files. Templates (.env.example,
-// .env.sample, .env.template) hold no secrets and are left alone.
+// IsSecret reports whether a file's base name is one airbag serves as a
+// secret. Templates (.env.example, .env.sample, .env.template) hold no
+// secrets and are left alone.
+func IsSecret(name string) bool {
+	switch {
+	case strings.HasSuffix(name, ".example"), strings.HasSuffix(name, ".sample"), strings.HasSuffix(name, ".template"):
+		return false
+	case name == ".env" || strings.HasPrefix(name, ".env."):
+		return true
+	case name == ".npmrc" || name == ".pypirc" || name == ".netrc":
+		return true
+	case name == "credentials" || name == "credentials.json": // aws, gcloud
+		return true
+	case strings.HasSuffix(name, ".pem") || strings.HasSuffix(name, ".key") || strings.HasSuffix(name, ".p12") || strings.HasSuffix(name, ".pfx"):
+		return true
+	case strings.HasPrefix(name, "id_") && !strings.HasSuffix(name, ".pub"): // id_rsa, id_ed25519
+		return true
+	case strings.HasSuffix(name, ".tfvars") || strings.HasSuffix(name, ".tfvars.json"):
+		return true
+	default:
+		return false
+	}
+}
+
+// skipDir names directories not worth walking for secrets: they hold no
+// source, only dependencies and history.
+func skipDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", ".venv", "venv", "target", "dist", "build", ".cache":
+		return true
+	}
+	return false
+}
+
+// Open finds the workspace's secret files, at any depth.
 func Open(workspace string) []File {
-	paths, _ := filepath.Glob(filepath.Join(workspace, ".env*"))
 	var out []File
-	for _, p := range paths {
-		name := filepath.Base(p)
-		if strings.HasSuffix(name, ".example") || strings.HasSuffix(name, ".sample") || strings.HasSuffix(name, ".template") {
-			continue
+	_ = filepath.WalkDir(workspace, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if p != workspace && skipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !IsSecret(d.Name()) {
+			return nil
 		}
 		st, err := os.Lstat(p)
 		if err != nil || !st.Mode().IsRegular() {
-			continue
+			return nil
+		}
+		rel, err := filepath.Rel(workspace, p)
+		if err != nil {
+			return nil
 		}
 		if f, err := os.Open(p); err == nil {
-			out = append(out, File{Name: name, F: f})
+			out = append(out, File{Rel: rel, F: f})
 		}
-	}
+		return nil
+	})
 	return out
 }
 
@@ -56,8 +105,20 @@ type root struct {
 
 func (r *root) OnAdd(ctx context.Context) {
 	for _, f := range r.files {
-		ch := r.NewPersistentInode(ctx, &secretFile{f: f.F, name: f.Name, onRead: r.onRead}, fs.StableAttr{Mode: syscall.S_IFREG})
-		r.AddChild(f.Name, ch, false)
+		// Build the directories of f.Rel, then the file leaf, so the
+		// served path matches where the file sits in the workspace.
+		parent := &r.Inode
+		parts := strings.Split(filepath.ToSlash(f.Rel), "/")
+		for _, d := range parts[:len(parts)-1] {
+			ch := parent.GetChild(d)
+			if ch == nil {
+				ch = parent.NewPersistentInode(ctx, &fs.Inode{}, fs.StableAttr{Mode: syscall.S_IFDIR})
+				parent.AddChild(d, ch, false)
+			}
+			parent = ch
+		}
+		leaf := parent.NewPersistentInode(ctx, &secretFile{f: f.F, name: f.Rel, onRead: r.onRead}, fs.StableAttr{Mode: syscall.S_IFREG})
+		parent.AddChild(parts[len(parts)-1], leaf, false)
 	}
 }
 

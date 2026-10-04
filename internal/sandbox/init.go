@@ -193,7 +193,7 @@ func agentConfig(s *session.Session) error {
 	return setRO(cdir, true, true)
 }
 
-// serveSecrets puts the workspace's .env files behind secretfs: every
+// serveSecrets puts the workspace's secret files behind secretfs: every
 // read by anything but airbag itself taints the session.
 func serveSecrets(s *session.Session, files []secretfs.File) error {
 	dir := "/run/airbag/secrets"
@@ -227,7 +227,7 @@ func serveSecrets(s *session.Session, files []secretfs.File) error {
 		return err
 	}
 	for _, f := range files {
-		if err := bind(filepath.Join(dir, f.Name), filepath.Join(s.Workspace, f.Name), false); err != nil {
+		if err := bind(filepath.Join(dir, f.Rel), filepath.Join(s.Workspace, f.Rel), false); err != nil {
 			return err
 		}
 	}

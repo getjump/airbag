@@ -18,6 +18,7 @@ import (
 
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/models"
+	"github.com/getjump/airbag/internal/secretfs"
 )
 
 // Shell stands in for bash and sh inside the sandbox. For `-c SCRIPT` it
@@ -116,20 +117,25 @@ func knownSecrets() []secret {
 		}
 	}
 	if ws := os.Getenv("AIRBAG_WORKSPACE"); ws != "" {
-		files, _ := filepath.Glob(filepath.Join(ws, ".env*"))
-		for _, f := range files {
-			fh, err := os.Open(f)
-			if err != nil {
-				continue
-			}
-			sc := bufio.NewScanner(fh)
+		for _, f := range secretfs.Open(ws) {
+			base := filepath.Base(f.Rel)
+			sc := bufio.NewScanner(f.F)
+			sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 			for sc.Scan() {
 				line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(sc.Text()), "export "))
-				if k, v, ok := strings.Cut(line, "="); ok && !strings.HasPrefix(k, "#") {
-					add(k, v)
+				if base == ".env" || strings.HasPrefix(base, ".env.") {
+					if k, v, ok := strings.Cut(line, "="); ok && !strings.HasPrefix(k, "#") {
+						add(k, v)
+					}
+					continue
+				}
+				// Other secret files (keys, .npmrc, ...) are not KEY=value;
+				// mask each substantial line, so a key printed out is caught.
+				if len(line) >= 16 && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "-----") {
+					add(f.Rel, line)
 				}
 			}
-			fh.Close()
+			f.F.Close()
 		}
 	}
 	for _, kv := range os.Environ() {
