@@ -33,11 +33,12 @@ func result(errno unix.Errno) string {
 func socketFamily(fam int) string {
 	fd, _, e := unix.Syscall(unix.SYS_SOCKET, uintptr(fam), uintptr(unix.SOCK_DGRAM), 0)
 	if e == 0 {
-		unix.Close(int(fd))
+		_ = unix.Close(int(fd))
 	}
 	return result(e)
 }
 
+//nolint:gosec // unsafe: socketpair(2) writes the two fds through a pointer
 func socketpairFamily(fam int) string {
 	var fds [2]int32
 	_, _, e := unix.Syscall6(unix.SYS_SOCKETPAIR, uintptr(fam), uintptr(unix.SOCK_DGRAM), 0, uintptr(unsafe.Pointer(&fds)), 0, 0)
@@ -48,6 +49,7 @@ func socketpairFamily(fam int) string {
 	return result(e)
 }
 
+//nolint:gosec // unsafe: each probe passes the kernel a pointer to a zeroed argument struct
 func main() {
 	probes := map[string]func() string{
 		"io_uring_setup": func() string {
@@ -78,7 +80,7 @@ func main() {
 		"userfaultfd": func() string {
 			fd, _, e := unix.Syscall(unix.SYS_USERFAULTFD, uintptr(unix.O_CLOEXEC), 0, 0)
 			if e == 0 {
-				unix.Close(int(fd))
+				_ = unix.Close(int(fd))
 			}
 			return result(e)
 		},

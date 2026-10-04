@@ -33,7 +33,7 @@ func runBPF(t *testing.T, p []unix.SockFilter, data []byte) uint32 {
 				pc += int(in.Jf)
 			}
 		case unix.BPF_JMP | unix.BPF_JA:
-			pc += int(int32(in.K))
+			pc += int(in.K) // forward only: resolve rejects anything else
 		case unix.BPF_RET | unix.BPF_K:
 			return in.K
 		default:
@@ -51,12 +51,6 @@ func seccompData(arch, nr uint32, arg0, arg1 uint64) []byte {
 	binary.LittleEndian.PutUint64(b[16+8*0:], arg0)
 	binary.LittleEndian.PutUint64(b[16+8*1:], arg1)
 	return b
-}
-
-// verdict runs the built filter for one (arch, nr, args) triple.
-func verdict(t *testing.T, strict bool, arch, nr uint32, arg0, arg1 uint64) uint32 {
-	p := agentFilter(abisFor(runtime_GOARCH(t)), strict)
-	return runBPF(t, p, seccompData(arch, nr, arg0, arg1))
 }
 
 // runtime_GOARCH returns the arch the filter is built for. The number
@@ -330,7 +324,7 @@ func goArch() string { return runtime.GOARCH }
 
 func xsysUnixDir(t *testing.T) string {
 	t.Helper()
-	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "golang.org/x/sys").Output()
+	out, err := exec.CommandContext(t.Context(), "go", "list", "-m", "-f", "{{.Dir}}", "golang.org/x/sys").Output()
 	if err != nil {
 		t.Skipf("locate golang.org/x/sys: %v", err)
 	}
@@ -349,12 +343,15 @@ func parseSysnums(t *testing.T, path string) map[string]uint32 {
 	if err != nil {
 		t.Skipf("open %s: %v", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	out := map[string]uint32{}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		if m := sysnumLine.FindStringSubmatch(sc.Text()); m != nil {
-			n, _ := strconv.Atoi(m[2])
+			n, err := strconv.ParseUint(m[2], 10, 32)
+			if err != nil {
+				t.Fatalf("%s: %q: %v", path, sc.Text(), err)
+			}
 			out[m[1]] = uint32(n)
 		}
 	}
@@ -388,7 +385,7 @@ func TestX32SyscallNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	type row struct {
 		nr  uint32
 		abi string

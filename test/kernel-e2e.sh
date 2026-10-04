@@ -98,7 +98,7 @@ if command -v node >/dev/null; then
 	echo "$out" | grep -q "node-ok true" || fail "node broke under the filter: $out"
 fi
 
-out=$("$AIRBAG" run -- sh -c 'cd "$HOME" && mkdir -p gob && cd gob && (go mod init ex >/dev/null 2>&1 || true) && printf "package main\nfunc main(){}\n" > m.go && GOTOOLCHAIN=local GOFLAGS=-mod=mod go build -o /dev/null . >/dev/null 2>&1 && echo go-ok; true' 2>/dev/null)
+out=$("$AIRBAG" run -- sh -c 'cd && mkdir -p gob && cd gob && (go mod init ex >/dev/null 2>&1 || true) && printf "package main\nfunc main(){}\n" > m.go && GOTOOLCHAIN=local GOFLAGS=-mod=mod go build -o /dev/null . >/dev/null 2>&1 && echo go-ok; true' 2>/dev/null)
 "$AIRBAG" discard --yes >/dev/null 2>&1 || true
 echo "$out" | grep -q go-ok || fail "go build broke under the filter: $out"
 

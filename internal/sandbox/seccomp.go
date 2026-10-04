@@ -314,7 +314,7 @@ func (b *bpfBuilder) resolve() []unix.SockFilter {
 			if !ok || target <= i {
 				panic(fmt.Sprintf("seccomp: label %q resolves to a non-forward jump", lbl))
 			}
-			b.insns[i].K = uint32(target - (i + 1))
+			b.insns[i].K = uint32(target - (i + 1)) //nolint:gosec // positive (target > i) and below BPF_MAXINSNS
 		}
 	}
 	return b.insns
@@ -325,11 +325,9 @@ func (b *bpfBuilder) resolve() []unix.SockFilter {
 func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 	b := newBuilder()
 	for i, a := range abis {
-		next := "allow"
+		next := "kill" // past the last ABI: the arch is unknown
 		if i+1 < len(abis) {
 			next = fmt.Sprintf("abi%d", i+1)
-		} else {
-			next = "kill" // past the last ABI: the arch is unknown
 		}
 		b.label(fmt.Sprintf("abi%d", i))
 		b.ld(offArch)
