@@ -3,12 +3,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # New advisories show up with no change to the code.
+    - cron: "23 4 * * 1"
 
 permissions:
   contents: read
 
 jobs:
   test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +42,7 @@ jobs:
           python3 test/ctrlc.py
 
   lint:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -53,3 +58,18 @@ jobs:
         run: sh test/check.sh hygiene
       - name: golangci-lint
         run: sh test/check.sh lint
+
+  vuln:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: govulncheck
+        run: sh test/check.sh vuln
