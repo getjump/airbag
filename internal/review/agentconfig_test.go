@@ -865,3 +865,76 @@ func TestRecordOwnWrite(t *testing.T) {
 		t.Fatal("a file that is not an agent config was recorded")
 	}
 }
+
+// Deleting a whole project directory deletes its memory/ too: the
+// deletion is flagged as agent instructions, not folded into agent state.
+func TestProjectDirDeletionFlagsMemory(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	writeCfg(t, filepath.Join(s.Home, ".claude/projects/-x/memory/M.md"), "remember")
+	writeCfg(t, filepath.Join(s.Home, ".claude/projects/-y/t.jsonl"), "{}")
+	for _, d := range []string{"-x", "-y"} {
+		wo := filepath.Join(s.HomeUpper(), ".claude/projects", d)
+		if err := os.MkdirAll(filepath.Dir(wo), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Mknod(wo, unix.S_IFCHR, 0); err != nil {
+			t.Skipf("cannot make a whiteout here: %v", err)
+		}
+	}
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := map[string]bool{}
+	for _, c := range cs {
+		flags[c.Rel] = slices.Contains(c.Flags, "agent instructions")
+	}
+	if !flags[".claude/projects/-x"] {
+		t.Errorf("deleting a project dir with memory is not flagged: %v", flags)
+	}
+	if flags[".claude/projects/-y"] {
+		t.Errorf("deleting a project dir without memory is flagged: %v", flags)
+	}
+}
+
+// A config whose keys are unchanged but whose mode the agent changed is
+// still a change: the branch copy stays for review.
+func TestModeOnlyConfigChangeStays(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"userID":"u"}`)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"userID":"u"}`)
+	if err := os.Chmod(branchPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	WriteBackConfigs(s)
+	if _, err := os.Lstat(branchPath); err != nil {
+		t.Fatalf("a mode-only change was dropped: %v", err)
+	}
+}
+
+// When the displaced host write cannot be moved to the session (another
+// filesystem, say), it stays beside the config rather than being lost.
+func TestReplaceIfKeepsBesideWhenKeepDirFails(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfg.json")
+	writeCfg(t, p, `{"a":1}`)
+	blocked := filepath.Join(dir, "blocked")
+	writeCfg(t, blocked, "a file where the keep dir would be")
+	replace := func(v string) {
+		writeCfg(t, p+".host", v)
+		if err := os.Rename(p+".host", p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	afterSwap = func() { replace(`{"a":"second"}`) }
+	t.Cleanup(func() { afterSwap = func() {} })
+	err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(blocked, "kept"), func() bool { replace(`{"a":"first"}`); return true })
+	var kept *keptError
+	if !errors.As(err, &kept) {
+		t.Fatalf("err = %v, want a keptError", err)
+	}
+	if filepath.Dir(kept.path) != dir || readCfg(t, kept.path)["a"] != "first" {
+		t.Fatalf("kept at %s, want the older host write beside the config", kept.path)
+	}
+}

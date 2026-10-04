@@ -502,7 +502,14 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 // dropIfSame removes the branch copy when it now matches the real file:
 // only benign keys differed, so review shows nothing for this file.
 func dropIfSame(cf *jsonConfig, realPath, branchPath string, branchRaw []byte) {
-	if after, err := readRegular(realPath); err == nil && len(cf.diff(nil, after, branchRaw)) == 0 {
+	after, err := readRegular(realPath)
+	if err != nil || len(cf.diff(nil, after, branchRaw)) != 0 {
+		return
+	}
+	// The same keys with another mode is still a change for review.
+	ri, rerr := os.Lstat(realPath)
+	bi, berr := os.Lstat(branchPath)
+	if rerr == nil && berr == nil && ri.Mode().Perm() == bi.Mode().Perm() {
 		_ = os.Remove(branchPath)
 	}
 }
@@ -889,10 +896,12 @@ func replaceIf(path string, data, want []byte, existed bool, keepDir string, unc
 	accepted := false
 	defer func() {
 		if got, rerr := readRegular(tmp); rerr == nil && !accepted && !bytes.Equal(got, data) {
-			if kept, kerr := keepAside(tmp, keepDir); kerr == nil {
-				err = &keptError{kept}
-				return
+			kept, kerr := keepAside(tmp, keepDir)
+			if kerr != nil {
+				kept = tmp // another filesystem, say: it stays beside the config
 			}
+			err = &keptError{kept}
+			return
 		}
 		_ = os.Remove(tmp)
 	}()
@@ -1003,6 +1012,20 @@ func writeTemp(path string, data []byte) (string, os.FileMode, error) {
 		return "", 0, err
 	}
 	return tmp.Name(), mode, nil
+}
+
+// holdsMemory reports whether a home directory the agent deleted or
+// replaced (~/.claude, ~/.claude/projects or a project directory) has a
+// project memory directory in the real $HOME: that change removes
+// instructions too.
+func holdsMemory(realPath, rel string) bool {
+	parts := strings.Split(strings.TrimSuffix(filepath.ToSlash(rel), "/"), "/")
+	if parts[0] != ".claude" || len(parts) > 3 || len(parts) >= 2 && parts[1] != "projects" {
+		return false
+	}
+	pattern := map[int]string{1: "projects/*/memory", 2: "*/memory", 3: "memory"}[len(parts)]
+	m, _ := filepath.Glob(filepath.Join(realPath, pattern))
+	return len(m) > 0
 }
 
 // agentMemory reports whether a home path is inside a Claude Code project

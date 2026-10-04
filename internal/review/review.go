@@ -201,7 +201,7 @@ func classify(s *session.Session, cs []Change) {
 			// or changes trust, unknown keys listed plainly.
 			c.Flags = append(c.Flags, configFlags(*c)...)
 			// Project memory is loaded into later sessions.
-			if agentMemory(rel) {
+			if agentMemory(rel) || (c.Kind == Deleted || c.Kind == Replaced) && holdsMemory(c.Path, rel) {
 				c.Flags = append(c.Flags, "agent instructions")
 			}
 		}
