@@ -18,6 +18,41 @@ script, so it is repeatable without an account (`demo/demo.sh`). `agent ▶` lin
 the calls the model makes, `agent ◀` what the agent sends back. More scenes, one GIF
 each, in `demo/`: `sandbox`, `codex`, `ask`, `apply`, `mirror` (`demo/scenes.sh NAME`).
 
+## Why not bubblewrap, or the agent's own sandbox?
+
+Isolation is not the difference. On Linux, Claude Code's and Codex's built-in
+sandboxes run on bubblewrap, and airbag uses the same kernel namespaces. What
+differs is when you decide, and what you get to see.
+
+Say you ask an agent to clean up a repository, and it deletes `src`, reads
+`.env`, tries to post it to a paste site, appends a line to `~/.bashrc` and
+pushes.
+
+- **bubblewrap:** you decide up front. Mount the workspace read-write, and the
+  files are gone with no record of what happened; read-only, and the agent's
+  work is lost when it exits. The network is on or off.
+- **Built-in sandbox:** the agent stops for approval as it goes: a write
+  outside the workspace, a new domain. You answer prompts mid-run and never see
+  the whole result at once.
+- **airbag:** the agent runs without stopping in a branch of your machine.
+  Afterwards one review shows all of it: `src` deleted, `.env` read, the upload
+  blocked, the `~/.bashrc` line flagged as persistence, the push waiting in the
+  outbox. `airbag discard`, and none of it happened.
+
+| | bubblewrap | built-in sandbox | airbag |
+|---|---|---|---|
+| Isolation | namespaces | bubblewrap (Codex adds Landlock, seccomp) | namespaces |
+| Files | read-write in place, or thrown away | workspace in place, asks outside it | copy-on-write branch of workspace and `$HOME`; apply all, part or none |
+| Network | on or off | domain allowlist through a proxy | allowlist, every host logged, package mirror, cut on a secret read |
+| Irreversible actions | not handled | blocked or asked | queued in the outbox, run after review |
+| Policies | mounts | tools, commands, domains | CEL rules over effects; `ask` with `airbag approve` |
+| Secrets | hide paths | hide paths | reads label the session; values masked in output |
+| One view of what changed | no | no | effect log, steps per tool call, hosts, packages |
+| You decide | before the run | during the run | after the run, once |
+
+airbag sets up its namespaces itself. Running on bubblewrap underneath is an
+open question; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## What the agent gets
 
 - **A branch of the world.** The workspace and `$HOME` are overlayfs branches; the
