@@ -120,8 +120,9 @@ Tests: `go test ./...`, then as a regular user `test/e2e.sh`, `test/policy-e2e.s
 Claude Code and Codex binaries against `test/mockapi`, a scripted mock of the
 Messages and Responses APIs). With a real login, follow [docs/manual-test.md](docs/manual-test.md).
 
-The effect log is a SQLite database per session (`effects.db`, append-only by
-trigger), so `sqlite3` answers questions the review does not.
+Each session keeps one SQLite database, `effects.db`: the effect log and the
+outbox, with the history of every intent's status. Triggers make all of it
+append-only, so `sqlite3` answers questions the review does not.
 
 Not yet: secret handles (the agent sees a placeholder, airbag substitutes the
 value at an allowed boundary), passing Codex's SQLite state through (transcripts

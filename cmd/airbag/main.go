@@ -171,7 +171,7 @@ func cmdRun(args []string) (int, error) {
 		return code, err
 	}
 	cs, _ := review.Scan(s)
-	intents, _ := outbox.Open(s.OutboxPath()).List()
+	intents := listIntents(s)
 	nws, nhome := 0, 0
 	for _, c := range cs {
 		if c.Layer == "ws" {
@@ -230,7 +230,7 @@ func cmdReview(s *session.Session) error {
 		return err
 	}
 	effs, _ := effects.Read(s.EffectsPath())
-	intents, _ := outbox.Open(s.OutboxPath()).List()
+	intents := listIntents(s)
 	sts, _ := steps.Read(s)
 	review.Render(os.Stdout, s, cs, effs, intents, sts)
 	return nil
@@ -301,8 +301,24 @@ func cmdApply(args []string) error {
 	if err != nil {
 		return err
 	}
-	return apply.Apply(s, cs, outbox.Open(s.OutboxPath()), apply.Options{
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		return err
+	}
+	defer box.Close()
+	return apply.Apply(s, cs, box, apply.Options{
 		Yes: *yes, Force: *force, Interactive: *inter, Only: only, In: os.Stdin, Out: os.Stdout})
+}
+
+// listIntents reads a session's outbox; a session without one has none.
+func listIntents(s *session.Session) []outbox.Intent {
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		return nil
+	}
+	defer box.Close()
+	intents, _ := box.List()
+	return intents
 }
 
 func cmdDiscard(args []string) error {
@@ -381,7 +397,7 @@ func withPendingIntents() (*session.Session, error) {
 		if s.Workspace != ws || s.Status != session.StatusApplied {
 			continue
 		}
-		intents, _ := outbox.Open(s.OutboxPath()).List()
+		intents := listIntents(s)
 		for _, in := range intents {
 			if in.Status == outbox.Pending {
 				return s, nil

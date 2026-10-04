@@ -99,8 +99,9 @@ func (s *Session) MountDir(name string) string { return filepath.Join(s.Dir, "mn
 func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "run") }
 func (s *Session) ProxySock() string           { return filepath.Join(s.RunDir(), "proxy.sock") }
 func (s *Session) ControlSock() string         { return filepath.Join(s.RunDir(), "ctl.sock") }
-func (s *Session) EffectsPath() string         { return filepath.Join(s.Dir, "effects.db") }
-func (s *Session) OutboxPath() string          { return filepath.Join(s.Dir, "outbox.json") }
+
+// EffectsPath is the session database: the effect log and the outbox.
+func (s *Session) EffectsPath() string { return filepath.Join(s.Dir, "effects.db") }
 
 func (s *Session) Save() error {
 	b, err := json.MarshalIndent(s.Meta, "", "  ")
