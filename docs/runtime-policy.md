@@ -146,7 +146,9 @@ by 4096 events and 8 MiB of accounted payload, including an in-flight commit;
 it applies backpressure, never drops. Persistence errors latch and deny later
 runtime operations; a failed drain is reported as a failed run. Clean shutdown
 drains the queue before publishing stopped status. Non-runtime logging keeps its
-existing durable path.
+existing durable path. Shutdown waits for storage; a stalled fsync can stall the
+drain. The transport timeout does not cancel SQLite or provide a hard shutdown
+deadline.
 
 **Secret notifications always use a durable barrier, in either mode.** They
 flush the preceding buffered prefix and commit the taint record before bytes
@@ -217,3 +219,5 @@ profiled runs compare durable, buffered, plain FUSE and policy/RPC without audit
 The storage diagnostic compares actual SQLite, a simplified SQLite schema and a
 framed append journal with the same payload and acknowledgement-after-sync.
 See [audit-storage.md](audit-storage.md) for conditions, results and engine research.
+Real build results and stage profiles are in
+[runtime-performance.md](runtime-performance.md).

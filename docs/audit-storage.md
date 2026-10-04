@@ -21,6 +21,9 @@ journal as the authoritative record, with SQLite as a derived review index. It
 is a different architecture, not a drop-in database replacement. bbolt and LSM
 stores remain candidates only if their measured advantage and additional KV
 requirements justify the migration.
+The session database also holds outbox intents/status history through a
+separate writer. Replacing only the event hot path would not remove SQLite from
+Airbag; a complete replacement must migrate that functionality too.
 
 ## What the current path pays for
 
@@ -51,7 +54,7 @@ Low-risk schema experiments should precede an engine migration:
   join. This needs compatibility with existing logs.
 - Measure the kind index's write cost against actual review queries before
   deferring or removing it. The SQL query examples also use it.
-- Profile modernc's interpreter/driver work before considering a native-C
+- Profile SQLite and driver CPU work before considering a native-C
   driver. A cgo switch affects static builds and cross-compilation, and must
   compare the same SQLite version, schema, transaction size and sync contract.
 
@@ -199,3 +202,38 @@ focused prototype. If one-record FULL commits are already dominated by disk
 sync, changing KV engines while preserving the barrier is unlikely to provide
 the desired improvement. If buffering makes SQL CPU dominant, simplify the
 schema and measure it before maintaining a second authoritative storage format.
+
+## CI disk-backed diagnostic
+
+[CI run](https://github.com/getjump/airbag/actions/runs/37233697480), p2 runner,
+Go 1.27.1, SQLite 3.46.0, four vCPUs, Linux 6.17.0-1022-azure, **ext4 mount /**,
+no volatile option. 8,192 measured events after 256 warmup events, three repeats;
+all variants acknowledge after synchronous commit and verify complete reopened
+payload/order. These are medians of per-run **mean ns/event**, not pooled latency
+percentiles. Tail variability is material.
+
+- sqlite-audit, batch 1: **416.898 us/event**; median per-run batch p50 159.810 us, p99 682.477 us. Means: 416.898, 492.874, 389.930 us/event.
+- sqlite-audit, batch 64: **22.352 us/event**; median per-run batch p50 1293.617 us, p99 2524.166 us. Means: 22.352, 20.570, 37.598 us/event.
+- sqlite-flat, batch 1: **235.334 us/event**; median per-run batch p50 124.457 us, p99 500.153 us. Means: 363.841, 210.454, 235.334 us/event.
+- sqlite-flat, batch 64: **40.012 us/event**; median per-run batch p50 635.316 us, p99 25808.220 us. Means: 40.012, 89.153, 24.343 us/event.
+- append-fsync, batch 1: **478.858 us/event**; median per-run batch p50 189.095 us, p99 2598.447 us. Means: 588.647, 398.334, 478.858 us/event.
+- append-fsync, batch 64: **10.787 us/event**; median per-run batch p50 277.227 us, p99 4616.337 us. Means: 13.311, 6.353, 10.787 us/event.
+
+At batch 1, append+fsync averages 478.858 us/event versus production SQLite
+416.898 us: about 15% slower in this diagnostic. Flat SQLite averages 235.334 us,
+but the batch-64 flat runs average 24.343–89.153 us/event despite a lower typical
+batch p50; rare sync/checkpoint/device delays dominate some means. This is not
+stable proof that flattening always improves throughput.
+
+At batch 64, append averages 10.787 us/event versus production SQLite 22.352 us,
+about 2.07 times faster. That preformed-group storage gain is not a build gain or
+an acknowledgement-latency gain for a sequential caller. The current buffered
+build is already close to the policy/RPC-without-audit ablation; see
+[runtime-performance.md](runtime-performance.md). Engine migration is not
+justified as the first change. A schema experiment or focused append-journal
+prototype remains reasonable if storage CPU becomes a measured bottleneck.
+
+These CI/local environments have different Go versions, hardware and storage;
+do not subtract the local volatile mean from the CI mean to estimate fsync cost.
+Raw output: [p2 artifact](https://github.com/getjump/airbag/actions/runs/37233697480/artifacts/11314953071).
+Reopen verification still does not simulate a power failure.
