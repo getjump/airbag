@@ -102,10 +102,30 @@ func projectDir(p string) bool {
 // holes for cwd (and the workspace root) into the session's, without
 // duplicates. A resumed session may run from another directory of the
 // same repository, whose transcript directory must pass through too.
+//
+// A directory that an earlier run of this session already changed or
+// removed in the branch (it was not passed through then) stays in the
+// branch: passing it through now would hide that change from the run but
+// not from review, and apply would then fight the real transcripts. Its
+// transcripts from this run reach the real $HOME only if applied.
 func AddClaudeProjectState(s *session.Session, cwd string) {
 	pass, holes := ClaudeProjectState(cwd, s.Workspace)
-	s.Passthrough = appendNew(s.Passthrough, pass...)
-	s.BranchHoles = appendNew(s.BranchHoles, holes...)
+	var kept []string
+	for _, p := range pass {
+		if !slices.Contains(s.Passthrough, p) {
+			if _, err := os.Lstat(filepath.Join(s.HomeUpper(), strings.TrimSuffix(p, "/"))); err == nil {
+				fmt.Fprintf(os.Stderr, "airbag: ~/%s was changed earlier in this session; it stays in the branch (its transcripts reach ~ only if applied)\n", strings.TrimSuffix(p, "/"))
+				continue
+			}
+		}
+		kept = append(kept, p)
+	}
+	s.Passthrough = appendNew(s.Passthrough, kept...)
+	for _, h := range holes {
+		if slices.ContainsFunc(s.Passthrough, func(p string) bool { return strings.HasPrefix(h, p) }) {
+			s.BranchHoles = appendNew(s.BranchHoles, h)
+		}
+	}
 }
 
 func appendNew(list []string, add ...string) []string {

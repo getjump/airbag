@@ -710,3 +710,22 @@ func TestWriteBackCreatesConfigWhenAbsent(t *testing.T) {
 		t.Fatalf("real file = %v, want the agent's counter written", got)
 	}
 }
+
+// A zero-byte config that existed at the start is not taken for an
+// absent one: the host removing it is a removal, not a first run.
+func TestWriteBackHostRemovedZeroByteFile(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, ``)
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"numStartups":1}`)
+	if err := os.Remove(realPath); err != nil {
+		t.Fatal(err)
+	}
+	WriteBackConfigs(s)
+	if _, err := os.Lstat(realPath); !os.IsNotExist(err) {
+		t.Fatalf("the write-back recreated a config the host removed (err %v)", err)
+	}
+	if !RemovedOnHost(s, realPath) {
+		t.Fatal("RemovedOnHost = false for a zero-byte config the host removed")
+	}
+}

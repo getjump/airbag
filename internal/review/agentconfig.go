@@ -268,18 +268,20 @@ func SnapshotConfigs(s *session.Session) {
 		}
 		base := basePath(s, cf)
 		raw, err := readRegular(filepath.Join(s.Home, cf.path))
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			// No real file yet: every key the agent writes is its own.
-			// The base is empty (read as {}), which also records that
-			// the file was absent: one that existed is never empty here.
-			raw = nil
-		case err != nil:
+		absent := errors.Is(err, fs.ErrNotExist)
+		if err != nil && !absent {
 			_ = os.Remove(base) // not a readable regular file: no base, a two-way merge
+			_ = os.Remove(base + absentSuffix)
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(base), 0o700); err == nil {
-			_ = os.WriteFile(base, raw, 0o600)
+		// No real file yet: every key the agent writes is its own, and
+		// a marker beside the (empty) base records the absence.
+		if err := os.MkdirAll(filepath.Dir(base), 0o700); err == nil && os.WriteFile(base, raw, 0o600) == nil {
+			if absent {
+				_ = os.WriteFile(base+absentSuffix, nil, 0o600)
+			} else {
+				_ = os.Remove(base + absentSuffix)
+			}
 		}
 	}
 }
@@ -293,14 +295,22 @@ func RemovedOnHost(s *session.Session, path string) bool {
 		if filepath.Join(s.Home, cf.path) != path {
 			continue
 		}
-		raw, err := readRegular(basePath(s, cf))
-		if err != nil || len(raw) == 0 {
+		if _, err := readRegular(basePath(s, cf)); err != nil || absentAtStart(s, cf) {
 			return false
 		}
-		_, err = os.Lstat(path)
+		_, err := os.Lstat(path)
 		return errors.Is(err, fs.ErrNotExist)
 	}
 	return false
+}
+
+// absentSuffix names the marker beside a base whose real file did not
+// exist when the run began (an existing file may be empty too).
+const absentSuffix = ".absent"
+
+func absentAtStart(s *session.Session, cf *jsonConfig) bool {
+	_, err := os.Lstat(basePath(s, cf) + absentSuffix)
+	return err == nil
 }
 
 func basePath(s *session.Session, cf *jsonConfig) string {
@@ -331,10 +341,9 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 	// stands in, as a two-way merge.
 	baseRaw, err := readRegular(basePath(s, cf))
 	haveBase := err == nil
-	// An empty base: the real file was absent when the run began.
-	absentAtStart := haveBase && len(baseRaw) == 0
-	if absentAtStart {
-		baseRaw = []byte("{}")
+	absent := haveBase && absentAtStart(s, cf) // the real file did not exist when the run began
+	if haveBase && len(baseRaw) == 0 {
+		baseRaw = []byte("{}") // absent, or an empty file
 	}
 	if haveBase {
 		if _, err := topLevel(baseRaw); err != nil {
@@ -349,7 +358,8 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		}
 		out = append(out, '\n')
 		if os.WriteFile(basePath(s, cf), out, 0o600) == nil {
-			baseRaw, haveBase, absentAtStart = out, true, false
+			_ = os.Remove(basePath(s, cf) + absentSuffix) // the real file exists by now
+			baseRaw, haveBase, absent = out, true, false
 		}
 	}
 	for range 3 {
@@ -357,7 +367,7 @@ func writeBack(s *session.Session, cf *jsonConfig, since time.Time) (msg string,
 		if err != nil {
 			return "", false // a symlink or other non-regular file: leave it alone
 		}
-		if !exists && haveBase && !absentAtStart {
+		if !exists && haveBase && !absent {
 			// The file was there when the run began (its base is not
 			// empty): the host removed it since. That is a host edit;
 			// write nothing back, and the branch copy waits for review

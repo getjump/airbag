@@ -123,3 +123,26 @@ func countOf(list []string, s string) int {
 	}
 	return n
 }
+
+// Resumed from a subdirectory whose project directory an earlier run
+// already changed in the branch: it stays in the branch (no passthrough,
+// no hole), so review and apply see one consistent tree.
+func TestAddClaudeProjectStateKeepsBranchedDir(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	pass, holes := ClaudeProjectState("/home/me/api", "/home/me/api")
+	s, err := session.Create(session.Meta{Workspace: "/home/me/api", Home: t.TempDir(),
+		Passthrough: append(append([]string{}, DefaultPassthrough...), pass...), BranchHoles: holes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(s.HomeUpper(), ".claude/projects/-home-me-api-sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	AddClaudeProjectState(s, "/home/me/api/sub")
+	if slices.Contains(s.Passthrough, ".claude/projects/-home-me-api-sub/") {
+		t.Errorf("a project dir the branch holds passes through: %v", s.Passthrough)
+	}
+	if slices.Contains(s.BranchHoles, ".claude/projects/-home-me-api-sub/memory") {
+		t.Errorf("a hole under a branched project dir: %v", s.BranchHoles)
+	}
+}

@@ -117,18 +117,19 @@ $(cat "$T/run.out")"
 
 # A project directory that is not passed through is in the branch, so a
 # session started at the root may delete a subdirectory's project dir,
-# memory included. Resumed from that subdirectory, the session passes its
-# transcripts through and serves its memory from the branch: the deletion
-# stays, and the real memory is untouched.
+# memory included. Resumed from that subdirectory, the session keeps that
+# directory in the branch rather than passing it through: the deletion
+# stays, the real memory is untouched, and airbag says so.
 subslug=$(printf '%s' "$ws/sub2" | sed 's#[^A-Za-z0-9]#-#g')
 mkdir -p "$ws/sub2" "$HOME/.claude/projects/$subslug/memory"
 echo 'sub memory' > "$HOME/.claude/projects/$subslug/memory/SUB.md"
 "$AIRBAG" run -- rm -rf "$HOME/.claude/projects/$subslug" >"$T/run.out" 2>&1 || fail "project dir delete run failed:
 $(cat "$T/run.out")"
-(cd "$ws/sub2" && "$AIRBAG" run --session last -- ls -a "$HOME/.claude/projects/$subslug/memory" >"$T/run.out" 2>&1) ||
+(cd "$ws/sub2" && "$AIRBAG" run --session last -- sh -c "ls -a '$HOME/.claude/projects/$subslug/memory' 2>&1; true" >"$T/run.out" 2>&1) ||
 	fail "resume after deleting the project dir failed:
 $(cat "$T/run.out")"
 grep -q SUB.md "$T/run.out" && fail "deleted memory is visible again after resume: $(cat "$T/run.out")"
+grep -q "stays in the branch" "$T/run.out" || fail "no notice that the changed project dir stays in the branch: $(cat "$T/run.out")"
 [ -f "$HOME/.claude/projects/$subslug/memory/SUB.md" ] || fail "the memory delete reached the real home"
 "$AIRBAG" discard --yes >/dev/null
 

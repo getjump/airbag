@@ -166,7 +166,9 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   login your next host session uses. A path with a symlink in it (say `~/.claude`
   pointing into a dotfiles repository) is not passed through: it stays in the branch,
   or is read-only where the link leads out of `$HOME`. A session started by an older
-  airbag, resumed now, gets today's narrower list. Everything else an agent keeps in
+  airbag, resumed now, gets today's narrower list. Resumed from another directory,
+  a session passes that directory's transcripts through too, unless an earlier run
+  already changed them in the branch: then they stay in the branch, and airbag says so. Everything else an agent keeps in
   `$HOME` — other projects' transcripts, sessions, shell snapshots, file history,
   todos, caches — goes through the branch: review folds it into one `agent state`
   line and a discard drops it. A project's `memory/` (instructions loaded into later
