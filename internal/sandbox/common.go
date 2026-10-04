@@ -202,3 +202,43 @@ func swallow(sigs ...os.Signal) {
 		}
 	}()
 }
+
+// MacHidden: credentials a Mac keeps in its home besides DefaultHidden,
+// relative to the home: keychains, sops and age keys, browser profiles
+// (cookies are logins), password managers.
+var MacHidden = []string{
+	"Library/Keychains", "Library/Application Support/sops", "Library/Cookies",
+	"Library/Application Support/Google/Chrome", "Library/Application Support/Firefox",
+	"Library/Application Support/BraveSoftware", "Library/Safari",
+	"Library/Group Containers/2BUA8C4S2C.com.1password",
+}
+
+// MacHomeRoots: where a Linux VM on a Mac shows the Mac's homes: Lima
+// mounts them at their own path, OrbStack under /mnt/mac.
+var MacHomeRoots = []string{"/Users", "/mnt/mac/Users"}
+
+// MacHomesHidden lists the credential paths of every Mac home visible
+// under roots, for a sandbox that runs in a VM on that Mac: the VM's
+// own $HOME is hidden by DefaultHidden, the Mac's would not be.
+func MacHomesHidden(roots []string) []string {
+	var out []string
+	for _, root := range roots {
+		es, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, e := range es {
+			if !e.IsDir() || e.Name() == "Shared" || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			home := filepath.Join(root, e.Name())
+			for _, h := range DefaultHidden {
+				out = append(out, filepath.Join(home, h))
+			}
+			for _, h := range MacHidden {
+				out = append(out, filepath.Join(home, h))
+			}
+		}
+	}
+	return out
+}

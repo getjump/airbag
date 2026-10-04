@@ -126,6 +126,8 @@ Log in to the agent inside the VM, and give the VM your git credentials:
 the outbox pushes from there.
 
 The Mac's home is visible in the VM outside the VM's `$HOME`
-(`/Users/<you>` in Lima, `/mnt/mac/Users/<you>` in OrbStack), and airbag does
-not hide it yet, so the agent can read the Mac's `~/.ssh` there. Share only the
-projects directory with the VM.
+(`/Users/<you>` in Lima, `/mnt/mac/Users/<you>` in OrbStack). airbag hides the
+credentials in every Mac home it finds there, as in the VM's own home (`~/.ssh`,
+`~/.aws`, ... plus the Mac's keychains, sops keys and browser profiles), but the
+rest of the Mac's files stay readable: share only the projects directory with the
+VM.

@@ -166,6 +166,10 @@ func cmdRun(args []string) (int, error) {
 			i--
 		}
 	}
+	if runtime.GOOS == "linux" {
+		// In a Linux VM on a Mac the Mac's homes are mounted too.
+		hiddenHost = append(hiddenHost, sandbox.MacHomesHidden(sandbox.MacHomeRoots)...)
+	}
 	if *nixDaemon {
 		fmt.Fprintln(os.Stderr, "airbag: warning: --nix-daemon: Nix builds and substitutes run outside the sandbox and reach the network without the proxy")
 	}

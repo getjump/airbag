@@ -57,6 +57,9 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 	for _, h := range s.Hidden {
 		p.NoRead = append(p.NoRead, filepath.Join(home, h))
 	}
+	for _, h := range MacHidden {
+		p.NoRead = append(p.NoRead, filepath.Join(home, h))
+	}
 	p.NoRead = append(p.NoRead, s.HiddenHost...)
 	// Without FUSE a read of a secret file cannot be tracked, so the
 	// agent cannot read one, in the clone or in the real workspace.

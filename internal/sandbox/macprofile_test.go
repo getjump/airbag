@@ -66,3 +66,21 @@ func TestMacProfile(t *testing.T) {
 		t.Errorf("network rules:\n%s", text)
 	}
 }
+
+func TestMacHomesHidden(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"alice/.ssh", "Shared", "bob"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := strings.Join(MacHomesHidden([]string{root, filepath.Join(root, "missing")}), "\n")
+	for _, want := range []string{"alice/.ssh", "bob/.aws", "alice/Library/Keychains", "bob/Library/Application Support/sops"} {
+		if !strings.Contains(got, filepath.Join(root, want)) {
+			t.Errorf("lacks %s", want)
+		}
+	}
+	if strings.Contains(got, "Shared") {
+		t.Error("/Users/Shared is not a home")
+	}
+}
