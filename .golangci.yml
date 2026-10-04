@@ -1,0 +1,89 @@
+version: "2"
+
+# Linters that find bugs, on top of the standard set; style-only ones
+# are left out. Each enabled linter reports nothing for GOOS=linux and
+# GOOS=darwin (test/check.sh lint runs both). A finding that is safe is
+# suppressed where it is, with //nolint:LINTER // and the reason.
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - durationcheck
+    - errchkjson
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - nolintlint
+    - rowserrcheck
+    - sqlclosecheck
+    - unconvert
+    - usestdlibvars
+    - wastedassign
+    - asasalint
+    - bidichk
+    - fatcontext
+    - gocheckcompilerdirectives
+    - makezero
+    - nilnesserr
+    - nosprintfhostport
+    - reassign
+  settings:
+    errcheck:
+      # Errors no caller can act on: closing a socket, a listener or a
+      # body that was read, and printing to the terminal or to a writer
+      # that goes there. A file that was written is still checked: its
+      # Close can be where a failed write shows.
+      exclude-functions:
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - (io.ReadCloser).Close
+        - fmt.Fprint(io.Writer)
+        - fmt.Fprintf(io.Writer)
+        - fmt.Fprintln(io.Writer)
+        - fmt.Fprintf(*github.com/getjump/airbag/internal/term.Writer)
+    govet:
+      # fieldalignment is about memory layout. shadow flags each
+      # `if err := ...` inside a function that has an err: about fifty
+      # renames, none of them a bug.
+      enable-all: true
+      disable: [fieldalignment, shadow]
+    staticcheck:
+      # The defaults, less the QF quick fixes: those are refactorings an
+      # editor offers, which the staticcheck command does not run either.
+      checks: ["all", "-ST1000", "-ST1003", "-ST1016", "-ST1020", "-ST1021", "-ST1022", "-QF*"]
+    gosec:
+      excludes:
+        # G304 flags every open of a path that is not a constant. Opening
+        # the paths the user, the session and the workspace name is
+        # airbag's job; a path from the sandbox is checked where it is
+        # built (control's inside, apply's within). G703, the taint
+        # check for paths, stays on.
+        - G304
+        # Unchecked errors are errcheck's, with its exclusions above.
+        - G104
+    gocritic:
+      # Only the checks that look for bugs.
+      disable-all: true
+      enabled-tags: [diagnostic]
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    rules:
+      # Tests and the macOS probe build scratch trees in temporary
+      # directories of their own: the modes there are fixtures.
+      - path: (_test\.go$|^cmd/airbag-macprobe/)
+        linters: [gosec]
+        text: "^G30[126]:"
+      # gocritic's filepathJoin is about Windows: airbag builds for Linux
+      # and macOS, where "/" is the separator.
+      - linters: [gocritic]
+        text: "^filepathJoin:"
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

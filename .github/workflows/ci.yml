@@ -36,3 +36,20 @@ jobs:
           airbag doctor
           for t in test/e2e.sh test/*-e2e.sh; do echo "== $t"; sh "$t"; done
           python3 test/ctrlc.py
+
+  lint:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: gofmt, go mod tidy and verify, go vet
+        run: sh test/check.sh hygiene
+      - name: golangci-lint
+        run: sh test/check.sh lint
