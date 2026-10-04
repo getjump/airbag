@@ -45,7 +45,7 @@ func (p *probe) cleanup() error {
 			// diskutil acts on the volume holding a path, so it gets
 			// only a path confirmed to be this mount point.
 			if out, err := run(20*time.Second, "", "/usr/sbin/diskutil", "unmount", "force", p.mnt); err != nil {
-				return fmt.Errorf("cannot unmount %s: %v: %s", p.mnt, err, firstLine(out))
+				return fmt.Errorf("cannot unmount %s: %w: %s", p.mnt, err, firstLine(out))
 			}
 		}
 		p.mounted = false

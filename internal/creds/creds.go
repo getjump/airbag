@@ -132,7 +132,7 @@ func Resolve(source, home string) (string, error) {
 		cmd.Stdin = nil
 		out, err := cmd.Output()
 		if err != nil {
-			return "", fmt.Errorf("%s: %v", rest, err)
+			return "", fmt.Errorf("%s: %w", rest, err)
 		}
 		v = string(out)
 	default:

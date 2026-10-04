@@ -190,7 +190,7 @@ func cloneWorkspace(s *session.Session) error {
 		_ = os.RemoveAll(s.CloneDir())
 		fmt.Fprintf(os.Stderr, "airbag: APFS clone failed (%s); copying instead\n", strings.TrimSpace(string(out)))
 		if out, err := exec.Command("/bin/cp", "-R", s.Workspace, s.CloneDir()).CombinedOutput(); err != nil {
-			return fmt.Errorf("copy the workspace: %v: %s", err, out)
+			return fmt.Errorf("copy the workspace: %w: %s", err, out)
 		}
 	}
 	return nil

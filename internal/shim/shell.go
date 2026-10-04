@@ -3,6 +3,7 @@ package shim
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -207,7 +208,8 @@ func runMasked(path string, argv []string, secrets []secret) int {
 	}
 	out.Flush()
 	errw.Flush()
-	if ee, ok := err.(*exec.ExitError); ok {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
 		if st, ok := ee.Sys().(syscall.WaitStatus); ok && st.Signaled() {
 			return 128 + int(st.Signal())
 		}

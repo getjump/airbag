@@ -150,10 +150,7 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		for _, c := range picked {
 			if err := gen.apply(c); err != nil {
 				left, rerr := gen.rollback(o.Out)
-				if rerr != nil || left > 0 {
-					return fmt.Errorf("%s: %w; rolling back what was applied also failed (%v), see `airbag rollback %s`", c.Path, err, rerr, s.ID)
-				}
-				return fmt.Errorf("%s: %w; nothing applied, the changes are back in the session", c.Path, err)
+				return applyFailed(c.Path, s.ID, err, left, rerr)
 			}
 		}
 		if err := gen.finish(); err != nil {
@@ -193,6 +190,18 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 
 // choose picks the units to apply: all of them, the ones matching
 // --only, or one by one.
+// applyFailed says what a failed step left behind once the steps before
+// it were rolled back: nothing, or paths the rollback could not undo.
+func applyFailed(path, id string, err error, left int, rerr error) error {
+	switch {
+	case rerr != nil:
+		return fmt.Errorf("%s: %w; rolling back what was applied also failed (%w), see `airbag rollback %s`", path, err, rerr, id)
+	case left > 0:
+		return fmt.Errorf("%s: %w; rolling back what was applied left %d paths as they are, see `airbag rollback %s`", path, err, left, id)
+	}
+	return fmt.Errorf("%s: %w; nothing applied, the changes are back in the session", path, err)
+}
+
 func choose(units []Unit, in *bufio.Reader, o Options) ([]Unit, error) {
 	if len(units) == 0 {
 		return nil, nil

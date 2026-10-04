@@ -3,6 +3,7 @@ package apply
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,6 +130,29 @@ func TestApplyIsAllOrNothing(t *testing.T) {
 	}
 	if interrupted(s) != nil {
 		t.Fatal("rolled-back generation still marked as interrupted")
+	}
+}
+
+// A failed step says what the rollback left, without a "<nil>" for a
+// rollback that left paths but returned no error.
+func TestApplyFailedMessage(t *testing.T) {
+	step, busy := errors.New("disk full"), errors.New("busy")
+	for _, c := range []struct {
+		left int
+		rerr error
+		want string
+	}{
+		{0, nil, "nothing applied"},
+		{2, nil, "left 2 paths as they are"},
+		{1, busy, "also failed (busy)"},
+	} {
+		err := applyFailed("a.txt", "s1", step, c.left, c.rerr)
+		if msg := err.Error(); !strings.Contains(msg, c.want) || strings.Contains(msg, "nil") {
+			t.Errorf("left=%d rerr=%v: %q", c.left, c.rerr, msg)
+		}
+		if !errors.Is(err, step) || (c.rerr != nil && !errors.Is(err, c.rerr)) {
+			t.Errorf("left=%d rerr=%v: %v does not wrap its causes", c.left, c.rerr, err)
+		}
 	}
 }
 

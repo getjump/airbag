@@ -157,7 +157,7 @@ func buildWorld(s *session.Session) error {
 		if err != nil {
 			for _, f := range secrets {
 				if herr := hide(filepath.Join(s.Workspace, f.Rel)); herr != nil {
-					return fmt.Errorf("secret %s is neither tracked (%v) nor hidden: %w", f.Rel, err, herr)
+					return fmt.Errorf("secret %s is neither tracked (%w) nor hidden: %w", f.Rel, err, herr)
 				}
 			}
 			fmt.Fprintf(os.Stderr, "airbag: warning: %d secret files are hidden from the agent: reads cannot be tracked (%v)\n", len(secrets), err)
