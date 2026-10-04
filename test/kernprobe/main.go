@@ -49,6 +49,15 @@ func socketpairFamily(fam int) string {
 	return result(e)
 }
 
+// netlinkProto opens an AF_NETLINK socket of the given protocol.
+func netlinkProto(proto int) string {
+	fd, _, e := unix.Syscall(unix.SYS_SOCKET, uintptr(unix.AF_NETLINK), uintptr(unix.SOCK_RAW), uintptr(proto))
+	if e == 0 {
+		_ = unix.Close(int(fd))
+	}
+	return result(e)
+}
+
 //nolint:gosec // unsafe: each probe passes the kernel a pointer to a zeroed argument struct
 func main() {
 	probes := map[string]func() string{
@@ -78,7 +87,22 @@ func main() {
 			return result(e)
 		},
 		"userfaultfd": func() string {
-			fd, _, e := unix.Syscall(unix.SYS_USERFAULTFD, uintptr(unix.O_CLOEXEC), 0, 0)
+			// UFFD_USER_MODE_ONLY (0x1): a user-mode-only userfaultfd
+			// needs no privilege, so outside the filter this succeeds
+			// even where vm.unprivileged_userfaultfd=0. EPERM then can
+			// only come from the filter.
+			const uffdUserModeOnly = 0x1
+			fd, _, e := unix.Syscall(unix.SYS_USERFAULTFD, uintptr(unix.O_CLOEXEC|uffdUserModeOnly), 0, 0)
+			if e == 0 {
+				_ = unix.Close(int(fd))
+			}
+			return result(e)
+		},
+		// fsopen is the new mount API, refused with ENOSYS in --strict
+		// mode only; outside strict the kernel handles it.
+		"fsopen": func() string {
+			name := []byte("ext4\x00")
+			fd, _, e := unix.Syscall(unix.SYS_FSOPEN, uintptr(unsafe.Pointer(&name[0])), 0, 0)
 			if e == 0 {
 				_ = unix.Close(int(fd))
 			}
@@ -86,15 +110,26 @@ func main() {
 		},
 		"socket_vsock":  func() string { return socketFamily(unix.AF_VSOCK) },
 		"socket_packet": func() string { return socketFamily(unix.AF_PACKET) },
+		// AF_ALG needs no privilege, so outside the filter it succeeds;
+		// EPERM inside therefore comes from the filter, not from a
+		// missing capability the way AF_PACKET's would.
+		"socket_alg": func() string { return socketFamily(unix.AF_ALG) },
+		// socket(AF_NETLINK, *, NETLINK_NETFILTER) must be refused, while
+		// NETLINK_ROUTE keeps working.
+		"netlink_netfilter": func() string { return netlinkProto(unix.NETLINK_NETFILTER) },
+		"netlink_route":     func() string { return netlinkProto(unix.NETLINK_ROUTE) },
+		// socketcall is i386-only; on other ABIs this returns "n/a".
+		"socketcall_socket": socketcallSocket,
 		// socketpair creates sockets of the family it is given (AF_TIPC
 		// supports it since Linux 4.12), so it is family-checked too. The
 		// kernel itself never answers EPERM here (EAFNOSUPPORT or
 		// EOPNOTSUPP at most), so EPERM can only come from the filter.
 		"socketpair_tipc": func() string { return socketpairFamily(unix.AF_TIPC) },
 		"socketpair_unix": func() string { return socketpairFamily(unix.AF_UNIX) },
-		// ptrace of PID 1 (the supervisor) must fail: it is dumpable=0
-		// and owned by the parent user namespace. ptrace itself stays
-		// allowed, so a success here would be a real exposure.
+		// ptrace of PID 1 (the supervisor) must fail: the agent's user
+		// namespace has no CAP_SYS_PTRACE over PID 1 in the parent
+		// namespace, and dumpable=0 blocks it as well. ptrace itself
+		// stays allowed, so a success here would be a real exposure.
 		"ptrace_pid1": func() string {
 			_, _, e := unix.Syscall6(unix.SYS_PTRACE, uintptr(unix.PTRACE_ATTACH), 1, 0, 0, 0, 0)
 			return result(e)
@@ -114,7 +149,9 @@ func main() {
 	}
 	for _, name := range []string{
 		"io_uring_setup", "bpf", "perf_event_open", "add_key",
-		"userfaultfd", "socket_vsock", "socket_packet", "socketpair_tipc", "socketpair_unix",
+		"userfaultfd", "socket_vsock", "socket_packet", "socket_alg",
+		"socketpair_tipc", "socketpair_unix",
+		"netlink_netfilter", "netlink_route",
 	} {
 		fmt.Printf("%s=%s\n", name, probes[name]())
 	}
