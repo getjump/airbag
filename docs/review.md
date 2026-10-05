@@ -57,7 +57,9 @@ macOS, NFS and FUSE, and on xfs whose device is renumbered, it is refused, since
 nothing tells it from another one: take what you need from `airbag diff`, then
 discard the session. On an overlay airbag copies the workspace's directory up to the
 top layer when the session begins (it sets the directory's times to what they are),
-so it keeps one creation time; a new container from the same image has another. Sessions made by development builds from before this check
+so it keeps one creation time; a new container from the same image has another. Where
+it cannot (a directory you may write below but do not own), `airbag run` refuses to
+begin, since a directory made again there would pass. Sessions made by development builds from before this check
 record nothing and are not checked: discard them.
 
 ## Apply onto a git branch

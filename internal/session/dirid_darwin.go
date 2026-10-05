@@ -16,4 +16,4 @@ func fsID(string) uint64 { return 0 }
 func gen(string) uint64 { return 0 }
 
 // settle has nothing to do on macOS.
-func settle(string) bool { return true }
+func settle(string) error { return nil }

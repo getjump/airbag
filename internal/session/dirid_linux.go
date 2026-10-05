@@ -57,16 +57,18 @@ func gen(p string) uint64 {
 // (apply's own) would copy it up, giving it a new one while its inode
 // number stays. Once up, it keeps its creation time, and a directory
 // made again in its place, or a new container's copy from the same
-// image, has another. It reports false on an overlay where that could
-// not be done.
-func settle(p string) bool {
+// image, has another. It fails on an overlay where that cannot be done.
+func settle(p string) error {
 	var fs unix.Statfs_t
-	if unix.Statfs(p, &fs) != nil || fs.Type != unix.OVERLAYFS_SUPER_MAGIC {
-		return true
+	if err := unix.Statfs(p, &fs); err != nil {
+		return nil //nolint:nilerr // not known to be an overlay: DirIDOf, which reads the root next, reports one it cannot
+	}
+	if fs.Type != unix.OVERLAYFS_SUPER_MAGIC {
+		return nil
 	}
 	var st unix.Stat_t
-	if unix.Lstat(p, &st) != nil {
-		return false
+	if err := unix.Lstat(p, &st); err != nil {
+		return err
 	}
-	return unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{st.Atim, st.Mtim}, unix.AT_SYMLINK_NOFOLLOW) == nil
+	return unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{st.Atim, st.Mtim}, unix.AT_SYMLINK_NOFOLLOW)
 }

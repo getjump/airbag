@@ -53,7 +53,7 @@ func overlayCopyUp(t *testing.T) {
 	}
 	// mount puts an overlay of lower and the named upper layer at merged:
 	// a container, and the same container again after a restart.
-	mount := func(upper string) {
+	mount := func(upper string, flags uintptr) {
 		t.Helper()
 		work := upper + ".work"
 		for _, d := range []string{upper, work} {
@@ -62,7 +62,7 @@ func overlayCopyUp(t *testing.T) {
 			}
 		}
 		opts := "lowerdir=" + lower + ",upperdir=" + upper + ",workdir=" + work + ",userxattr"
-		if err := unix.Mount("overlay", merged, "overlay", 0, opts); err != nil {
+		if err := unix.Mount("overlay", merged, "overlay", flags, opts); err != nil {
 			t.Skipf("SKIP-OVERLAY: %v", err)
 		}
 	}
@@ -72,7 +72,7 @@ func overlayCopyUp(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mount(filepath.Join(dir, "u"))
+	mount(filepath.Join(dir, "u"), 0)
 	t.Cleanup(func() { _ = unix.Unmount(merged, 0) }) // before the temporary directory goes
 	ws := filepath.Join(merged, "ws")
 	id, err := RecordDirID(ws)
@@ -89,12 +89,12 @@ func overlayCopyUp(t *testing.T) {
 		t.Fatalf("the workspace written below is refused: %v", err)
 	}
 	unmount()
-	mount(filepath.Join(dir, "u"))
+	mount(filepath.Join(dir, "u"), 0)
 	if err := id.Check(ws); err != nil {
 		t.Fatalf("the same container after a restart is refused: %v", err)
 	}
 	unmount()
-	mount(filepath.Join(dir, "u2"))
+	mount(filepath.Join(dir, "u2"), 0)
 	if err := id.Check(ws); err == nil {
 		t.Fatal("a new container from the same image passed")
 	}
@@ -106,5 +106,13 @@ func overlayCopyUp(t *testing.T) {
 	}
 	if err := id.Check(ws); err == nil {
 		t.Fatal("a directory made again passed")
+	}
+	// A root that cannot be copied up has no creation time to keep, and
+	// the overlay no generation: it is refused rather than recorded
+	// without them.
+	unmount()
+	mount(filepath.Join(dir, "u3"), unix.MS_RDONLY)
+	if id, err := RecordDirID(ws); err == nil {
+		t.Fatalf("a root that cannot be copied up is recorded: %+v", id)
 	}
 }
