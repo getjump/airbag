@@ -66,7 +66,7 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 		if err := held(); err != nil {
 			return err
 		}
-		if err := fetchAgent(s, head); err != nil {
+		if err := fetchAgent(s, head, held); err != nil {
 			return err
 		}
 		if out, err := git(ws, nil, "rev-list", "--count", head, "--not", "--exclude=refs/airbag/*", "--all"); err == nil {
@@ -81,7 +81,7 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 	if err := held(); err != nil {
 		return err
 	}
-	tip, files, err := commitLeftovers(s, cs, head)
+	tip, files, err := commitLeftovers(s, cs, head, held)
 	if err != nil {
 		return err
 	}
@@ -187,7 +187,8 @@ func agentHead(s *session.Session) (string, error) {
 // sees both through alternates, and the real repository fetches from
 // it. The fetch runs with hooks off and does not read the agent's
 // config.
-func fetchAgent(s *session.Session, head string) error {
+func fetchAgent(s *session.Session, head string, held func() error) error {
+	wsGit := inWorkspace(s.Workspace, held)
 	tmp, err := os.MkdirTemp(s.Dir, "fetch-")
 	if err != nil {
 		return err
@@ -196,7 +197,7 @@ func fetchAgent(s *session.Session, head string) error {
 	if _, err := git("", nil, "init", "-q", "--bare", tmp); err != nil {
 		return err
 	}
-	realObjects, err := git(s.Workspace, nil, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+	realObjects, err := wsGit(nil, nil, "rev-parse", "--path-format=absolute", "--git-path", "objects")
 	if err != nil {
 		return err
 	}
@@ -208,7 +209,7 @@ func fetchAgent(s *session.Session, head string) error {
 		return fmt.Errorf("the agent's commit %s is not readable: %w", short(head), err)
 	}
 	ref := "refs/airbag/" + s.ID + "/head"
-	if _, err := git(s.Workspace, nil, "-c", "core.hooksPath=/dev/null", "fetch", "-q", "--no-tags",
+	if _, err := wsGit(nil, nil, "-c", "core.hooksPath=/dev/null", "fetch", "-q", "--no-tags",
 		"--no-write-fetch-head", tmp, "+refs/heads/agent:"+ref); err != nil {
 		return fmt.Errorf("fetch the agent's commits: %w", err)
 	}
@@ -218,12 +219,12 @@ func fetchAgent(s *session.Session, head string) error {
 // commitLeftovers commits what the agent left uncommitted on top of
 // base, through a temporary index. It returns the new tip (base when
 // nothing was left) and the number of files in that commit.
-func commitLeftovers(s *session.Session, cs []review.Change, base string) (string, int, error) {
-	ws := s.Workspace
+func commitLeftovers(s *session.Session, cs []review.Change, base string, held func() error) (string, int, error) {
+	wsGit := inWorkspace(s.Workspace, held)
 	idx := filepath.Join(s.Dir, "branch.index")
 	defer func() { _ = os.Remove(idx) }() // a scratch index in the session dir
 	env := []string{"GIT_INDEX_FILE=" + idx}
-	if _, err := git(ws, env, "read-tree", base); err != nil {
+	if _, err := wsGit(env, nil, "read-tree", base); err != nil {
 		return "", 0, err
 	}
 
@@ -241,13 +242,13 @@ func commitLeftovers(s *session.Session, cs []review.Change, base string) (strin
 			keep = append(keep, c)
 		}
 	}
-	keep, err := notIgnored(ws, keep)
+	keep, err := notIgnored(s.Workspace, keep)
 	if err != nil {
 		return "", 0, err
 	}
 	if len(drop) > 0 {
 		args := append([]string{"rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"}, drop...)
-		if _, err := git(ws, env, args...); err != nil {
+		if _, err := wsGit(env, nil, args...); err != nil {
 			return "", 0, err
 		}
 	}
@@ -263,12 +264,12 @@ func commitLeftovers(s *session.Session, cs []review.Change, base string) (strin
 				return "", 0, rerr
 			}
 			mode = "120000"
-			sha, err = gitIn(ws, nil, strings.NewReader(target), "hash-object", "-w", "--stdin")
+			sha, err = wsGit(nil, strings.NewReader(target), "hash-object", "-w", "--stdin")
 		default:
 			if c.Mode&0o111 != 0 {
 				mode = "100755"
 			}
-			sha, err = git(ws, nil, "hash-object", "-w", "--path", filepath.ToSlash(c.Rel), c.Upper)
+			sha, err = wsGit(nil, nil, "hash-object", "-w", "--path", filepath.ToSlash(c.Rel), c.Upper)
 		}
 		if err != nil {
 			return "", 0, fmt.Errorf("%s: %w", c.Rel, err)
@@ -276,15 +277,15 @@ func commitLeftovers(s *session.Session, cs []review.Change, base string) (strin
 		fmt.Fprintf(&info, "%s %s\t%s\n", mode, strings.TrimSpace(sha), filepath.ToSlash(c.Rel))
 	}
 	if info.Len() > 0 {
-		if _, err := gitIn(ws, env, &info, "update-index", "--index-info"); err != nil {
+		if _, err := wsGit(env, &info, "update-index", "--index-info"); err != nil {
 			return "", 0, err
 		}
 	}
-	tree, err := git(ws, env, "write-tree")
+	tree, err := wsGit(env, nil, "write-tree")
 	if err != nil {
 		return "", 0, err
 	}
-	baseTree, err := git(ws, nil, "rev-parse", base+"^{tree}")
+	baseTree, err := wsGit(nil, nil, "rev-parse", base+"^{tree}")
 	if err != nil {
 		return "", 0, err
 	}
@@ -292,11 +293,11 @@ func commitLeftovers(s *session.Session, cs []review.Change, base string) (strin
 		return base, 0, nil
 	}
 	n := 0
-	if out, err := git(ws, nil, "diff-tree", "-r", "--name-only", "--no-commit-id", base, strings.TrimSpace(tree)); err == nil {
+	if out, err := wsGit(nil, nil, "diff-tree", "-r", "--name-only", "--no-commit-id", base, strings.TrimSpace(tree)); err == nil {
 		n = len(strings.Fields(out))
 	}
 	msg := "airbag: files the agent left uncommitted in session " + s.ID
-	tip, err := git(ws, nil, "commit-tree", strings.TrimSpace(tree), "-p", base, "-m", msg)
+	tip, err := wsGit(nil, nil, "commit-tree", strings.TrimSpace(tree), "-p", base, "-m", msg)
 	if err != nil {
 		return "", 0, fmt.Errorf("commit: %w", err)
 	}
@@ -353,6 +354,18 @@ func isGitPath(rel string) bool {
 		}
 	}
 	return false
+}
+
+// inWorkspace runs git in the workspace after held, which checks that
+// the workspace is still the session's: each call names it by its path,
+// and one put in its place takes nothing written.
+func inWorkspace(ws string, held func() error) func(env []string, stdin io.Reader, args ...string) (string, error) {
+	return func(env []string, stdin io.Reader, args ...string) (string, error) {
+		if err := held(); err != nil {
+			return "", err
+		}
+		return gitIn(ws, env, stdin, args...)
+	}
 }
 
 func git(dir string, env []string, args ...string) (string, error) {
