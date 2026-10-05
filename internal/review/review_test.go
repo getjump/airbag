@@ -153,8 +153,11 @@ func TestAttentionUnknownHome(t *testing.T) {
 	write(filepath.Join(s.HomeUpper(), "go/pkg/mod/m@v1/old.go"), "package m // changed\n")
 	write(filepath.Join(s.HomeUpper(), "go/pkg/mod/n@v1/new.go"), "package n\n")
 	write(filepath.Join(s.WSUpper(), "main.go"), "package main\n")
-	if err := os.Symlink("/elsewhere", filepath.Join(s.HomeUpper(), ".cache/link")); err != nil {
-		t.Fatal(err)
+	// A link in a cache is dropped with it; one in agent state is applied.
+	for _, l := range []string{".cache/link", ".claude/todos/link"} {
+		if err := os.Symlink("/elsewhere", filepath.Join(s.HomeUpper(), l)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cs, err := Scan(s)
 	if err != nil {
@@ -166,7 +169,7 @@ func TestAttentionUnknownHome(t *testing.T) {
 	}
 	// A cache is folded and left out by apply, a module the host has
 	// included; a git directory in $HOME is not folded.
-	want := []string{"home:.cache/link", "home:.git/hooks/post-checkout", "home:.local/share/nvim/lazy/p/init.lua",
+	want := []string{"home:.claude/todos/link", "home:.git/hooks/post-checkout", "home:.local/share/nvim/lazy/p/init.lua",
 		"home:dotfiles/bashrc", "home:notes/todo.txt", "home:src/repo/.git/config", "home:src/repo/.git/objects/ab/cd"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("attention %v, want %v", got, want)
@@ -192,7 +195,7 @@ func TestAttentionUnknownHome(t *testing.T) {
 		for _, p := range []string{"go/pkg/", ".cache/", ".claude/todos/", ".local/share/Trash/"} {
 			want = want || strings.HasPrefix(c.Rel+"/", p)
 		}
-		want = want && c.Type != fs.ModeSymlink
+		want = want && !(c.Type == fs.ModeSymlink && strings.HasPrefix(c.Rel, ".claude/"))
 		if Dropped(c) != want {
 			t.Errorf("%s: dropped %v", c.Rel, Dropped(c))
 		}

@@ -243,7 +243,9 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   todos, caches — goes through the branch: review folds it into one `agent state`
   or `cache` line, and neither a discard nor an apply carries it to the real `$HOME`
   (a download cache holds code a host build runs as it is; `apply --only` naming a
-  path takes it anyway). The exception is shell code Claude Code sources: a
+  `~/` path takes it anyway). Codex's thread index is in that state, so a sandboxed
+  Codex session is resumed with `airbag run --session`, not with `codex resume` on the
+  host. The exception is shell code Claude Code sources: a
   change to a shell snapshot the host already has, and any change to a session's env
   files (the host can resume a session by id), is flagged `persist` and shown in full;
   the sandbox session's own new snapshots stay folded. A project's `memory/` (instructions loaded into later

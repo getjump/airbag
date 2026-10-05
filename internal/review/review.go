@@ -372,8 +372,8 @@ func containsSecret(path string, secrets []string) bool {
 func Attention(cs []Change) []Change {
 	var out []Change
 	for _, c := range cs {
-		if c.IsDir() && c.Kind == Added {
-			continue // the files inside carry the flags
+		if c.IsDir() && c.Kind == Added || Dropped(c) {
+			continue // the files inside carry the flags; apply leaves it out
 		}
 		// In $HOME, where an agent has no work of its own, what is not
 		// known to be harmless needs a look too: what review folds

@@ -1211,9 +1211,11 @@ func TestAppliedLinkOverDirClearsHostConfig(t *testing.T) {
 }
 
 // What review folds in $HOME (a cache, agent state) is left out by
-// apply; --only naming it takes it.
+// apply, a cache whatever it holds; flagged agent state (memory) is
+// applied; --only takes a folded path only when written as a $HOME one.
+// What is left out does not keep the session open.
 func TestApplyLeavesFoldsOut(t *testing.T) {
-	for _, only := range [][]string{nil, {"~/.cache/tool/x"}} {
+	for _, only := range [][]string{nil, {"~/.cache/tool/x"}, {".cache/tool/x"}} {
 		t.Setenv("AIRBAG_HOME", t.TempDir())
 		home := t.TempDir()
 		s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
@@ -1221,12 +1223,13 @@ func TestApplyLeavesFoldsOut(t *testing.T) {
 			t.Fatal(err)
 		}
 		s.Status = session.StatusStopped
-		for _, f := range []string{".cache/tool/x", "notes.txt"} {
+		for f, mode := range map[string]os.FileMode{".cache/tool/x": 0o600, ".cache/tool/bin/run": 0o755,
+			"notes.txt": 0o600, ".claude/projects/p/memory/MEMORY.md": 0o600} {
 			p := filepath.Join(s.HomeUpper(), f)
 			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			if err := os.WriteFile(p, []byte("x"), mode); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -1236,17 +1239,70 @@ func TestApplyLeavesFoldsOut(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = box.Close() })
 		var out bytes.Buffer
-		if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Only: only, Out: &out}); err != nil {
-			t.Fatal(err, out.String())
+		err = Apply(s, mustScan(t, s), box, Options{Yes: true, Only: only, Out: &out})
+		exists := func(f string) bool { _, err := os.Stat(filepath.Join(home, f)); return err == nil }
+		switch {
+		case only == nil:
+			if err != nil {
+				t.Fatal(err, out.String())
+			}
+			if exists(".cache/tool/x") || exists(".cache/tool/bin/run") || !exists("notes.txt") || !exists(".claude/projects/p/memory/MEMORY.md") {
+				t.Errorf("default apply: cache %v, executable %v, notes %v, memory %v\n%s", exists(".cache/tool/x"),
+					exists(".cache/tool/bin/run"), exists("notes.txt"), exists(".claude/projects/p/memory/MEMORY.md"), out.String())
+			}
+			if s.Status != session.StatusApplied {
+				t.Errorf("status %s after an apply that left only folds out:\n%s", s.Status, out.String())
+			}
+		case only[0] == "~/.cache/tool/x":
+			if err != nil || !exists(".cache/tool/x") {
+				t.Errorf("--only ~/... did not take the cache file: %v\n%s", err, out.String())
+			}
+		default:
+			if err == nil || exists(".cache/tool/x") {
+				t.Errorf("--only in workspace form took the $HOME cache file: %v\n%s", err, out.String())
+			}
 		}
-		_, cacheErr := os.Stat(filepath.Join(home, ".cache/tool/x"))
-		_, notesErr := os.Stat(filepath.Join(home, "notes.txt"))
-		if only == nil && (cacheErr == nil || notesErr != nil) {
-			t.Errorf("default apply: cache applied %v, notes applied %v\n%s", cacheErr == nil, notesErr == nil, out.String())
-		}
-		if only != nil && cacheErr != nil {
-			t.Errorf("--only did not take the cache file: %v\n%s", cacheErr, out.String())
-		}
+	}
+}
+
+// A folded change under a directory the agent replaced goes with the
+// replacement: applying it takes the host's directory away.
+func TestApplyKeepsFoldsUnderReplacedDir(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude/todos"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude/todos/old.json"), []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	up := filepath.Join(s.HomeUpper(), ".claude")
+	if err := os.MkdirAll(filepath.Join(up, "todos"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Setxattr(up, "user.overlay.opaque", []byte("y"), 0); err != nil {
+		t.Skipf("cannot mark a directory opaque here: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(up, "todos/new.json"), []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude/todos/new.json")); err != nil {
+		t.Errorf("the replaced ~/.claude lost its folded todos: %v\n%s", err, out.String())
 	}
 }
 

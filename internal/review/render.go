@@ -57,8 +57,7 @@ var homeNoise = []struct{ match, group, kind string }{
 	// (hostShellState), so it is not folded either.
 	{".claude/projects/", ".claude/", "agent state"}, {".claude/sessions/", ".claude/", "agent state"},
 	{".claude/session-env/", ".claude/", "agent state"}, {".claude/shell-snapshots/", ".claude/", "agent state"},
-	// Not file-history/: a host /rewind writes it back into files.
-	{".claude/todos/", ".claude/", "agent state"},
+	{".claude/file-history/", ".claude/", "agent state"}, {".claude/todos/", ".claude/", "agent state"},
 	{".claude/statsig/", ".claude/", "agent state"}, {".claude/backups/", ".claude/", "agent state"},
 	{".claude/debug/", ".claude/", "agent state"}, {".claude/ide/", ".claude/", "agent state"},
 	{".claude/plans/", ".claude/", "agent state"},
@@ -301,19 +300,22 @@ func OneLine(s string) string {
 func flagged(c Change) bool { return len(withoutOutside(c.Flags)) > 0 }
 
 // folded returns the line review folds a change in $HOME into, "" when
-// the change is listed on its own: caches and agent state that carry no
-// flag. Apply leaves what is folded out (Dropped), so the fold needs no
-// decision. A symlink is never folded: it would lead a later session's
-// path somewhere else. Nor are git internals in $HOME: objects and refs
-// go with the config and hooks a git command runs.
+// the change is listed on its own. Apply leaves what is folded out
+// (Dropped), so the fold needs no decision. A cache is folded whatever
+// it holds, executables and links included. Agent state is folded
+// unless it carries a flag (memory, shell code a host session sources)
+// or is a link, which would lead a later session's path somewhere
+// else: those are applied. Git internals in $HOME are not folded:
+// objects and refs go with the config and hooks a git command runs.
 func folded(c Change) string {
-	if c.Layer != "home" || flagged(c) || c.Type == fs.ModeSymlink {
+	if c.Layer != "home" {
 		return ""
 	}
-	if group, kind := noise(c.Rel); group != "" {
-		return group + "… (" + kind + ", not applied)"
+	group, kind := noise(c.Rel)
+	if group == "" || kind != "cache" && (flagged(c) || c.Type == fs.ModeSymlink) {
+		return ""
 	}
-	return ""
+	return group + "… (" + kind + ", not applied)"
 }
 
 // Dropped reports whether apply leaves a change out: review folds it as

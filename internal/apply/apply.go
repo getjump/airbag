@@ -149,10 +149,19 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	// What review folds in $HOME (caches, agent state) is left out: the
 	// fold is why it needs no decision, and a download cache holds code
 	// a host build runs as it is. --only naming it takes it anyway.
+	// A folded change under a directory the agent replaced is kept with
+	// it: applying the replacement takes the host's directory away.
+	var replaced []string
+	for _, c := range cs {
+		if c.Kind == review.Replaced && c.IsDir() && !review.Dropped(c) {
+			replaced = append(replaced, c.Path+string(filepath.Separator))
+		}
+	}
 	var kept []review.Change
 	dropped := 0
 	for _, c := range cs {
-		if review.Dropped(c) && !changeMatches(c, o.Only) {
+		under := slices.ContainsFunc(replaced, func(r string) bool { return strings.HasPrefix(c.Path, r) })
+		if review.Dropped(c) && !under && !homeMatches(c, o.Only, s.Home) {
 			dropped++
 			continue
 		}
@@ -233,10 +242,12 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if err != nil {
 		return err
 	}
-	if len(rest) == 0 {
+	// What apply leaves out does not keep the session open.
+	left := slices.DeleteFunc(slices.Clone(rest), review.Dropped)
+	if len(left) == 0 {
 		s.Status = session.StatusApplied
 	} else {
-		fmt.Fprintf(o.Out, "%d changes stay in session %s: airbag apply -i, or airbag discard.\n", len(rest), s.ID)
+		fmt.Fprintf(o.Out, "%d changes stay in session %s: airbag apply -i, or airbag discard.\n", len(left), s.ID)
 	}
 	if err := s.Save(); err != nil {
 		return err

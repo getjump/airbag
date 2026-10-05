@@ -3,6 +3,7 @@ package apply
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/getjump/airbag/internal/review"
@@ -120,6 +121,22 @@ func (u Unit) matches(paths []string) bool {
 		}
 	}
 	return false
+}
+
+// homeMatches reports whether c is in $HOME, at or under one of paths
+// written as a $HOME path (~/... or absolute under home): a path written
+// as a workspace one does not take what apply leaves out of $HOME.
+func homeMatches(c review.Change, paths []string, home string) bool {
+	if c.Layer != "home" {
+		return false
+	}
+	var hp []string
+	for _, p := range paths {
+		if strings.HasPrefix(p, "~/") || filepath.IsAbs(p) && (p == home || strings.HasPrefix(p, home+string(filepath.Separator))) {
+			hp = append(hp, p)
+		}
+	}
+	return changeMatches(c, hp)
 }
 
 // changeMatches reports whether c is at or under one of paths.
