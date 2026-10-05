@@ -127,7 +127,9 @@ rules:
                                                       if x.startswith('BUILD_SECONDS ')))
                 metas = list(sessions.glob('s-*/meta.json'))
                 assert len(metas) == 1
-                sid = json.loads(metas[0].read_text())['id']
+                meta = json.loads(metas[0].read_text())
+                sid = meta['id']
+                assert meta.get('egress') == 'allowlist-proxy', meta.get('egress')
                 assert (work / 'seed.txt').read_text() == 'original\n'
                 assert not (work / 'result.txt').exists() and not (work / 'escaped').exists()
                 review = call('review', sid, '--json')

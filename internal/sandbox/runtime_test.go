@@ -28,6 +28,9 @@ func TestOptionalBoundaryNeverFallsBack(t *testing.T) {
 		if _, err := SelectBackend(name, "shared-kernel"); err == nil {
 			t.Fatal("accepted incompatible isolation")
 		}
+		if got := b.ForRun(nil).Egress; got != EgressProxy {
+			t.Fatalf("%s reports egress %s; it mounts no host socket", name, got)
+		}
 	}
 }
 

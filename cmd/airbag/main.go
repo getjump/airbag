@@ -253,6 +253,9 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 		s.Backend, s.Isolation = execution.Name, execution.Isolation
+		// What this session reaches is fixed when it is created (HiddenHost),
+		// whatever this run's --nix-daemon says.
+		s.Egress = execution.ForRun(s.HiddenHost).Egress
 		if s.RequireIsolation == "" || *requireIsolation != "any" {
 			s.RequireIsolation = *requireIsolation
 		}
@@ -293,6 +296,7 @@ func cmdRun(args []string) (int, error) {
 		pass = append(pass, projPass...)
 		meta := session.Meta{
 			Backend: execution.Name, Isolation: execution.Isolation, RequireIsolation: *requireIsolation, Runtime: runtimeConfig,
+			Egress:    execution.ForRun(hiddenHost).Egress,
 			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
@@ -312,7 +316,7 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 	}
-	fmt.Fprintf(os.Stderr, "airbag: backend %s · isolation %s\n", execution.Name, execution.Isolation)
+	fmt.Fprintf(os.Stderr, "airbag: backend %s · isolation %s · egress %s\n", execution.Name, execution.Isolation, s.Egress)
 	if filepath.Base(argv[0]) == "codex" && !slices.Contains(argv, "--dangerously-bypass-approvals-and-sandbox") && !slices.Contains(argv, "--yolo") {
 		if *strict {
 			fmt.Fprintln(os.Stderr, "airbag: warning: Codex's own sandbox cannot start under --strict (no user namespaces), so its commands will fail; airbag is the sandbox, run codex with --dangerously-bypass-approvals-and-sandbox")

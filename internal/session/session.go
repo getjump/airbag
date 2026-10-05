@@ -31,6 +31,7 @@ type Meta struct {
 	Runtime          RuntimeConfig `json:"runtime,omitzero"`
 	Backend          string        `json:"backend,omitempty"`
 	Isolation        string        `json:"isolation,omitempty"`
+	Egress           string        `json:"egress,omitempty"`
 	RequireIsolation string        `json:"require_isolation,omitempty"`
 	ID               string        `json:"id"`
 	Created          time.Time     `json:"created"`
