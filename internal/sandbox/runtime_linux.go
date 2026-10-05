@@ -116,7 +116,14 @@ func runOptional(s *session.Session) (int, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return 1, err
 	}
-
+	// The staged rootfs keeps the agent's environment, --pass-env values
+	// included, and the microVM's images a copy of it and of the branch:
+	// none of it outlives the run. runGVisor deletes its container first.
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "airbag: warning: the runtime directory is left: %v\n", err)
+		}
+	}()
 	root := filepath.Join(dir, "rootfs")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return 1, err

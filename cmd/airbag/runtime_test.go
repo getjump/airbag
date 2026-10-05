@@ -53,6 +53,9 @@ func TestFailedRuntimeRunStops(t *testing.T) {
 	if saved.Status != session.StatusStopped || saved.ExitCode == 0 {
 		t.Fatalf("failed run left status %q, exit %d", saved.Status, saved.ExitCode)
 	}
+	if _, err := os.Stat(filepath.Join(s.Dir, "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("the runtime directory outlived the run: %v", err)
+	}
 	for _, f := range []string{"keep.txt", "sub/nested.txt"} {
 		if _, err := os.Stat(filepath.Join(saved.CloneDir(), f)); err != nil {
 			t.Fatalf("the branch lacks %s: %v", f, err)
