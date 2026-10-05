@@ -32,7 +32,9 @@ user can write, to place a host socket there: `sudo mkdir -m 1777
 skipped.
 
 On macOS, `go build ./cmd/airbag` builds the prototype and `go test ./...` runs
-the unit tests; the end-to-end tests are Linux-only.
+the unit tests. Of the end-to-end tests, `test/e2e.sh` and
+`test/agent-state-e2e.sh` check what the prototype promises there, and CI runs
+them on every macOS runner; the others are Linux-only.
 
 `sh test/check.sh` runs the static checks CI runs, with the same tool versions:
 gofmt, `go mod tidy`, `go vet`, golangci-lint and govulncheck for Linux and
