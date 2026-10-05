@@ -319,3 +319,31 @@ func TestReportDroppedRefusals(t *testing.T) {
 		t.Errorf("review:\n%s", b.String())
 	}
 }
+
+// A deferred command's line names --trust-links when the session adds
+// links, since a link out of the workspace holds the command at apply.
+func TestReportNamesTrustLinks(t *testing.T) {
+	s := &session.Session{Meta: session.Meta{ID: "s-1", Workspace: "/w"}}
+	cmd := outbox.Intent{ID: "i-1", Kind: outbox.KindCmd, Argv: []string{"pubtool", "release"}, Status: outbox.Pending}
+	push := outbox.Intent{ID: "i-2", Kind: outbox.KindPush, Argv: []string{"git", "push"}, Status: outbox.Pending}
+	link := Change{Layer: "ws", Rel: "docs", Path: "/w/docs", Kind: Added, Type: fs.ModeSymlink}
+	gone := Change{Layer: "ws", Rel: "old", Path: "/w/old", Kind: Deleted, Type: fs.ModeSymlink}
+	why := func(cs []Change, id string) string {
+		for _, a := range BuildReport(s, cs, nil, []outbox.Intent{cmd, push}, nil).Attention {
+			if a.Target == id {
+				return a.Why
+			}
+		}
+		t.Fatalf("no attention for %s", id)
+		return ""
+	}
+	if w := why([]Change{link}, "i-1"); !strings.Contains(w, "airbag apply --trust-links") || !strings.Contains(w, "among the 1 ") {
+		t.Errorf("the command's line does not name --trust-links: %s", w)
+	}
+	if w := why([]Change{link}, "i-2"); strings.Contains(w, "trust-links") {
+		t.Errorf("a push names --trust-links, which does not hold it: %s", w)
+	}
+	if w := why([]Change{gone}, "i-1"); strings.Contains(w, "trust-links") {
+		t.Errorf("a removed link holds nothing: %s", w)
+	}
+}

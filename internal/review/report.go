@@ -118,7 +118,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	if r.Steps == nil {
 		r.Steps = []steps.Step{}
 	}
-	deleted := 0
+	deleted, links := 0, 0
 	for _, c := range cs {
 		typ := "file"
 		switch c.Type {
@@ -126,6 +126,9 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			typ = "dir"
 		case fs.ModeSymlink:
 			typ = "symlink"
+			if c.Kind != Deleted {
+				links++
+			}
 		}
 		r.Changes = append(r.Changes, ReportChange{Layer: c.Layer, Path: filepath.ToSlash(c.Rel), Kind: c.Kind, Type: typ, Flags: c.Flags})
 		if c.Layer == "ws" && c.Kind == Deleted && !strings.HasPrefix(c.Rel, ".git/") {
@@ -195,7 +198,13 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 		}
 		switch in.Status {
 		case outbox.Pending, string(operation.Approved):
-			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "`" + outbox.Line(in.Argv) + "` waits for apply"})
+			why := "`" + outbox.Line(in.Argv) + "` waits for apply"
+			if in.Kind == outbox.KindCmd && links > 0 {
+				// Apply holds deferred commands while a link the session
+				// put in the real files leads out of the workspace.
+				why += fmt.Sprintf("; a link out of the workspace among the %d this session adds holds it (`airbag apply --trust-links` runs it anyway)", links)
+			}
+			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: why})
 		case outbox.Unknown:
 			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "outcome unknown: " + in.Output +
 				"; once checked, `airbag outbox resolve " + in.ID + " done|failed " + s.ID + "` lets the intents after it run"})
