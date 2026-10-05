@@ -34,10 +34,26 @@ import (
 	"github.com/getjump/airbag/internal/taint"
 )
 
+// stop records the end of a run: resume, apply and discard refuse a
+// session that is still marked running.
+func stop(s *session.Session, code int) error {
+	s.Status, s.ExitCode, s.Ended = session.StatusStopped, code, time.Now()
+	return s.Save()
+}
+
+// stopFailed records a run of an optional runtime that failed after the
+// session existed, so the session stays reachable for review and discard.
+func stopFailed(s *session.Session, code int, err error) (int, error) {
+	if code == 0 {
+		code = 1
+	}
+	return code, errors.Join(err, stop(s, code))
+}
+
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
 	if s.Backend != "" && s.Backend != "native" {
 		if err := prepareRuntimeWorkspace(s); err != nil {
-			return 1, err
+			return stopFailed(s, 1, err)
 		}
 	}
 	gate := policy.NewGate(pol, s.Dir)
@@ -114,10 +130,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if s.Backend != "" && s.Backend != "native" {
 		code, err := runOptional(s)
 		if err != nil {
-			return code, err
+			return stopFailed(s, code, err)
 		}
-		s.Status, s.ExitCode, s.Ended = session.StatusStopped, code, time.Now()
-		return code, s.Save()
+		return code, stop(s, code)
 	}
 
 	// Pass-through dirs must exist on the host, or the agent would

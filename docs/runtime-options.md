@@ -28,8 +28,9 @@ there is no automatic download or image provenance claim. Keep runsc's matching
 `gvisor-bin` sidecars next to it. Nonroot gVisor runs use runsc's rootless mode and
 need unprivileged user namespaces. Firecracker needs writable `/dev/kvm`,
 `mkfs.ext4`, and a kernel with built-in ext4, devtmpfs and virtio-vsock support.
-Rootfs and sessions must be separate from the workspace. Commands must exist
-inside the image; host executable paths are not imported.
+Rootfs and sessions must be separate from the workspace. A workspace reached
+through a symlink is checked and copied as the directory it names. Commands must
+exist inside the image; host executable paths are not imported.
 
 ## Shared contract
 
@@ -80,8 +81,9 @@ preserving existing Codex requirements.
 This adapter supports noninteractive commands and rejects terminal stdin; PTY/resize/job control are not
 provided. Each microVM run starts fresh HOME/tmp and exports only workspace;
 background processes are killed before export. On interruption/crash without
-export, the prior branch is retained and the run fails. Input files are copied,
-not reflinked in the current workspace copy path; the tar path does not preserve
+export, the prior branch is retained and the run fails; a run that fails
+after the session exists still records it stopped, so it can be reviewed,
+resumed or discarded. Input files are copied, not reflinked in the current workspace copy path; the tar path does not preserve
 hardlink identity or directory modes. Fixed microVM limits are 1 vCPU, 2 GiB RAM,
 2 GiB rootfs and 10 GiB workspace disk; export is bounded to 8 GiB/200k entries.
 
