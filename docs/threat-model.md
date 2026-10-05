@@ -1,14 +1,15 @@
 # Threat model
 
 airbag protects against accidents and casual exfiltration by an agent you let run
-without prompts. It is not a VM: the kernel is shared, and whatever the agent reads
-is still sent to the model API. A bound credential keeps its value from the agent,
+without prompts. By default it is not a VM: the native backend shares the host's
+kernel (the experimental `--backend=microvm` boots a guest kernel instead, below),
+and whatever the agent reads is still sent to the model API. A bound credential keeps its value from the agent,
 not its use: through the bound hosts the agent can do what the token allows.
 
 The seccomp filter removes the parts of the kernel surface an agent has no reason
 to touch ([Terminal and kernel](agent.md#terminal-and-kernel)), which cuts the
-exposure an unprivileged-user-namespace escape would use; but the kernel is still shared, so it is a smaller target, not a VM
-boundary. `airbag doctor` reports the host sysctls that harden the rest, and
+exposure an unprivileged-user-namespace escape would use; but with the native
+backend the kernel is still shared, so it is a smaller target, not a VM boundary. `airbag doctor` reports the host sysctls that harden the rest, and
 where the host sends core dumps.
 
 `airbag capabilities [--json]` describes the compiled execution boundary.

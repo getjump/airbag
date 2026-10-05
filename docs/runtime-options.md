@@ -28,9 +28,10 @@ there is no automatic download or image provenance claim. Keep runsc's matching
 `gvisor-bin` sidecars next to it. Nonroot gVisor runs use runsc's rootless mode and
 need unprivileged user namespaces. Firecracker needs writable `/dev/kvm`,
 `mkfs.ext4`, and a kernel with built-in ext4, devtmpfs and virtio-vsock support.
-Rootfs and sessions must be separate from the workspace, and the runtime binary,
-the kernel and the `mkfs.ext4` found on `PATH` must lie outside the workspace and
-the sessions: a `PATH` entry into the project is refused. A workspace reached
+Both stage the rootfs with GNU `cp` (coreutils) from `PATH`. Rootfs and sessions
+must be separate from the workspace, and the runtime binary, the kernel, and the
+`cp` and `mkfs.ext4` found on `PATH` must lie outside the workspace and the
+sessions: a `PATH` entry into the project is refused. A workspace reached
 through a symlink is checked and copied as the directory it names. Commands must
 exist inside the image; host executable paths are not imported.
 

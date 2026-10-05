@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"debug/elf"
 	"encoding/json"
@@ -56,6 +57,9 @@ func optionalHostReady(backend, workspace string) error {
 		if program.Type == elf.PT_INTERP {
 			return fmt.Errorf("optional runtimes require a static Airbag binary; build with CGO_ENABLED=0")
 		}
+	}
+	if _, err := rootfsCopier(workspace); err != nil {
+		return err
 	}
 	if backend == "microvm" {
 		if _, err := hostTool("mkfs.ext4", workspace); err != nil {
@@ -139,7 +143,12 @@ func runOptional(s *session.Session) (int, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return 1, err
 	}
-	cmd := exec.CommandContext(context.Background(), "/bin/cp", "-a", "--reflink=auto", "--", s.Runtime.RootFS+"/.", root) //nolint:gosec // operator-supplied trusted rootfs, separate from workspace
+	cp, err := rootfsCopier(s.Workspace)
+	if err != nil {
+		return 1, err
+	}
+	cmd := exec.CommandContext(context.Background(), cp, "-a", "--reflink=auto", "--", s.Runtime.RootFS+"/.", root) //nolint:gosec // rootfsCopier's cp; operator-supplied trusted rootfs, separate from workspace
+	cmd.Args[0] = "cp"                                                                                              // a multi-call coreutils picks the program by name
 	cmd.Env = providerEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return 1, fmt.Errorf("stage rootfs: %w: %s", err, out)
@@ -323,6 +332,25 @@ func executeProvider(binary string, args []string) (int, error) {
 		return exit.ExitCode(), nil
 	}
 	return 0, err
+}
+
+// rootfsCopier is the cp that stages a runtime's root filesystem: a
+// program of this machine (hostTool), and GNU's, which knows -a and
+// --reflink. NixOS has no /bin/cp, and BusyBox's refuses --reflink, so
+// this is found on PATH and checked before a session exists.
+func rootfsCopier(workspace string) (string, error) {
+	cp, err := hostTool("cp", workspace)
+	if err != nil {
+		return "", fmt.Errorf("optional runtimes stage their root filesystem with cp: %w", err)
+	}
+	cmd := exec.CommandContext(context.Background(), cp, "--version") //nolint:gosec // hostTool's cp
+	cmd.Args[0] = "cp"
+	cmd.Env = providerEnv()
+	out, err := cmd.Output()
+	if err != nil || !bytes.Contains(out, []byte("GNU coreutils")) {
+		return "", fmt.Errorf("optional runtimes stage their root filesystem with GNU cp (coreutils); %s is another", cp)
+	}
+	return cp, nil
 }
 
 func ext4Image(mkfs, source, path string, size int64) error {

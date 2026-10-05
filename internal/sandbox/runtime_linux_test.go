@@ -77,3 +77,22 @@ func TestRecopyClearsTheMark(t *testing.T) {
 		t.Fatalf("a failed copy kept the last one's mark: %+v", saved.Meta)
 	}
 }
+
+// The runtime's root filesystem is staged by a GNU cp found on PATH
+// outside the agent's files; another cp is refused before a session
+// exists.
+func TestRootfsCopierIsGNU(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", filepath.Join(t.TempDir(), "sessions"))
+	ws := t.TempDir()
+	if _, err := rootfsCopier(ws); err != nil {
+		t.Skipf("no GNU cp here: %v", err)
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "cp"), []byte("#!/bin/sh\necho 'BusyBox v1.36.1 multi-call binary.'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	if cp, err := rootfsCopier(ws); err == nil {
+		t.Fatalf("staged with %s, which is not GNU cp", cp)
+	}
+}
