@@ -84,13 +84,12 @@ func beginGeneration(s *session.Session) (*generation, error) {
 		return nil, err
 	}
 	// What a rollback's removal cut short left holds nothing needed: all
-	// of it was rolled back.
+	// of it was rolled back. Its removal is best effort: every listing
+	// passes it by, and one that cannot go must not stop every apply.
 	if es, err := os.ReadDir(root); err == nil {
 		for _, e := range es {
 			if strings.HasSuffix(e.Name(), ".gone") {
-				if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
-					return nil, err
-				}
+				_ = os.RemoveAll(filepath.Join(root, e.Name()))
 			}
 		}
 	}
@@ -487,7 +486,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		// the session as applied and make a second rollback undo the
 		// apply before this one.
 		if err := removeTree(gone); err != nil {
-			fmt.Fprintf(out, "  warning: %s is left (%v); the next apply removes it\n", gone, err)
+			fmt.Fprintf(out, "  warning: %s is left (%v); the next apply tries to remove it again\n", gone, err)
 		}
 		return left, nil
 	}
