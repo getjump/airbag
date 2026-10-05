@@ -1,0 +1,64 @@
+name: tty
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+# A new push to a pull request cancels the run before it; runs on main
+# all finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  # Interactive sessions in a real terminal: test/tty runs airbag in a
+  # pseudo-terminal with a probe for an agent, and with the Claude Code
+  # and Codex TUIs against test/mockapi, and keeps what was on the
+  # screen. A separate workflow, so it changes apart from ci.yml.
+  tty:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: build
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag" ./cmd/airbag
+          sudo install -m 755 "$RUNNER_TEMP/airbag" /usr/local/bin/airbag
+      - name: agent CLIs and freeze
+        # The same pinned CLIs as ci.yml's end-to-end tests. freeze draws
+        # the SVG screenshots; go install checks it against the Go
+        # checksum database. A GIF of session.cast is left out until agg
+        # can be installed from a release pinned by its checksum.
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.289 @openai/codex@0.160.0
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/charmbracelet/freeze@v0.2.2
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: PTY tests
+        # As the runner user: airbag runs as a regular user. Ubuntu 24.04
+        # restricts unprivileged user namespaces with AppArmor; CI lifts it.
+        env:
+          TTY_ARTIFACTS: ${{ runner.temp }}/tty-artifacts
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          sudo chmod 666 /dev/fuse || true
+          airbag doctor
+          go test -tags e2e ./test/tty/... -v
+      - name: keep the screens and recordings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tty-artifacts
+          path: ${{ runner.temp }}/tty-artifacts
+          if-no-files-found: ignore
