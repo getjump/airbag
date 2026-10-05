@@ -328,7 +328,10 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 			_ = l.Close()
 		}
 	}()
-	for port, target := range map[int]string{4000: s.ProxySock(), 4001: s.ControlSock()} {
+	for port, r := range map[int]struct {
+		target string
+		limits relayLimits
+	}{4000: {s.ProxySock(), proxyRelay}, 4001: {s.ControlSock(), controlRelay}} {
 		path := sock + "_" + strconv.Itoa(port)
 		_ = os.Remove(path)
 		l, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", path)
@@ -336,8 +339,8 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 			return 1, err
 		}
 		listeners = append(listeners, l)
-		go serveRelay(l, func() (net.Conn, error) {
-			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(context.Background(), "unix", target)
+		go serveRelay(l, r.limits, func() (net.Conn, error) {
+			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(context.Background(), "unix", r.target)
 		})
 	}
 	// The result channel is not attestation. A compromised guest can forge its

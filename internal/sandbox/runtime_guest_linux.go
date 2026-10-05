@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net"
 	"os"
@@ -146,7 +145,7 @@ func guestSetup(c guestConfig, vm bool) error {
 			_ = l.Close()
 			return err
 		}
-		go serveRelay(l, func() (net.Conn, error) { return dialVsock(4001) })
+		go serveRelay(l, controlRelay, func() (net.Conn, error) { return dialVsock(4001) })
 	}
 	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", ProxyAddr)
 	if err != nil {
@@ -158,7 +157,7 @@ func guestSetup(c guestConfig, vm bool) error {
 	if vm {
 		dial = func() (net.Conn, error) { return dialVsock(4000) }
 	}
-	go serveRelay(l, dial)
+	go serveRelay(l, proxyRelay, dial)
 	return nil
 }
 
@@ -282,29 +281,6 @@ func checkNoUserNamespaces() error {
 	return errors.New("a process can still create a user namespace; refusing to start the agent")
 }
 
-func serveRelay(l net.Listener, dial func() (net.Conn, error)) {
-	for {
-		client, err := l.Accept()
-		if err != nil {
-			return
-		}
-		go func() {
-			defer client.Close()
-			target, err := dial()
-			if err != nil {
-				return
-			}
-			defer target.Close()
-			done := make(chan struct{})
-			go func() { _, _ = io.Copy(target, client); _ = target.Close(); close(done) }()
-			_, _ = io.Copy(client, target)
-			_ = client.Close()
-			_ = target.Close()
-			<-done
-		}()
-	}
-}
-
 func dialVsock(port uint32) (net.Conn, error) {
 	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
@@ -314,13 +290,30 @@ func dialVsock(port uint32) (net.Conn, error) {
 		_ = unix.Close(fd)
 		return nil, err
 	}
-	file := os.NewFile(uintptr(fd), "vsock")
-	// net.FileConn does not recognize AF_VSOCK. A pollable os.File provides the
-	// same stream to the bounded export and the two scoped transport relays.
-	return &vsockConn{File: file}, nil
+	// net.FileConn does not recognize AF_VSOCK. An os.File of a non-blocking
+	// fd is pollable: deadlines work, and Close ends a blocked Read, which
+	// the relays' idle and drain bounds rely on.
+	if err := unix.SetNonblock(fd, true); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	return &vsockConn{File: os.NewFile(uintptr(fd), "vsock")}, nil
 }
 
 type vsockConn struct{ *os.File }
+
+// CloseWrite passes a half-close on, as proxy.Relay does when one side ends.
+func (c *vsockConn) CloseWrite() error {
+	rc, err := c.File.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var serr error
+	if err := rc.Control(func(fd uintptr) { serr = unix.Shutdown(int(fd), unix.SHUT_WR) }); err != nil {
+		return err
+	}
+	return serr
+}
 
 func (c *vsockConn) LocalAddr() net.Addr                { return vsockAddr("guest") }
 func (c *vsockConn) RemoteAddr() net.Addr               { return vsockAddr("host") }
