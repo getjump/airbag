@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -60,22 +61,23 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 			p.Ports = append(p.Ports, f.Port)
 		}
 	}
+	// A protected file (memory, settings, hooks) with another name in a
+	// state directory would be written through that name, which a deny
+	// on its path does not cover: then no state directory is writable.
+	linked, unchecked := protectedLinks(s.Home)
+	switch {
+	case linked != "":
+		fmt.Fprintf(os.Stderr, "airbag: warning: ~/.claude and ~/.codex stay read-only: %s has another hard link (find it with find ~ -samefile, and make one of them a copy or a symlink)\n", linked)
+	case unchecked != "":
+		fmt.Fprintf(os.Stderr, "airbag: warning: ~/.claude and ~/.codex stay read-only: %s could not be checked in full for hard links (unreadable, or more than %d files)\n", unchecked, maxPassFiles)
+	}
 	for _, d := range stateDirs {
 		if noSymlinkSoFar(s.Home, d) == nil {
 			_ = os.MkdirAll(filepath.Join(s.Home, d), 0o700)
 		}
-		// A protected file in it (memory, settings, hooks) with another
-		// name there would be written through that name, which a deny
-		// on its path does not cover: the directory stays read-only.
-		if l, full := protectedLinks(s.Home, d); l != "" || !full {
-			why := "its protected files could not be checked in full for hard links"
-			if l != "" {
-				why = "~/" + l + " has another hard link"
-			}
-			fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s stays read-only (%s)\n", strings.TrimSuffix(d, "/"), why)
-			continue
+		if linked == "" && unchecked == "" {
+			p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(d, "/")))
 		}
-		p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(d, "/")))
 	}
 	for _, f := range s.Passthrough {
 		// Seatbelt rules match paths, so a file there with another name
@@ -215,30 +217,39 @@ func follow(p string) string {
 // maxMemoryHops bounds the links follow follows, against a loop.
 const maxMemoryHops = 40
 
-// protectedLinks returns the first file the profile protects inside
-// state directory d (every project's memory, the read-only state)
-// that has more than one name, and whether all of them were checked.
-func protectedLinks(home, d string) (string, bool) {
-	var paths []string
-	for _, f := range stateReadOnly {
-		if strings.HasPrefix(f, d) {
-			paths = append(paths, f)
-		}
+// protectedLinks returns the first file the profile protects in the
+// state directories (every project's memory, the read-only state) that
+// has more than one name, or else the first path it could not check in
+// full. A protected path that is a link (a dotfiles hooks/) is checked
+// where it leads as well: a walk does not follow the link it starts at.
+func protectedLinks(home string) (linked, unchecked string) {
+	paths := append([]string(nil), stateReadOnly...)
+	projects := filepath.Join(home, ".claude/projects")
+	ents, err := os.ReadDir(projects)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", projects
 	}
-	if d == ".claude/" {
-		ents, _ := os.ReadDir(filepath.Join(home, ".claude/projects"))
-		for _, e := range ents {
+	for _, e := range ents {
+		// A file there (a .DS_Store) holds no memory.
+		if e.IsDir() || e.Type()&fs.ModeSymlink != 0 {
 			paths = append(paths, ".claude/projects/"+e.Name()+"/memory")
 		}
 	}
 	for _, p := range paths {
-		linked, full := hardLinks(home, p)
-		if len(linked) > 0 {
-			return linked[0], true
+		at := filepath.Join(home, p)
+		roots := []string{at}
+		if r := follow(at); r != at {
+			roots = append(roots, r)
 		}
-		if !full {
-			return "", false
+		for _, r := range roots {
+			l, full := hardLinks(filepath.Dir(r), filepath.Base(r))
+			if len(l) > 0 {
+				return filepath.Join(filepath.Dir(r), l[0]), ""
+			}
+			if !full {
+				return "", r
+			}
 		}
 	}
-	return "", true
+	return "", ""
 }

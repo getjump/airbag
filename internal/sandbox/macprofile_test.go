@@ -333,3 +333,106 @@ func TestMacProfileHardLinkedMemoryKeepsStateReadOnly(t *testing.T) {
 		t.Errorf("~/.claude writable with a hard-linked memory file: %v", p.Write)
 	}
 }
+
+// stateWritable builds the macOS profile for a session over home and
+// reports whether ~/.claude and ~/.codex are writable.
+func stateWritable(t *testing.T, home string) (claude, codex bool) {
+	t.Helper()
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := filepath.EvalSymlinks(home)
+	return slices.Contains(p.Write, filepath.Join(h, ".claude")), slices.Contains(p.Write, filepath.Join(h, ".codex"))
+}
+
+func writeFile(t *testing.T, p, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A file directly in ~/.claude/projects (a .DS_Store) holds no memory:
+// it does not make the state directories read-only.
+func TestMacProfileStrayFileInProjects(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".claude/projects/.DS_Store"), "x")
+	if claude, codex := stateWritable(t, home); !claude || !codex {
+		t.Errorf("state not writable with a file in projects/: claude %v, codex %v", claude, codex)
+	}
+}
+
+// Each protected file with another name in a state directory keeps
+// both state directories read-only: the other name may be in either.
+func TestMacProfileHardLinkedProtectedKeepsStateReadOnly(t *testing.T) {
+	for _, c := range []struct{ protected, other string }{
+		{".claude/projects/other/memory/MEMORY.md", ".codex/log/x"},
+		{".claude/settings.json", ".claude/debug/x"},
+		{".codex/config.toml", ".codex/log/x"},
+	} {
+		t.Setenv("AIRBAG_HOME", t.TempDir())
+		home := t.TempDir()
+		writeFile(t, filepath.Join(home, c.protected), "x")
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(home, c.other)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if claude, codex := stateWritable(t, home); !claude || !codex {
+			t.Fatalf("%s: state not writable without a link", c.protected)
+		}
+		if err := os.Link(filepath.Join(home, c.protected), filepath.Join(home, c.other)); err != nil {
+			t.Fatal(err)
+		}
+		if claude, codex := stateWritable(t, home); claude || codex {
+			t.Errorf("%s linked to %s: claude writable %v, codex writable %v", c.protected, c.other, claude, codex)
+		}
+	}
+}
+
+// A protected directory that is a link (a dotfiles hooks/) is checked
+// where it leads.
+func TestMacProfileLinkedProtectedDirIsChecked(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	hook := filepath.Join(home, "dotfiles/hooks/pre.sh")
+	writeFile(t, hook, "x")
+	if err := os.MkdirAll(filepath.Join(home, ".claude/debug"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "dotfiles/hooks"), filepath.Join(home, ".claude/hooks")); err != nil {
+		t.Fatal(err)
+	}
+	if claude, _ := stateWritable(t, home); !claude {
+		t.Fatal("~/.claude not writable without a hard link")
+	}
+	if err := os.Link(hook, filepath.Join(home, ".claude/debug/x")); err != nil {
+		t.Fatal(err)
+	}
+	if claude, _ := stateWritable(t, home); claude {
+		t.Error("~/.claude writable with a hard link into a linked hooks/")
+	}
+}
+
+// A protected tree too large to check keeps the state read-only.
+func TestMacProfileUncheckedProtectedKeepsStateReadOnly(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	defer func(n int) { maxPassFiles = n }(maxPassFiles)
+	maxPassFiles = 1
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".claude/plugins/a"), "x")
+	if claude, _ := stateWritable(t, home); !claude {
+		t.Fatal("~/.claude not writable with one plugin file")
+	}
+	writeFile(t, filepath.Join(home, ".claude/plugins/b"), "x")
+	if claude, codex := stateWritable(t, home); claude || codex {
+		t.Errorf("state writable past the cap: claude %v, codex %v", claude, codex)
+	}
+}

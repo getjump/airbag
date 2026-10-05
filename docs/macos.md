@@ -147,9 +147,14 @@ directory or a linked `~/.claude/projects`, is denied where it really is too,
 with the directories above that place. Seatbelt rules match paths, not files: a
 file in a passed-through path that has another hard-linked name is denied (the
 whole path, when it cannot be checked in full), and when a memory file or other
-protected file has another name, `~/.claude` (or `~/.codex`) stays read-only for
-the session, since a write through that name would not be a write to the denied
-path. What it cannot:
+protected file has another name, or the protected files cannot all be checked,
+both `~/.claude` and `~/.codex` stay read-only for the session, since a write
+through that name would not be a write to the denied path. A protected path that
+is a link (a `hooks/` kept in a dotfiles repository) is checked where it leads.
+This is checked when the session starts, and counts every other name, even one
+outside any place the agent may write: a dotfiles setup that hard-links
+`~/.claude/CLAUDE.md` makes the state read-only, and airbag says which file to
+turn into a copy or a symlink. What it cannot:
 `~/.claude.json` stays writable, so a change to it — including MCP servers,
 permissions and per-project trust — persists in full without review, and the
 rest of `~/.claude` and `~/.codex` persists as before. The fix is a branch of

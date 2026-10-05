@@ -488,7 +488,10 @@ func hardLinks(root, p string) (linked []string, full bool) {
 	n, top := 0, filepath.Join(root, p)
 	err := filepath.WalkDir(top, func(q string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if q != top && errors.Is(err, fs.ErrNotExist) {
+			switch {
+			case q == top && d == nil && (errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOTDIR)):
+				return nil // nothing there (a component is a file, say)
+			case q != top && errors.Is(err, fs.ErrNotExist):
 				return nil // gone since it was listed
 			}
 			return err
@@ -511,7 +514,7 @@ func hardLinks(root, p string) (linked []string, full bool) {
 		}
 		return nil
 	})
-	return linked, err == nil || errors.Is(err, fs.ErrNotExist) && n == 0
+	return linked, err == nil
 }
 
 var errTooMany = errors.New("too many files")
