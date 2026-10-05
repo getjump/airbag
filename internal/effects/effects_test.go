@@ -112,6 +112,77 @@ func TestBatchAtomicAndFullDurability(t *testing.T) {
 	}
 }
 
+// A context row adds source, PID, detail and argv to its event and
+// nothing else: one that names a verdict or kind does not change them.
+func TestRuntimeContextCannotChangeVerdict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	if err := l.AddChecked(Effect{Kind: "fs.write", Target: "/w/protected", Verdict: "deny", Source: "fuse", PID: 9}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.db.ExecContext(t.Context(), `INSERT INTO events (t, kind, target, verdict) VALUES ('2026-10-05T00:00:00Z', 'fs.write', '/w/other', 'deny');
+INSERT INTO event_context (id, data) VALUES (last_insert_rowid(), '{"source":"fuse","verdict":"allow","kind":"fs.read","target":"/w/x"}')`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("read: %+v %v", got, err)
+	}
+	if got[0].Source != "fuse" || got[0].PID != 9 {
+		t.Errorf("context lost: %+v", got[0])
+	}
+	if e := got[1]; e.Verdict != "deny" || e.Kind != "fs.write" || e.Target != "/w/other" || e.Source != "fuse" {
+		t.Errorf("context changed the event: %+v", e)
+	}
+}
+
+// Runtime refusals go through the same meter as every refusal; every
+// allowed runtime entry is written with its context.
+func TestRuntimeRefusalsMetered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+	batch := make([]Effect, 0, refuseBurst+15)
+	for range refuseBurst + 5 {
+		batch = append(batch, Effect{Kind: "proc.exec", Target: "/usr/bin/x", Verdict: "deny", Source: "seccomp", PID: 7, Argv: []string{"x"}})
+	}
+	for range 10 {
+		batch = append(batch, Effect{Kind: "fs.read", Target: "/w/f", Verdict: "allow", Source: "fuse", PID: 8})
+	}
+	if err := l.AddBatchChecked(batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deny, allow, dropped := 0, 0, 0
+	for _, e := range got {
+		switch {
+		case e.Kind == Dropped:
+			dropped += DroppedCount(e)
+		case e.Verdict == "deny" && e.Source == "seccomp" && e.PID == 7 && len(e.Argv) == 1:
+			deny++
+		case e.Verdict == "allow" && e.Source == "fuse" && e.PID == 8:
+			allow++
+		}
+	}
+	if deny != refuseBurst || dropped != 5 || allow != 10 {
+		t.Fatalf("deny %d (want %d), dropped %d (want 5), allow %d (want 10)", deny, refuseBurst, dropped, allow)
+	}
+}
+
 // Past the burst, refused entries (deny, ask) of a kind are held to the
 // rate and the
 // rest are counted; the count is written before the kind's next entry

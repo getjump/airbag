@@ -69,10 +69,15 @@ if pid == 0:
     libc.execveat(fd, b'', argv, env, 0x1000)
     os._exit(0 if ctypes.get_errno() == 13 else 1)
 assert os.waitpid(pid, 0)[1] == 0
-# Init's channel/backing fds must stay inaccessible to the agent.
-# Listing fd numbers alone is permitted on some namespace/proc combinations.
-# The security boundary is dereferencing/reopening the supervisor's fd links.
-for number in os.listdir('/proc/1/fd'):
+# Init's channel/backing fds must stay inaccessible to the agent. With
+# hidepid=2 PID 1 is not visible at all. Without it, listing fd numbers alone
+# is permitted on some namespace/proc combinations; the security boundary is
+# dereferencing/reopening the supervisor's fd links.
+try:
+    numbers = os.listdir('/proc/1/fd')
+except (FileNotFoundError, PermissionError):
+    numbers = []
+for number in numbers:
     try:
         os.readlink('/proc/1/fd/' + number)
     except PermissionError:
