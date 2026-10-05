@@ -169,6 +169,8 @@ boundaries do not remove FUSE crossings or audit commits.
 `go test ./...` and the race suite exercise existing storage, policy, proxy,
 review/apply and typed publication behavior. `sh test/sdk-client-e2e.sh` copies
 the client into a fresh external Go module, compiles it with the local Airbag
-replacement, runs it under the race detector and checks the public dependency
-graph. CI runs that external client and host lifecycle on Linux and macOS;
+replacement, runs it under the race detector when cgo and a C compiler are
+available, and checks the public dependency graph. The client still runs
+without the race detector in environments such as the WSL job. CI runs that
+external client and host lifecycle on Linux and macOS;
 the existing Linux sandbox E2E still exercises the complete CLI workflow.
