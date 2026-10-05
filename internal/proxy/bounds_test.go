@@ -15,6 +15,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -895,10 +896,11 @@ func TestForwardOnStoppedFlowCloses(t *testing.T) {
 // on it through a ResponseController.
 type deadlines struct {
 	*httptest.ResponseRecorder
-	set []time.Time
+	set, reads []time.Time
 }
 
 func (d *deadlines) SetWriteDeadline(t time.Time) error { d.set = append(d.set, t); return nil }
+func (d *deadlines) SetReadDeadline(t time.Time) error  { d.reads = append(d.reads, t); return nil }
 
 // The proxy's own answers, which have no flow to close them, are
 // written within AnswerWrite; a request starts with no deadline.
@@ -920,7 +922,125 @@ func TestAnswerHasWriteDeadline(t *testing.T) {
 		if len(w.set) != 2 || !w.set[0].IsZero() || w.set[1].Before(before) || w.set[1].After(time.Now().Add(AnswerWrite)) {
 			t.Errorf("%s: deadlines %v", target, w.set)
 		}
+		// What is left of the body is read after the answer, within
+		// AnswerWrite too.
+		if len(w.reads) != 1 || w.reads[0].Before(before.Add(AnswerWrite)) || w.reads[0].After(time.Now().Add(AnswerWrite)) {
+			t.Errorf("%s: read deadlines %v", target, w.reads)
+		}
 	}
+}
+
+// paceLog records, in order, the write deadlines set on an answer and
+// the writes made to it.
+type paceLog struct {
+	*httptest.ResponseRecorder
+	ev []string
+	at []time.Time
+}
+
+func (l *paceLog) SetWriteDeadline(t time.Time) error {
+	if t.IsZero() {
+		l.ev = append(l.ev, "clear")
+	} else {
+		l.ev, l.at = append(l.ev, "d"), append(l.at, t)
+	}
+	return nil
+}
+
+func (l *paceLog) SetReadDeadline(t time.Time) error {
+	l.ev, l.at = append(l.ev, "r"), append(l.at, t)
+	return nil
+}
+
+func (l *paceLog) WriteHeader(code int) {
+	l.ev = append(l.ev, "h")
+	l.ResponseRecorder.WriteHeader(code)
+}
+
+func (l *paceLog) Write(b []byte) (int, error) {
+	l.ev = append(l.ev, "w"+strconv.Itoa(len(b)))
+	return l.ResponseRecorder.Write(b)
+}
+
+// The mirror's answers have no flow either: every write to the socket,
+// at most pacedChunk of an answer, has a deadline of AnswerWrite set
+// just before it, and so does what net/http writes after the mirror
+// returns.
+func TestMirrorAnswerIsPaced(t *testing.T) {
+	big := 3*pacedChunk + 1
+	cases := []struct {
+		name  string
+		body  string
+		serve func(http.ResponseWriter)
+		want  string
+	}{
+		{"header and body", "", func(w http.ResponseWriter) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(make([]byte, big))
+		}, "clear d h d w65536 d w65536 d w65536 d w1 d"},
+		{"body only", "", func(w http.ResponseWriter) { _, _ = w.Write(make([]byte, 10)) }, "clear d w10 d"},
+		{"header only", "", func(w http.ResponseWriter) { w.WriteHeader(http.StatusOK) }, "clear d h d"},
+		{"empty write", "", func(w http.ResponseWriter) { _, _ = w.Write(nil) }, "clear d w0 d"},
+		// A request body, which the mirror leaves unread, is read after
+		// the answer within AnswerWrite.
+		{"request body", "0123456789", func(w http.ResponseWriter) { _, _ = w.Write(make([]byte, 10)) }, "clear d w10 d r"},
+	}
+	for _, c := range cases {
+		log, _ := newLog(t)
+		p := New(nil, log)
+		p.Mirror = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { c.serve(w) })
+		w := &paceLog{ResponseRecorder: httptest.NewRecorder()}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://airbag.mirror/npm/x", strings.NewReader(c.body))
+		if c.body == "" {
+			r.ContentLength, r.Body = 0, http.NoBody
+		}
+		before := time.Now()
+		p.ServeHTTP(w, r)
+		if got := strings.Join(w.ev, " "); got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
+		}
+		for _, d := range w.at {
+			if d.Before(before.Add(AnswerWrite)) || d.After(time.Now().Add(AnswerWrite)) {
+				t.Errorf("%s: deadline %v", c.name, d)
+			}
+		}
+	}
+}
+
+// A request that declares a body and sends none still gets the
+// proxy's own answer, a refusal or the mirror's: net/http would first
+// read the body, with no deadline.
+func TestAnswerToUnsentBody(t *testing.T) {
+	log, _ := newLog(t)
+	p := New(Allowlist{"api.anthropic.com"}, log)
+	p.Mirror = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() { _ = p.Serve(l) }()
+	g0, fd0 := usage()
+	for target, want := range map[string]int{"paste.example.net": http.StatusForbidden, "airbag.mirror": http.StatusOK} {
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", l.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second)) // a failing run ends too
+		_, _ = fmt.Fprintf(c, "POST http://%s/x HTTP/1.1\r\nHost: %s\r\nContent-Length: 10\r\n\r\n", target, target)
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil {
+			t.Errorf("%s: %v", target, err)
+		} else {
+			if resp.StatusCode != want || !resp.Close {
+				t.Errorf("%s: %d, close %v", target, resp.StatusCode, resp.Close)
+			}
+			resp.Body.Close()
+		}
+		c.Close()
+	}
+	// The proxy lets go of both connections once they are closed.
+	settle(t, g0, fd0, 0, 0, 3*time.Second)
 }
 
 // Cut closes every flow before it writes the log, which another writer

@@ -498,8 +498,13 @@ The proxy, the forwards and the control socket run in airbag's process on the
 host and parse what the agent sends. airbag closes the connections there that
 stop carrying data (a request header must arrive within 30 seconds at the
 proxy and 10 at the control socket; the other bounds are
-[above](#what-the-agent-gets)), and a refusal the proxy answers before it relays
-anything closes the connection if the agent does not read it within 30 seconds.
+[above](#what-the-agent-gets)). A refusal the proxy answers before it relays
+anything (outside an intercepted connection, whose refusals close with its idle
+limit) is the last answer on its connection, and closes it if the agent does not
+read it within 30 seconds. An answer from the mirror that the agent stops reading
+closes the connection too: each 64 KiB of it must go out within 30 seconds, and
+the socket takes more only once the agent has read most of what it holds (about
+200 KiB on Linux), so a reader slower than a few KiB a second is cut off as well.
 airbag caps the tunnels, the forwarded connections and the connections to the
 proxy and to the control socket a session holds at once. Each refusal (a deny,
 or an ask) is a row in the effect log on the host's disk: past a burst of 1000,
