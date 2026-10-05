@@ -2064,9 +2064,9 @@ func TestRollbackStoppedBeforeRestoreRestoresLater(t *testing.T) {
 	}
 }
 
-// An undo journal that cannot be read refuses apply: whether the last
-// apply or a rollback of it finished is not known. The directory a crash
-// leaves before the first journal write, with nothing saved, is no apply.
+// An undo journal that cannot be read, or is gone, refuses apply:
+// whether the last apply or a rollback of it finished is not known. What
+// a crash leaves before a journal is first written is passed by.
 func TestApplyRefusesUnreadableJournal(t *testing.T) {
 	ws := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
@@ -2105,20 +2105,30 @@ func TestApplyRefusesUnreadableJournal(t *testing.T) {
 			t.Fatalf("apply ran with an unreadable journal (branch %q): %v", o.Branch, err)
 		}
 	}
+	// A journal lost is no journal: this apply added a file, so saved/
+	// is empty, and still the apply happened.
+	if err := os.Remove(journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "undo journal") {
+		t.Fatalf("apply ran with the journal of an added-only apply lost: %v", err)
+	}
 	if err := os.WriteFile(journal, good, 0o600); err != nil { //nolint:gosec // the session's own journal, under the test's AIRBAG_HOME
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(generationsDir(s), "2", "saved"), 0o700); err != nil {
+	// What a crash leaves before a journal's first write is the .new
+	// directory, which apply, rollback and discard pass by.
+	if err := os.MkdirAll(filepath.Join(generationsDir(s), "2.new", "saved"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err != nil {
-		t.Fatalf("a crash's empty generation refuses apply: %v", err)
+		t.Fatalf("a crash's unfinished generation refuses apply: %v", err)
 	}
 	if _, err := HeldVersions(s); err != nil {
-		t.Fatalf("a crash's empty generation refuses discard: %v", err)
+		t.Fatalf("a crash's unfinished generation refuses discard: %v", err)
 	}
 	if err := Rollback(s, nil, &out); err != nil {
-		t.Fatalf("a crash's empty generation hides the apply before it from rollback: %v", err)
+		t.Fatalf("a crash's unfinished generation hides the apply before it from rollback: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(ws, "a.txt")); !os.IsNotExist(err) {
 		t.Fatalf("the apply is not rolled back: %v", err)

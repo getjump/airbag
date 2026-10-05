@@ -79,17 +79,33 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
+	gs, err := listGenerations(s)
+	if err != nil {
+		return nil, err
+	}
 	n := 1
-	if gs, _ := listGenerations(s); len(gs) > 0 {
+	if len(gs) > 0 {
 		n = gs[len(gs)-1].n + 1
 	}
-	g := &generation{dir: filepath.Join(root, strconv.Itoa(n)), roots: rootsOf(s), Session: s.ID, Started: time.Now(), Clone: s.Clone}
+	// Made under a name listGenerations passes by and renamed to its
+	// number once its journal is written: a numbered directory always has
+	// one, so a numbered directory without one is a journal lost, never a
+	// crash before the first write. A crash leaves only the .new.
+	final := filepath.Join(root, strconv.Itoa(n))
+	g := &generation{dir: final + ".new", roots: rootsOf(s), Session: s.ID, Started: time.Now(), Clone: s.Clone}
+	if err := os.RemoveAll(g.dir); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Join(g.dir, "saved"), 0o700); err != nil {
 		return nil, err
 	}
 	if err := g.save(); err != nil {
 		return nil, err
 	}
+	if err := os.Rename(g.dir, final); err != nil {
+		return nil, err
+	}
+	g.dir = final
 	return g, nil
 }
 
@@ -136,14 +152,7 @@ func listGenerations(s *session.Session) ([]genRef, error) {
 		if err != nil || !e.IsDir() {
 			continue
 		}
-		dir := filepath.Join(generationsDir(s), e.Name())
-		// A directory a crash left before its journal was first written,
-		// with nothing saved in it, is no apply: apply, rollback and
-		// discard all pass it by, and the next apply takes its number.
-		if _, err := os.Lstat(filepath.Join(dir, "journal.json")); errors.Is(err, fs.ErrNotExist) && emptyOrAbsent(filepath.Join(dir, "saved")) {
-			continue
-		}
-		out = append(out, genRef{n, dir})
+		out = append(out, genRef{n, filepath.Join(generationsDir(s), e.Name())})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].n < out[j].n })
 	return out, nil
