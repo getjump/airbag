@@ -157,24 +157,39 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   allowed for the agent's own programs (gdb, strace, `go test -race`). It
   covers the native ABI and every compat one and kills an unknown
   architecture, so a refused call cannot slip past by its number on a 32-bit
-  or x32 entry. One gap remains in the default mode: a 32-bit (i386) program
-  can still create a socket through the `socketcall` multiplexer, whose
-  family argument the filter cannot read; `--strict` closes that too.
+  or x32 entry. Two gaps remain in the default mode. A 32-bit (i386) program
+  can still create a socket of any family or netlink protocol through the
+  `socketcall` multiplexer, whose arguments are behind a pointer the filter
+  cannot read. And the agent can make its own user and network namespace,
+  where it is root, and there still reach `NETLINK_ROUTE` (traffic control,
+  qdiscs), generic netlink and the legacy x_tables `setsockopt` interface.
+  `--strict` closes both: it refuses i386 socket creation and forbids new
+  user namespaces. The second is not covered when airbag runs as root: the
+  agent is then root in its own namespace, where a network namespace needs
+  no new user namespace.
   Alongside the filter: the agent's `/proc` hides other processes
   (`hidepid`) and `/dev/kmsg` and `/dev/userfaultfd` are hidden; the agent
   cannot ptrace the supervisor or read its `/proc/1/mem` or `/proc/1/environ`
   (its user namespace has no `CAP_SYS_PTRACE` over PID 1, and PID 1 is set
   non-dumpable as a second layer); file descriptors inherited from the caller
-  are closed before the agent starts; and a crash cannot write a core dump
-  (`RLIMIT_CORE=1`, which blocks even a `core_pattern` that pipes to a host
-  handler like systemd-coredump).
+  are closed before the agent starts; and core dumps are capped at 1 byte
+  (`RLIMIT_CORE=1`). That stops file dumps and a `core_pattern` that pipes to
+  a host handler like systemd-coredump, unless something in the sandbox
+  lowers the limit (`--strict` refuses that change). A socket `core_pattern`
+  (`@` or `@@`, Linux 6.16+) ignores the limit and is not covered; `airbag
+  doctor` reports which kind the host uses.
 
   What this gives up, in return: `perf`, `bpftrace`/`bcc` and
   `async-profiler`'s perf mode do not work (no `perf_event_open`/`bpf`);
   tools that cache credentials in the kernel keyring (some Kerberos
-  `KEYRING:` ccaches) do not; nftables inside the agent's own namespaces does
-  not (`NETLINK_NETFILTER`); and under `--strict`, 32-bit networking and
-  nested mounts through the new mount API do not. The agents themselves and
+  `KEYRING:` ccaches) do not; inside the agent's own namespaces, nftables,
+  iptables-nft, `conntrack` and rootless Podman networks (netavark) do not
+  (`NETLINK_NETFILTER`), nor do `ip xfrm` and strongSwan (`NETLINK_XFRM`);
+  numactl's `migratepages` and the `move_pages` calls of libnuma and hwloc do
+  not; fanotify tools such as `fatrace` do not; and under `--strict`, 32-bit
+  networking, nested mounts through the new mount API, and programs that
+  lower their own core-dump limit and stop when they cannot (gpg, a
+  daemonizing `ssh-agent`) do not. The agents themselves and
   the usual build and test tools do not use any of these; a `strace -f -c`
   over a Claude Code and a Codex run touches none of the refused calls.
 - **A strict mode.** `airbag run --strict` also keeps the agent from creating
@@ -182,9 +197,11 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   out of its reach, and in this mode only the filter refuses the new mount
   API (`fsopen`, `fsconfig`, `open_tree`, `move_mount`, `mount_setattr`, …)
   with `ENOSYS`, as Flatpak does, so a nested mount cannot reconfigure the
-  VFS, and refuses i386 `socketcall` socket creation. It is off by default
-  because common tools need user namespaces: Codex's own `--sandbox` modes
-  and Chromium's sandbox fail under it (run Codex with
+  VFS, refuses i386 `socketcall` socket creation, and refuses a change to the
+  core-dump limit (`setrlimit` or `prlimit64` on `RLIMIT_CORE`; reading it
+  still works). If any of this cannot be set up, the run stops. It is off by
+  default because common tools need user namespaces: Codex's own `--sandbox`
+  modes and Chromium's sandbox fail under it (run Codex with
   `--dangerously-bypass-approvals-and-sandbox`, Chromium with `--no-sandbox`).
 - **More than one run.** `airbag run --session last -- claude --continue` runs the
   agent again on the branch of a stopped session: it sees its own earlier changes,
@@ -449,7 +466,8 @@ not its use: through the bound hosts the agent can do what the token allows.
 The seccomp filter removes the parts of the kernel surface an agent has no reason
 to touch (above), which cuts the exposure an unprivileged-user-namespace escape
 would use; but the kernel is still shared, so it is a smaller target, not a VM
-boundary. `airbag doctor` reports the host sysctls that harden the rest.
+boundary. `airbag doctor` reports the host sysctls that harden the rest, and
+where the host sends core dumps.
 
 For hosts without a credential the proxy decides from the name the client asks for
 and does not see inside TLS. So a broad allowlist entry (`github.com`) is a way for

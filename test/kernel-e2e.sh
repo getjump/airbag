@@ -1,8 +1,8 @@
 #!/bin/sh
 # The seccomp filter and /proc hardening in effect inside a session:
 # kernel-surface syscalls are refused, the supervisor and other
-# processes are out of reach, no fds leak in, and no core dump is
-# written. The calls the agents actually use still work. See
+# processes are out of reach, no fds leak in, and core dumps are capped
+# at 1 byte. The calls the agents actually use still work. See
 # internal/sandbox/seccomp.go for why each is refused.
 set -eu
 AIRBAG=${AIRBAG:-airbag}
@@ -84,7 +84,7 @@ v=$("$AIRBAG" run --strict -- sh -c "'$T/kernprobe' fsopen" 2>/dev/null); discar
 
 # --strict also refuses i386 socketcall socket creation (the family is
 # behind a pointer the filter cannot read); by default it works.
-if [ -x "$T/kernprobe386" ] && echo "$base" >/dev/null; then
+if [ -x "$T/kernprobe386" ]; then
 	sc=$("$AIRBAG" run -- sh -c "'$T/kernprobe386' socketcall_socket 2>&1" 2>/dev/null || true); discard
 	case "$sc" in
 	OK)
@@ -104,11 +104,14 @@ echo "$out" | grep -q ENVREAD && fail "/proc/1/environ was readable"
 echo "$out" | grep -q MEMREAD && fail "/proc/1/mem was readable"
 echo "$out" | grep -q P1VISIBLE && fail "PID 1 is visible to the agent (hidepid not set)"
 
-# /dev/kmsg is hidden (bound to /dev/null), so a read returns no kernel
-# log, whether or not the open succeeds.
-out=$("$AIRBAG" run -- sh -c 'head -c 64 /dev/kmsg 2>/dev/null | wc -c' 2>/dev/null)
-discard
-echo "$out" | grep -qx 0 || fail "/dev/kmsg leaked kernel log ($out bytes)"
+# /dev/kmsg and /dev/userfaultfd are hidden: /dev/null (1:3) is bound
+# over each node the host has. The device number is checked, not a read:
+# with dmesg_restrict=1 a read of the real /dev/kmsg is empty too.
+for dev in /dev/kmsg /dev/userfaultfd; do
+	[ -e "$dev" ] || continue
+	v=$("$AIRBAG" run -- sh -c "stat -c %t:%T $dev" 2>/dev/null); discard
+	[ "$v" = 1:3 ] || fail "$dev is not hidden: device $v, want 1:3 (/dev/null)"
+done
 
 # fdsge3 prints the fd number and target for every open fd >= 3, so the
 # checks ignore stdio (which may itself be a socket).
@@ -121,18 +124,30 @@ discard
 fdsge3 "$out" | grep -q "socket:" && fail "an inherited socket fd reached the agent:
 $out"
 
-# An fd the caller leaves open (fd 7) must not reach the agent.
-out=$(exec 7</etc/hostname; "$AIRBAG" run -- sh -c 'ls -l /proc/self/fd' 2>/dev/null)
+# An fd the caller leaves open (fd 7) must not reach the agent. It is a
+# file this script makes, so the open cannot fail and pass the check
+# without testing anything.
+echo fd7 > "$T/inherited-fd7"
+out=$(exec 7<"$T/inherited-fd7"; "$AIRBAG" run -- sh -c 'ls -l /proc/self/fd' 2>/dev/null)
 discard
-fdsge3 "$out" | grep -q "/etc/hostname" && fail "an inherited fd (7 -> /etc/hostname) reached the agent:
+fdsge3 "$out" | grep -q "inherited-fd7" && fail "an inherited fd (7 -> $T/inherited-fd7) reached the agent:
 $out"
 
-# No core dump: RLIMIT_CORE is 1 byte, soft and hard (see init.go), which
-# blocks both pipe and file dumps. ulimit -c reports 512-byte blocks, so
-# read the byte value from /proc/self/limits instead.
+# Core dumps are capped: RLIMIT_CORE is 1 byte, soft and hard (see
+# init.go), which stops file dumps and pipe handlers. ulimit -c reports
+# 512-byte blocks, so read the byte value from /proc/self/limits instead.
 out=$("$AIRBAG" run -- sh -c 'grep "Max core file size" /proc/self/limits' 2>/dev/null)
 discard
 echo "$out" | awk '{ exit !($5 == "1" && $6 == "1") }' || fail "RLIMIT_CORE soft/hard not 1 byte: $out"
+
+# --strict refuses a change to the limit (at 0 a pipe core_pattern runs
+# again); by default the kernel lets a process lower it. A read, as
+# `ulimit -c` makes, works in both.
+v=$("$AIRBAG" run -- sh -c 'ulimit -c >/dev/null && echo read; ulimit -S -c 0 2>/dev/null && echo lowered; true' 2>/dev/null); discard
+[ "$v" = "read
+lowered" ] || fail "RLIMIT_CORE without --strict: expected a read and a lowered limit, got: $v"
+v=$("$AIRBAG" run --strict -- sh -c 'ulimit -c >/dev/null && echo read; ulimit -S -c 0 2>/dev/null && echo lowered; true' 2>/dev/null); discard
+[ "$v" = read ] || fail "RLIMIT_CORE under --strict: expected a read and no change, got: $v"
 
 # The tools the agents run still work under the filter.
 out=$("$AIRBAG" run -- sh -c 'git --version >/dev/null 2>&1 && echo git-ok; true' 2>/dev/null)
