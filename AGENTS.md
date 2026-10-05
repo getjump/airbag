@@ -4,8 +4,8 @@ Instructions for coding and review agents working on this repository.
 [CONTRIBUTING.md](CONTRIBUTING.md) is the longer version for people.
 
 airbag is a sandbox for CLI coding agents. A change here can widen what an
-agent under airbag can do to a user's machine, so read the README's
-[threat model](README.md#threat-model) before you change the sandbox, the
+agent under airbag can do to a user's machine, so read the
+[threat model](docs/threat-model.md) before you change the sandbox, the
 proxy, the outbox, secret handling or policy.
 
 ## Build and test
@@ -65,7 +65,8 @@ them on every macOS runner); the others are Linux-only.
   breaks it. A parser of what the agent sends has a Fuzz target that checks an
   invariant.
 - No new dependency without a reason in the pull request.
-- Update the README when something user-visible changes, and
+- Update the README, or the page in `docs/` that covers it, when something
+  user-visible changes, and
   [docs/roadmap.md](docs/roadmap.md) when a deferred item moves.
 - Commit messages: a summary line, usually with the area first (`proxy:`,
   `apply:`, `docs:`), then what changed and why.
