@@ -14,3 +14,6 @@ func fsID(string) uint64 { return 0 }
 
 // gen is 0 on macOS: st_gen reads as 0 unless the caller is root.
 func gen(string) uint64 { return 0 }
+
+// settle has nothing to do on macOS.
+func settle(string) bool { return true }

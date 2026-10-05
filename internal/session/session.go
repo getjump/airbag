@@ -120,6 +120,8 @@ type Meta struct {
 // device formatted again keeps its number. Where a filesystem records
 // neither a creation time nor a generation (NFS, FUSE), a directory
 // removed and made again with the same inode number is not told apart.
+// On an overlay the root is copied up before it is recorded (settle),
+// so its creation time is the top layer's, which it keeps.
 type DirID struct {
 	Real string `json:"real"`
 	Dev  uint64 `json:"dev"`
@@ -127,6 +129,22 @@ type DirID struct {
 	Born int64  `json:"born,omitempty"`
 	Gen  uint64 `json:"gen,omitempty"`
 	FS   uint64 `json:"fs,omitempty"`
+}
+
+// RecordDirID is DirIDOf for a root a session begins with: a directory
+// on an overlay is copied up first (settle), and where it cannot be, no
+// creation time is recorded, since the first write below would change it.
+func RecordDirID(p string) (DirID, error) {
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return DirID{}, err
+	}
+	settled := settle(real)
+	id, err := DirIDOf(p)
+	if !settled {
+		id.Born = 0
+	}
+	return id, err
 }
 
 // DirIDOf is the directory p names now.
@@ -160,7 +178,7 @@ func (id DirID) Check(p string) error {
 	case id.FS != 0 && got.FS != id.FS,
 		got.Dev != id.Dev && (id.Born == 0 || id.FS == 0):
 		return fmt.Errorf("%s is on another filesystem than when the session began: another one, or a snapshot of this one, is mounted there, "+
-			"or this one was mounted again and records nothing that tells it is the same (macOS, NFS, FUSE, an overlay after a container restart; "+
+			"or this one was mounted again and records nothing that tells it is the same (macOS, NFS, FUSE; "+
 			"xfs when its device is renumbered); "+
 			"in that last case airbag cannot tell, so take what you need from airbag diff, then discard the session", p)
 	}
@@ -237,7 +255,7 @@ func Create(m Meta) (*Session, error) {
 		if r.path == "" || r.id.Real != "" || r.id == &m.HomeID && !m.OverHome {
 			continue
 		}
-		id, err := DirIDOf(r.path)
+		id, err := RecordDirID(r.path)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
