@@ -61,7 +61,11 @@ type generation struct {
 	Complete bool      `json:"complete"`
 	// Partial: rolled back except Entries, which were left as they were;
 	// their previous versions are kept under saved/.
-	Partial bool       `json:"partial,omitempty"`
+	Partial bool `json:"partial,omitempty"`
+	// Stopped: a rollback stopped part way, a root having changed;
+	// Entries are what it had not reached and what it kept, and the next
+	// rollback finishes it as this one would have.
+	Stopped bool       `json:"stopped,omitempty"`
 	Entries []genEntry `json:"entries"`
 	// Dirs: directories the apply made that a partial rollback could
 	// not remove because they were not empty; the next one tries again.
@@ -199,6 +203,11 @@ func (g *generation) finish() error {
 	return g.save()
 }
 
+// afterRemove is a test hook, called once a rollback entry has removed
+// the agent's version and before it restores the previous one; nil
+// outside tests.
+var afterRemove func(path string)
+
 // rollback undoes the generation's entries, last first. Each real path
 // that still looks as the apply left it gets its previous version back,
 // and the agent's version returns to the session. It reports the paths
@@ -248,7 +257,8 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		for j := len(kept) - 1; j >= 0; j-- {
 			rest = append(rest, kept[j])
 		}
-		g.Entries, g.Dirs, g.Partial = rest, dirs, true
+		slices.Sort(dirs)
+		g.Entries, g.Dirs, g.Stopped = rest, slices.Compact(dirs), true
 		if serr := g.save(); serr != nil {
 			err = errors.Join(err, serr)
 		}
@@ -359,10 +369,17 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		if err := os.RemoveAll(e.Path); err != nil && !gone(err) {
 			return left, err
 		}
-		if err := held(); moved && err != nil {
-			return stop(i, err)
+		if afterRemove != nil {
+			afterRemove(e.Path)
 		}
 		if moved {
+			if err := held(); err != nil {
+				// The agent's version is out and back in the session:
+				// to the next rollback this is a step that did not
+				// finish, whose previous version saved/ holds.
+				g.Entries[i].After = ""
+				return stop(i, err)
+			}
 			if err := move(e.Saved, e.Path); err != nil {
 				return left, fmt.Errorf("%s: restore: %w", e.Path, err)
 			}
@@ -391,7 +408,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
 		kept[i], kept[j] = kept[j], kept[i]
 	}
-	g.Entries, g.Dirs, g.Complete, g.Partial = kept, still, true, true
+	g.Entries, g.Dirs, g.Complete, g.Partial, g.Stopped = kept, still, true, true, false
 	return left, g.save()
 }
 
@@ -683,7 +700,7 @@ func HeldVersions(s *session.Session) ([]Held, error) {
 		if err != nil {
 			return nil, err
 		}
-		if g.Complete && !g.Partial {
+		if g.Complete && !g.Partial && !g.Stopped {
 			continue // applied: discarding it keeps the apply, as asked
 		}
 		for _, e := range g.Entries {

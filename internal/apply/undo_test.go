@@ -1943,6 +1943,10 @@ func TestRollbackRechecksRootBetweenEntries(t *testing.T) {
 	if err := Apply(s, cs, box, Options{Yes: true, Out: &out}); err != nil {
 		t.Fatal(err)
 	}
+	s.Status = session.StatusApplied // as when nothing else stays in the session
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
 	// c.txt, rolled back first, is edited since: the rollback leaves it
 	// and says so, and the root is replaced then.
 	if err := os.WriteFile(filepath.Join(ws, "c.txt"), []byte("edited\n"), 0o644); err != nil {
@@ -1978,5 +1982,77 @@ func TestRollbackRechecksRootBetweenEntries(t *testing.T) {
 	}
 	if got := read(t, filepath.Join(ws, "c.txt")); got != "edited\n" {
 		t.Errorf("the edit after the apply: %q", got)
+	}
+	// Finished, it is the rollback the first would have been, not the
+	// retry of a partial one: the session takes its changes again.
+	saved, err := session.Load(s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status == session.StatusApplied || saved.Baseline.IsZero() || strings.Contains(out.String(), "left by the last rollback") {
+		t.Errorf("a stopped rollback, finished, is a partial one: status %s, baseline %v\n%s", saved.Status, saved.Baseline, out.String())
+	}
+}
+
+// Stopped between removing the agent's version and restoring the user's,
+// a rollback keeps the user's version, which discard then guards, and
+// the next one restores it: the path is not taken for a host change.
+func TestRollbackStoppedBeforeRestoreRestoresLater(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "m.txt"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "m.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "m.txt", Path: filepath.Join(ws, "m.txt"), Upper: upper, Kind: review.Modified, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	afterRemove = func(string) {
+		afterRemove = nil
+		if err := os.Rename(ws, ws+".old"); err != nil {
+			t.Error(err)
+		}
+		if err := os.Mkdir(ws, 0o755); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "rollback stopped") {
+		t.Fatalf("the rollback went on in a replaced root: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "m.txt")); !os.IsNotExist(err) {
+		t.Fatalf("restored into the replacement: %v", err)
+	}
+	if held, err := HeldVersions(s); err != nil || len(held) != 1 {
+		t.Fatalf("discard does not guard the kept version: %v %v", held, err)
+	}
+	if err := os.RemoveAll(ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(ws+".old", ws); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("the rollback once the root is back: %v\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
+		t.Errorf("the user's version is not restored: %q\n%s", got, out.String())
+	}
+	if strings.Contains(out.String(), "changed after the apply") {
+		t.Errorf("taken for a host change:\n%s", out.String())
 	}
 }
