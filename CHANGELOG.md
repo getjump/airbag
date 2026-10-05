@@ -51,5 +51,10 @@ Nothing is released yet; this is what the first release holds.
   `LICENSE` and `README.md`, an SBOM per archive, `checksums.txt` signed with
   Sigstore, and GitHub build provenance. [docs/verify.md](docs/verify.md)
   shows how to check them and how to rebuild the binaries.
+- `install.sh` is a release asset: it checks with cosign or a logged-in `gh`
+  that the release workflow built the archive, when either is installed, and
+  stops if that check fails; it always checks the SHA-256, and says so when
+  that was the only check. `AIRBAG_VERIFY=require` refuses to install without
+  cosign or `gh`.
 
 [Unreleased]: https://github.com/getjump/airbag/commits/main
