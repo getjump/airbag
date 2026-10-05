@@ -241,6 +241,15 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			return len(g.Entries), fmt.Errorf("nothing rolled back: %w; put the directory back, then roll back: your versions from before the apply are kept in %s", err, filepath.Join(g.dir, "saved"))
 		}
 	}
+	// Marked before the first write, so a run that ends any other way (an
+	// error, a crash, Ctrl-C) leaves a stopped rollback too: discard keeps
+	// the versions in saved/, apply refuses. The final save clears it.
+	if !g.Stopped {
+		g.Stopped = true
+		if err := g.save(); err != nil {
+			return len(g.Entries), fmt.Errorf("nothing rolled back: mark the journal: %w", err)
+		}
+	}
 	dirs := slices.Clone(g.Dirs) // directories the apply created, removed last, deepest first
 	var kept []genEntry
 	keep := func(e genEntry, why string) {
@@ -282,7 +291,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		if serr := g.save(); serr != nil {
 			err = errors.Join(err, serr)
 		}
-		return len(rest), fmt.Errorf("rollback stopped: %w; put the directory back, then roll back again: what is not rolled back yet stays in the journal, your versions from before the apply in %s", err, filepath.Join(g.dir, "saved"))
+		return len(rest), fmt.Errorf("rollback stopped: %w; once that is fixed (a directory that moved put back), roll back again: what is not rolled back yet stays in the journal, your versions from before the apply in %s", err, filepath.Join(g.dir, "saved"))
 	}
 	for i := len(g.Entries) - 1; i >= 0; i-- {
 		e := g.Entries[i]
@@ -371,7 +380,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 				return stop(i, err)
 			}
 			if err := giveBack(e, g.Clone); err != nil {
-				return left, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err)
+				return stop(i, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err))
 			}
 		}
 		// A directory with nothing before it, added or replacing what was
@@ -387,7 +396,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			return stop(i, err)
 		}
 		if err := os.RemoveAll(e.Path); err != nil && !gone(err) {
-			return left, err
+			return stop(i, err)
 		}
 		if afterRemove != nil {
 			afterRemove(e.Path)
@@ -401,7 +410,8 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 				return stop(i, err)
 			}
 			if err := move(e.Saved, e.Path); err != nil {
-				return left, fmt.Errorf("%s: restore: %w", e.Path, err)
+				g.Entries[i].After = "" // as above: the agent's version is out
+				return stop(i, fmt.Errorf("%s: restore: %w", e.Path, err))
 			}
 		}
 	}

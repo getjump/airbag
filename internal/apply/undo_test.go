@@ -2115,3 +2115,119 @@ func TestApplyRefusesUnreadableJournal(t *testing.T) {
 		t.Fatalf("a crash's empty generation refuses apply: %v", err)
 	}
 }
+
+// modifiedApplied applies the agent's m.txt over the user's in a new
+// session and returns it, with the outbox it used.
+func modifiedApplied(t *testing.T) (*session.Session, *outbox.Box, string) {
+	t.Helper()
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "m.txt"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "m.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "m.txt", Path: filepath.Join(ws, "m.txt"), Upper: upper, Kind: review.Modified, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	return s, box, ws
+}
+
+// The journal says stopped from before the first write, so a rollback
+// that ends any other way, a crash between two steps say, leaves the
+// saved versions guarded and apply refused.
+func TestRollbackMarksItsJournalFirst(t *testing.T) {
+	s, _, ws := modifiedApplied(t)
+	var midway *generation
+	var held []Held
+	afterRemove = func(string) {
+		afterRemove = nil
+		var err error
+		if midway, err = lastGeneration(s); err != nil {
+			t.Error(err)
+		}
+		if held, err = HeldVersions(s); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if midway == nil || !midway.Stopped || len(held) != 1 {
+		t.Fatalf("mid-rollback the journal is not marked stopped (%+v) or the saved version not guarded (%v)", midway, held)
+	}
+	if read(t, filepath.Join(ws, "m.txt")) != "mine\n" {
+		t.Fatal("not rolled back")
+	}
+	if g, err := lastGeneration(s); err != nil || g != nil {
+		t.Fatalf("a finished rollback left its journal: %+v %v", g, err)
+	}
+}
+
+// A restore that fails stops the rollback like a root check: the journal
+// keeps the entry as a step that did not finish, apply refuses, and the
+// next rollback restores the user's version.
+func TestRollbackFailedRestoreRestoresLater(t *testing.T) {
+	s, box, ws := modifiedApplied(t)
+	g, err := lastGeneration(s)
+	if err != nil || g == nil || len(g.Entries) != 1 {
+		t.Fatalf("journal: %+v %v", g, err)
+	}
+	saved := g.Entries[0].Saved
+	afterRemove = func(string) {
+		afterRemove = nil
+		if err := os.Rename(saved, saved+".away"); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "rollback stopped") {
+		t.Fatalf("a failed restore did not stop the rollback: %v", err)
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "stopped part way") {
+		t.Fatalf("apply ran after a failed restore: %v", err)
+	}
+	if err := os.Rename(saved+".away", saved); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" || strings.Contains(out.String(), "changed after the apply") {
+		t.Fatalf("the user's version is not restored: %q\n%s", got, out.String())
+	}
+}
+
+// An apply that did not finish refuses apply onto a branch too: the
+// pending intents would run on a half-applied tree.
+func TestBranchApplyRefusesAnUnfinishedApply(t *testing.T) {
+	s, box, _ := modifiedApplied(t)
+	g, err := lastGeneration(s)
+	if err != nil || g == nil {
+		t.Fatal(err)
+	}
+	g.Complete = false
+	if err := g.save(); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out, Branch: "agent"}); err == nil || !strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("apply --branch ran after an unfinished apply: %v", err)
+	}
+}

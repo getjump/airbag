@@ -144,17 +144,20 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	// Some real files rolled back and some not: no change, and no intent
 	// (a push, a command), runs on such a tree.
 	if last != nil && last.Stopped {
-		return fmt.Errorf("a rollback of session %s stopped part way; put the directory back and run `airbag rollback %s` to finish it, then apply again", s.ID, s.ID)
+		return fmt.Errorf("a rollback of session %s stopped part way; run `airbag rollback %s` to finish it (put back a directory that moved first), then apply again", s.ID, s.ID)
+	}
+	// An apply that did not finish left the real files half applied:
+	// nothing more goes on them, nor onto a branch from a session in that
+	// state.
+	if last != nil && !last.Complete {
+		return fmt.Errorf("an apply of session %s started %s did not finish; run `airbag rollback %s` to undo its part, then apply again",
+			s.ID, last.Started.Format("15:04:05"), s.ID)
 	}
 	if o.Branch != "" {
 		if err := ApplyBranch(s, cs, o.Branch, o); err != nil {
 			return err
 		}
 		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
-	}
-	if last != nil && !last.Complete {
-		return fmt.Errorf("an apply of session %s started %s did not finish; run `airbag rollback %s` to undo its part, then apply again",
-			s.ID, last.Started.Format("15:04:05"), s.ID)
 	}
 	if s.Status == session.StatusApplied {
 		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
