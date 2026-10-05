@@ -10,14 +10,19 @@ import (
 	"strings"
 )
 
-const archiveLimit = 8 << 30
+const (
+	archiveLimit = 8 << 30
+	maxEntries   = 200000
+)
 
 // No guest block image is ever mounted or parsed by the host kernel. Export is
 // untrusted tar, bounded and unpacked through os.Root into a fresh directory.
-func importWorkspace(dst string, input io.Reader) error {
+// It returns the number of entries read. The end of the tar alone does not
+// say the export is complete; the microVM's result stream does (receiveExport).
+func importWorkspace(dst string, input io.Reader) (int, error) {
 	root, err := os.OpenRoot(dst)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = root.Close() }()
 	reader := tar.NewReader(io.LimitReader(input, archiveLimit+1))
@@ -26,20 +31,20 @@ func importWorkspace(dst string, input io.Reader) error {
 	for count := 0; ; count++ {
 		h, err := reader.Next()
 		if err == io.EOF {
-			return nil
+			return count, nil
 		}
 		if err != nil {
-			return err
+			return count, err
 		}
-		if count >= 200000 {
-			return fmt.Errorf("too many workspace entries")
+		if count >= maxEntries {
+			return count, fmt.Errorf("too many workspace entries")
 		}
 		name := filepath.Clean(h.Name)
 		if name == "." && h.Typeflag == tar.TypeDir {
 			continue
 		}
 		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") || strings.ContainsRune(name, '\x00') || seen[name] {
-			return fmt.Errorf("invalid or duplicate workspace path %q", h.Name)
+			return count, fmt.Errorf("invalid or duplicate workspace path %q", h.Name)
 		}
 		seen[name] = true
 		// os.Root confines symlinks, but following an earlier archive symlink could
@@ -47,58 +52,72 @@ func importWorkspace(dst string, input io.Reader) error {
 		for parent := filepath.Dir(name); parent != "."; parent = filepath.Dir(parent) {
 			st, err := root.Lstat(parent)
 			if err == nil && st.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("symlink parent of %q", name)
+				return count, fmt.Errorf("symlink parent of %q", name)
 			}
 			if err != nil && !os.IsNotExist(err) {
-				return err
+				return count, err
 			}
 		}
 		if err := root.MkdirAll(filepath.Dir(name), 0o700); err != nil {
-			return err
+			return count, err
 		}
 		switch h.Typeflag {
 		case tar.TypeDir:
 			if err := root.MkdirAll(name, 0o700); err != nil {
-				return err
+				return count, err
 			}
 		case tar.TypeReg:
 			if h.Size < 0 || h.Size > archiveLimit-total {
-				return fmt.Errorf("workspace exceeds export limit")
+				return count, fmt.Errorf("workspace exceeds export limit")
 			}
 			total += h.Size
 			f, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fs.FileMode(h.Mode&0o777))
 			if err != nil {
-				return err
+				return count, err
 			}
 			_, err = io.CopyN(f, reader, h.Size)
 			closeErr := f.Close()
 			if err != nil {
-				return err
+				return count, err
 			}
 			if closeErr != nil {
-				return closeErr
+				return count, closeErr
 			}
 		case tar.TypeSymlink:
 			if err := root.Symlink(h.Linkname, name); err != nil {
-				return err
+				return count, err
 			}
 		default:
-			return fmt.Errorf("unsupported workspace entry %q (%d)", name, h.Typeflag)
+			return count, fmt.Errorf("unsupported workspace entry %q (%d)", name, h.Typeflag)
 		}
 	}
 }
 
-func exportWorkspace(root string, output io.Writer) error {
+// exportStats is what exportWorkspace wrote: the tar entries, and the
+// special files it left out.
+type exportStats struct {
+	entries int
+	skipped []string
+}
+
+// exportWorkspace writes root as a tar. With skipSpecial, sockets, FIFOs
+// and devices are left out and listed, as the microVM guest does with
+// what the agent made; the host copies the real workspace without it, and
+// such a file fails the copy rather than be missing from the branch. The
+// tar is finished only when every entry was written: on an error it stops
+// where it is, and the stream around it says the export failed.
+func exportWorkspace(root string, output io.Writer, skipSpecial bool) (exportStats, error) {
+	var st exportStats
 	// WalkDir does not descend into a root that is a symlink: a workspace
 	// reached through one (a non-git cwd) would export empty, a branch in
 	// which every real file is gone. Walk the directory it names.
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return err
+		return st, err
 	}
 	source, err := os.OpenRoot(root)
 	if err != nil {
-		return err
+		return st, err
 	}
 	defer func() { _ = source.Close() }()
 	writer := tar.NewWriter(output)
@@ -109,32 +128,38 @@ func exportWorkspace(root string, output io.Writer) error {
 		if path == root {
 			return nil
 		}
-		st, err := d.Info()
+		info, err := d.Info()
 		if err != nil {
 			return err
 		}
-		if !st.Mode().IsRegular() && !st.IsDir() && st.Mode()&os.ModeSymlink == 0 {
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			if skipSpecial && info.Mode()&(os.ModeNamedPipe|os.ModeSocket|os.ModeDevice) != 0 {
+				st.skipped = append(st.skipped, rel)
+				return nil
+			}
 			return fmt.Errorf("unsupported workspace file %s", path)
 		}
 		link := ""
-		if st.Mode()&os.ModeSymlink != 0 {
+		if info.Mode()&os.ModeSymlink != 0 {
 			link, err = os.Readlink(path)
 			if err != nil {
 				return err
 			}
 		}
-		h, err := tar.FileInfoHeader(st, link)
+		h, err := tar.FileInfoHeader(info, link)
 		if err != nil {
 			return err
 		}
-		h.Name, err = filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
+		h.Name = rel
 		if err := writer.WriteHeader(h); err != nil {
 			return err
 		}
-		if st.Mode().IsRegular() {
+		st.entries++
+		if info.Mode().IsRegular() {
 			f, err := source.Open(h.Name)
 			if err != nil {
 				return err
@@ -149,8 +174,7 @@ func exportWorkspace(root string, output io.Writer) error {
 		return nil
 	})
 	if err != nil {
-		_ = writer.Close()
-		return err
+		return st, err // no trailer: a partial tar must not read as a whole one
 	}
-	return writer.Close()
+	return st, writer.Close()
 }

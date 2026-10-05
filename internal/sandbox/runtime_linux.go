@@ -15,10 +15,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/getjump/airbag/internal/agents"
+	"github.com/getjump/airbag/internal/netcap"
 	"github.com/getjump/airbag/internal/session"
 	"golang.org/x/sys/unix"
 )
@@ -80,8 +82,12 @@ func prepareRuntimeWorkspace(s *session.Session) error {
 	// source symlinks are preserved, never followed into host HOME.
 	reader, writer := io.Pipe()
 	done := make(chan error, 1)
-	go func() { err := exportWorkspace(s.Workspace, writer); _ = writer.CloseWithError(err); done <- err }()
-	err := importWorkspace(s.CloneDir(), reader)
+	go func() {
+		_, err := exportWorkspace(s.Workspace, writer, false)
+		_ = writer.CloseWithError(err)
+		done <- err
+	}()
+	_, err := importWorkspace(s.CloneDir(), reader)
 	_ = reader.CloseWithError(err)
 	copyErr := <-done
 	if err != nil || copyErr != nil {
@@ -343,50 +349,32 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(context.Background(), "unix", r.target)
 		})
 	}
-	// The result channel is not attestation. A compromised guest can forge its
-	// exit code and tree; the host treats both as untrusted and still requires apply.
+	// The result stream is not attestation (runtime_export.go). One
+	// connection is taken; the branch changes only for a complete export.
 	exportPath := sock + "_4002"
 	_ = os.Remove(exportPath)
 	l, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", exportPath)
 	if err != nil {
 		return 1, err
 	}
+	l = netcap.Limit(l, 1)
 	listeners = append(listeners, l)
-	imported := make(chan struct {
-		code int
-		err  error
-	}, 1)
+	imported := make(chan exportResult, 1)
 	go func() {
 		conn, err := l.Accept()
 		if err != nil {
-			imported <- struct {
-				code int
-				err  error
-			}{1, err}
+			imported <- exportResult{code: 1, err: err}
 			return
 		}
 		defer conn.Close()
 		_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
-		var result [1]byte
-		if _, err := io.ReadFull(conn, result[:]); err != nil {
-			imported <- struct {
-				code int
-				err  error
-			}{1, err}
+		stage := exportStage(s)
+		_ = os.RemoveAll(stage)
+		if err := os.MkdirAll(stage, 0o700); err != nil {
+			imported <- exportResult{code: 1, err: err}
 			return
 		}
-		stage := filepath.Join(s.Dir, "ws", "export")
-		_ = os.RemoveAll(stage)
-		err = os.MkdirAll(stage, 0o700)
-		if err == nil {
-			err = importWorkspace(stage, conn)
-		}
-		// Wait for the VMM to exit before publishing a result. Native review/apply
-		// paths are used only after this validation and atomic replacement.
-		imported <- struct {
-			code int
-			err  error
-		}{int(result[0]), err}
+		imported <- receiveExport(conn, stage)
 	}()
 	config := map[string]any{
 		"boot-source":    map[string]any{"kernel_image_path": s.Runtime.Kernel, "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/run/airbag/bin/airbag " + GuestArg},
@@ -409,21 +397,38 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 	}
 	select {
 	case result := <-imported:
-		if result.err != nil {
-			return 1, fmt.Errorf("guest export: %w", result.err)
-		}
-		backup := filepath.Join(s.Dir, "ws", "previous")
-		_ = os.RemoveAll(backup)
-		if err := os.Rename(s.CloneDir(), backup); err != nil {
-			return 1, err
-		}
-		if err := os.Rename(filepath.Join(s.Dir, "ws", "export"), s.CloneDir()); err != nil {
-			_ = os.Rename(backup, s.CloneDir())
-			return 1, err
-		}
-		_ = os.RemoveAll(backup)
-		return result.code, nil
+		return publishExport(s, result)
 	case <-time.After(10 * time.Second):
-		return 1, fmt.Errorf("guest terminated without a complete workspace export")
+		return publishExport(s, exportResult{code: 1, err: errors.New("the guest ended without a workspace export")})
 	}
+}
+
+func exportStage(s *session.Session) string { return filepath.Join(s.Dir, "ws", "export") }
+
+// publishExport makes a complete export the session's branch. Anything
+// else keeps the branch as it was and fails the run.
+func publishExport(s *session.Session, r exportResult) (int, error) {
+	if r.err != nil {
+		_ = os.RemoveAll(exportStage(s))
+		return 1, fmt.Errorf("guest export: %w; the branch is kept as it was", r.err)
+	}
+	if r.skippedCount > 0 {
+		names := make([]string, len(r.skipped))
+		for i, n := range r.skipped {
+			names[i] = strconv.Quote(n) // named by the guest
+		}
+		fmt.Fprintf(os.Stderr, "airbag: warning: %d sockets, FIFOs or devices were left out of the branch: %s\n",
+			r.skippedCount, strings.Join(names, ", "))
+	}
+	backup := filepath.Join(s.Dir, "ws", "previous")
+	_ = os.RemoveAll(backup)
+	if err := os.Rename(s.CloneDir(), backup); err != nil {
+		return 1, err
+	}
+	if err := os.Rename(exportStage(s), s.CloneDir()); err != nil {
+		_ = os.Rename(backup, s.CloneDir())
+		return 1, err
+	}
+	_ = os.RemoveAll(backup)
+	return r.code, nil
 }

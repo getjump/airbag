@@ -58,6 +58,11 @@ agent with no_new_privs. No host HOME or generic host execution service is
 exposed. The host never mounts a guest-written ext4 image. It validates a tar
 export into a fresh confined directory, rejecting traversal, symlink parents,
 devices, hardlinks, duplicates and excessive sizes before publishing the branch.
+The export is framed: the tar in length-prefixed chunks, then a completion frame
+with the guest's status, entry count and SHA-256 of the tar. The branch is
+replaced only when the frame says complete and both match what the host read;
+the host answers, and the guest reboots after the answer. Sockets, FIFOs and
+devices the agent left are not exported; the run names them in a warning.
 Guest exit status and exported files are **untrusted output**, not attestation.
 Existing review/apply guards decide whether and where output reaches real files.
 
@@ -80,8 +85,9 @@ preserving existing Codex requirements.
 
 This adapter supports noninteractive commands and rejects terminal stdin; PTY/resize/job control are not
 provided. Each microVM run starts fresh HOME/tmp and exports only workspace;
-background processes are killed before export. On interruption/crash without
-export, the prior branch is retained and the run fails; a run that fails
+background processes are killed before export. When the export is cut short,
+fails in the guest or does not match, the prior branch is retained and the run
+fails; a run that fails
 after the session exists still records it stopped, so it can be reviewed,
 resumed or discarded. Input files are copied, not reflinked in the current workspace copy path; the tar path does not preserve
 hardlink identity or directory modes. Fixed microVM limits are 1 vCPU, 2 GiB RAM,

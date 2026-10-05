@@ -32,7 +32,7 @@ func TestRejectGuestArchiveEscapes(t *testing.T) {
 			if err := w.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if err := importWorkspace(t.TempDir(), &buf); err == nil {
+			if _, err := importWorkspace(t.TempDir(), &buf); err == nil {
 				t.Fatal("accepted hostile export")
 			}
 		})
@@ -48,10 +48,10 @@ func TestWorkspaceArchivePreservesFilesAndDoesNotFollowLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := exportWorkspace(source, &buf); err != nil {
+	if _, err := exportWorkspace(source, &buf, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := importWorkspace(dst, &buf); err != nil {
+	if _, err := importWorkspace(dst, &buf); err != nil {
 		t.Fatal(err)
 	}
 	link, err := os.Readlink(filepath.Join(dst, "link"))
@@ -70,7 +70,7 @@ func TestGuestExportSizeLimit(t *testing.T) {
 	if err := w.WriteHeader(&tar.Header{Name: "huge", Typeflag: tar.TypeReg, Size: archiveLimit + 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := importWorkspace(t.TempDir(), &buf); err == nil {
+	if _, err := importWorkspace(t.TempDir(), &buf); err == nil {
 		t.Fatal("accepted oversized guest file")
 	}
 }
@@ -90,10 +90,10 @@ func TestSymlinkedWorkspaceExportsItsFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := exportWorkspace(link, &buf); err != nil {
+	if _, err := exportWorkspace(link, &buf, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := importWorkspace(dst, &buf); err != nil {
+	if _, err := importWorkspace(dst, &buf); err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range []string{"keep.txt", "sub/nested.txt"} {
