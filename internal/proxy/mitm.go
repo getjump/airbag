@@ -169,7 +169,7 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, live *creds.Live, f *flow) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		http.Error(w, "airbag: cannot intercept", http.StatusInternalServerError)
+		answer(w, "airbag: cannot intercept", http.StatusInternalServerError)
 		return
 	}
 	conn, _, err := hj.Hijack()
@@ -186,7 +186,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 			return p.CA.leaf(host)
 		},
 	})
-	if !f.hold(tconn) {
+	if !f.hold(conn) { // not tconn: see hold
 		return // cut
 	}
 	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
@@ -215,11 +215,13 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 				c.Close()
 				return nil, err
 			}
-			wc := &watchedConn{Conn: tc, f: f}
-			if !f.hold(wc) {
+			// The flow holds c, under tc (see hold); a cut during the
+			// handshake failed it.
+			if f.isStopped() {
+				_ = tc.Close()
 				return nil, errStopped
 			}
-			return wc, nil
+			return &watchedConn{Conn: tc, f: f}, nil
 		},
 		ResponseHeaderTimeout: 2 * time.Minute,
 		IdleConnTimeout:       time.Minute,

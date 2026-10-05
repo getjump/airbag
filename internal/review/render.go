@@ -101,7 +101,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 			host = e.Target
 		}
 		switch e.Verdict {
-		case "deny":
+		case "deny", "ask":
 			denied[e.Target]++
 		case "cut":
 			cut[e.Target]++
@@ -171,6 +171,15 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		for _, e := range blocked {
 			fmt.Fprintf(w, "  %-4s %-40s %s\n", e.Verdict, clip(e.Target, 40), e.Reason)
 		}
+	}
+	dropped := map[string]int{}
+	for _, e := range effs {
+		if e.Kind == effects.Dropped {
+			dropped[e.Target] += effects.DroppedCount(e)
+		}
+	}
+	if len(dropped) > 0 {
+		fmt.Fprintf(w, "\nNot logged %d refusals, past %d a second of a kind%s\n", total(dropped), effects.RefuseRate, hostList(dropped))
 	}
 
 	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))

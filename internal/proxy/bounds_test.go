@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -888,4 +889,78 @@ func TestForwardOnStoppedFlowCloses(t *testing.T) {
 			t.Fatalf("a body's forward on a stopped flow: headers %v", w.Header())
 		}
 	}
+}
+
+// deadlines is a ResponseWriter that records the write deadlines set
+// on it through a ResponseController.
+type deadlines struct {
+	*httptest.ResponseRecorder
+	set []time.Time
+}
+
+func (d *deadlines) SetWriteDeadline(t time.Time) error { d.set = append(d.set, t); return nil }
+
+// The proxy's own answers, which have no flow to close them, are
+// written within AnswerWrite; a request starts with no deadline.
+func TestAnswerHasWriteDeadline(t *testing.T) {
+	log, _ := newLog(t)
+	p := New(Allowlist{"api.anthropic.com"}, log)
+	for _, target := range []string{"http://paste.example.net/", "http://api.anthropic.com:1/", "http://[::1/"} {
+		w := &deadlines{ResponseRecorder: httptest.NewRecorder()}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://x/", nil)
+		r.URL, _ = url.Parse(target)
+		if r.URL == nil {
+			r.URL = &url.URL{Scheme: "http", Host: "[::1"}
+		}
+		before := time.Now()
+		p.ServeHTTP(w, r)
+		if w.Code < 400 {
+			t.Fatalf("%s: %d", target, w.Code)
+		}
+		if len(w.set) != 2 || !w.set[0].IsZero() || w.set[1].Before(before) || w.set[1].After(time.Now().Add(AnswerWrite)) {
+			t.Errorf("%s: deadlines %v", target, w.set)
+		}
+	}
+}
+
+// Cut closes every flow before it writes the log, which another writer
+// may hold up: a secret read waits for the closes, not for the log.
+func TestCutClosesBeforeLogging(t *testing.T) {
+	target := listenTCP(t, echoConn)
+	p, addr, path := boundedProxy(t, DefaultLimits())
+	var cs []net.Conn
+	for range 3 {
+		c, _, code := connectVia(t, addr, target)
+		t.Cleanup(func() { c.Close() })
+		if code != http.StatusOK {
+			t.Fatalf("CONNECT: %d", code)
+		}
+		cs = append(cs, c)
+	}
+	// Another writer holds the database: the log's writes wait for it.
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	cut := make(chan struct{})
+	go func() { p.Cut(nil, "test"); close(cut) }()
+	for i, c := range cs {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+			t.Errorf("flow %d open while the log was held: %v", i, err)
+		}
+	}
+	if _, err := conn.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	<-cut
 }

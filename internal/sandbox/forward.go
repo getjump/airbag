@@ -131,9 +131,11 @@ func (fw *forwarder) cut() {
 		return
 	}
 	fw.mu.Lock()
-	defer fw.mu.Unlock()
+	var logged []effects.Effect
 	for c := range fw.open {
 		_ = c.Close()
-		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "cut", Reason: "secret-taint"})
+		logged = append(logged, effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "cut", Reason: "secret-taint"})
 	}
+	fw.mu.Unlock()
+	_ = fw.log.AddAll(logged) // after every close: the read waits for them
 }
