@@ -105,9 +105,13 @@ type Meta struct {
 // mount, a WSL disk, a btrfs subvolume). Another filesystem mounted at
 // the same path can have a root of the same inode; writes then still go
 // to the path the user named.
+// Born, the directory's creation time where the filesystem records
+// one (0 where it does not), tells a new directory that was given the
+// inode of a removed one.
 type DirID struct {
 	Real string `json:"real"`
 	Ino  uint64 `json:"ino"`
+	Born int64  `json:"born,omitempty"`
 }
 
 // DirIDOf is the directory p names now.
@@ -124,7 +128,7 @@ func DirIDOf(p string) (DirID, error) {
 	if !ok {
 		return DirID{}, fmt.Errorf("%s: no device and inode", p)
 	}
-	return DirID{Real: real, Ino: u64(st.Ino)}, nil
+	return DirID{Real: real, Ino: u64(st.Ino), Born: born(real, st)}, nil
 }
 
 // Check refuses p when it is not the directory id was taken of: it
@@ -136,7 +140,7 @@ func (id DirID) Check(p string) error {
 		return fmt.Errorf("%s, a root of the session: %w", p, err)
 	case got.Real != id.Real:
 		return fmt.Errorf("%s leads to %s now, not to %s as when the session began", p, got.Real, id.Real)
-	case got.Ino != id.Ino:
+	case got.Ino != id.Ino || id.Born != 0 && got.Born != id.Born:
 		return fmt.Errorf("%s is another directory than when the session began: that one was moved or removed, or the filesystem gives new inode numbers on each mount (FAT, sshfs without use_ino)", p)
 	}
 	return nil

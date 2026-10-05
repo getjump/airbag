@@ -66,3 +66,24 @@ func TestCreateSkipsMissingRoot(t *testing.T) {
 		t.Fatalf("without a $HOME branch: %+v %+v", s.WorkspaceID, s.HomeID)
 	}
 }
+
+// A directory with the inode of a removed one is told apart by its
+// creation time, where the filesystem records one.
+func TestCheckComparesBirthTime(t *testing.T) {
+	dir := t.TempDir()
+	id, err := DirIDOf(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := id.Check(dir); err != nil {
+		t.Fatalf("the same directory: %v", err)
+	}
+	if id.Born == 0 {
+		t.Skip("this filesystem records no creation time")
+	}
+	other := id
+	other.Born++
+	if err := other.Check(dir); err == nil || !strings.Contains(err.Error(), "another directory") {
+		t.Fatalf("a directory born at another time passed: %v", err)
+	}
+}
