@@ -592,3 +592,48 @@ func TestOutboxWaitsForMovedRoot(t *testing.T) {
 		t.Fatalf("ran: %s %q", status(t, box, it.ID), ran(log))
 	}
 }
+
+// movesOnRead answers the confirmation, and before it does, moves the
+// workspace as the host could while the prompt waits.
+type movesOnRead struct {
+	t     *testing.T
+	ws    string
+	moved bool
+}
+
+func (m *movesOnRead) Read(p []byte) (int, error) {
+	if !m.moved {
+		m.moved = true
+		moveRoot(m.t, m.ws)
+	}
+	return copy(p, "y\n"), nil
+}
+
+// The workspace is checked again as each intent starts: one moved while
+// its confirmation waited takes no push and no command.
+func TestOutboxRechecksRootAfterConfirm(t *testing.T) {
+	for _, kind := range []string{outbox.KindCmd, outbox.KindPush} {
+		t.Run(kind, func(t *testing.T) {
+			s, box := testBox(t)
+			id, err := session.DirIDOf(s.Workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.WorkspaceID = id
+			name, argv := "pubtool", []string{"pubtool", "release"}
+			if kind == outbox.KindPush {
+				name, argv = "git", []string{"git", "push", "origin", "main"}
+			}
+			log := tool(t, name, "0")
+			it, _ := box.Push(outbox.Intent{Kind: kind, Argv: argv, Cwd: s.Workspace})
+			var out bytes.Buffer
+			in := &movesOnRead{t: t, ws: s.Workspace}
+			if err := runIntents(s, box, false, bufio.NewReader(in), Options{Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+				t.Fatalf("ran in a workspace moved while it was confirmed: %v %q", err, out.String())
+			}
+			if !in.moved || status(t, box, it.ID) != outbox.Pending || strings.Contains(ran(log), " "+strings.Join(argv[1:], " ")+"\n") {
+				t.Fatalf("ran: %v %s %q", in.moved, status(t, box, it.ID), ran(log))
+			}
+		})
+	}
+}

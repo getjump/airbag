@@ -42,6 +42,9 @@ func runPullRequest(s *session.Session, box *outbox.Box, it outbox.Intent, in *b
 	if !confirm(in, o, "Approve this exact request and publish it with your host GitHub credentials?") {
 		return reject(box, it, "human declined the typed request", o)
 	}
+	if err := outboxHeld(s); err != nil {
+		return "", fmt.Errorf("intent %s: %w", it.ID, err)
+	}
 	gh, err := trustedTool(s, "gh")
 	if err != nil {
 		return pendingPR(it, o, err)
@@ -65,6 +68,9 @@ func runPullRequest(s *session.Session, box *outbox.Box, it outbox.Intent, in *b
 	}
 	if prepared.Digest() != it.RequestDigest {
 		return "", fmt.Errorf("prepared request differs from the queued request")
+	}
+	if err := outboxHeld(s); err != nil {
+		return "", fmt.Errorf("intent %s: %w", it.ID, err)
 	}
 	if it.Status == outbox.Pending {
 		if err := box.Approve(it.ID, it.RequestDigest); err != nil {

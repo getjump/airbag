@@ -394,8 +394,8 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	if slices.ContainsFunc(intents, func(it outbox.Intent) bool {
 		return it.Status == outbox.Pending || it.Status == string(operation.Approved) || it.Status == outbox.Running
 	}) {
-		if err := rootsOf(s).check("ws"); err != nil {
-			return fmt.Errorf("the session's outbox waits: %w; put the directory back to run it", err)
+		if err := outboxHeld(s); err != nil {
+			return err
 		}
 	}
 	// After a failure the rest wait (a PR without its push means
@@ -462,6 +462,18 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 		case outbox.Unknown:
 			unknown = it.ID
 		}
+	}
+	return nil
+}
+
+// outboxHeld refuses to run intents while the workspace is another
+// directory than the session's. It is checked before the outbox and
+// again as each intent starts: a confirmation waits as long as the user
+// takes, and the directory can be moved meanwhile, by an earlier
+// command too. An intent it stops stays as it was.
+func outboxHeld(s *session.Session) error {
+	if err := rootsOf(s).check("ws"); err != nil {
+		return fmt.Errorf("the session's outbox waits: %w; put the directory back to run it", err)
 	}
 	return nil
 }
@@ -538,6 +550,9 @@ func runPush(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, 
 			return "", fmt.Errorf("intent %s: %w", it.ID, err)
 		}
 		return outbox.Rejected, nil
+	}
+	if err := outboxHeld(s); err != nil {
+		return "", fmt.Errorf("intent %s: %w", it.ID, err)
 	}
 	cmd := exec.CommandContext(context.Background(), "git", args...) //nolint:gosec // a push outbox.GitPush checked and the user confirmed
 	cmd.Dir = cwd
@@ -629,6 +644,9 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, l
 			return "", fmt.Errorf("intent %s: %w", it.ID, err)
 		}
 		return outbox.Rejected, nil
+	}
+	if err := outboxHeld(s); err != nil {
+		return "", fmt.Errorf("intent %s: %w", it.ID, err)
 	}
 	cmd := exec.CommandContext(context.Background(), prog, it.Argv[1:]...) //nolint:gosec // a deferred command: a program from this machine's PATH, its files checked, confirmed by the user
 	cmd.Args[0] = it.Argv[0]
