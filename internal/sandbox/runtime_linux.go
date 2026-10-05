@@ -249,6 +249,9 @@ func runGVisor(s *session.Session, dir, root string) (int, error) {
 	defer func() {
 		cmd := exec.CommandContext(context.Background(), s.Runtime.Binary, append(common, "delete", "--force", s.ID)...) //nolint:gosec // trusted runsc, fixed runtime operation
 		_ = cmd.Run()
+		// Run as root, runsc leaves --network=none's namespace mounted in
+		// its state directory, which resume and discard then cannot remove.
+		_ = unix.Unmount(filepath.Join(dir, "state", "null-netns"), unix.MNT_DETACH|unix.UMOUNT_NOFOLLOW)
 	}()
 	args := append(append([]string{}, common...), "--platform=systrap", "--oci-seccomp", "--network=none", "--host-uds=open", "--file-access=shared", "--overlay2=none", "run", "--bundle="+dir, s.ID)
 	return executeProvider(s.Runtime.Binary, args)
