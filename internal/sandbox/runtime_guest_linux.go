@@ -283,7 +283,12 @@ func checkNoUserNamespaces() error {
 	cmd := exec.CommandContext(context.Background(), "/run/airbag/bin/airbag", GuestArg, "userns")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER}
 	if err := cmd.Start(); err != nil {
-		return nil //nolint:nilerr // refused: what the check wants
+		// Refused as the limits refuse it: EPERM from the filter, ENOSPC
+		// from max_user_namespaces. Any other failure proves nothing.
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.ENOSPC) {
+			return nil
+		}
+		return fmt.Errorf("checking that user namespaces are refused: %w", err)
 	}
 	_ = cmd.Wait()
 	return errors.New("a process can still create a user namespace; refusing to start the agent")

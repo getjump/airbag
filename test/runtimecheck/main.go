@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -49,7 +50,8 @@ func run() error {
 	// cloned into a new user namespace does.
 	child := exec.CommandContext(context.Background(), "/proc/self/exe", "userns-child")
 	child.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER}
-	checks["user_namespace_denied"] = child.Start() != nil
+	err = child.Start()
+	checks["user_namespace_denied"] = errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.ENOSPC)
 	if child.Process != nil {
 		_ = child.Wait()
 	}
