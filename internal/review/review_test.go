@@ -21,6 +21,11 @@ func fakeSession(t *testing.T) *session.Session {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	root := t.TempDir()
 	ws, home := filepath.Join(root, "ws"), filepath.Join(root, "home")
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +125,11 @@ func TestAttentionUnknownHome(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	root := t.TempDir()
 	ws, home := filepath.Join(root, "ws"), filepath.Join(root, "home")
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)

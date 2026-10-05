@@ -46,24 +46,44 @@ func TestCreateRecordsRootsAndResumeChecksThem(t *testing.T) {
 	}
 }
 
-// A made-up workspace that does not exist records nothing, and a $HOME
-// that is not branched (--no-home, macOS) is not recorded: nothing is
-// applied there.
-func TestCreateSkipsMissingRoot(t *testing.T) {
+// A root that cannot be recorded refuses the session. $HOME is recorded
+// branched or not, since run writes there either way, and a session
+// does not resume once it is another directory; only a $HOME that is
+// not there and not branched (HOME=/nonexistent, --no-home) records
+// nothing.
+func TestCreateRecordsEveryRootItCan(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
-	s, err := Create(Meta{Workspace: "/nonexistent/airbag-ws", Home: t.TempDir(), OverHome: true})
-	if err != nil {
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, err := Create(Meta{Workspace: missing, Home: t.TempDir()}); err == nil {
+		t.Fatal("a session began in a workspace that is not there")
+	}
+	if _, err := Create(Meta{Workspace: t.TempDir(), Home: missing, OverHome: true}); err == nil {
+		t.Fatal("a session branched a $HOME that is not there")
+	}
+	s, err := Create(Meta{Workspace: t.TempDir(), Home: missing})
+	if err != nil || s.HomeID.Real != "" {
+		t.Fatalf("an unbranched $HOME that is not there: %+v %v", s, err)
+	}
+	ws, home := t.TempDir(), filepath.Join(t.TempDir(), "home")
+	if err := os.Mkdir(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if s.WorkspaceID.Real != "" || s.HomeID.Real == "" {
-		t.Fatalf("%+v %+v", s.WorkspaceID, s.HomeID)
+	s, err = Create(Meta{Workspace: ws, Home: home})
+	if err != nil || s.WorkspaceID.Real == "" || s.HomeID.Real == "" {
+		t.Fatalf("without a $HOME branch: %+v %v", s, err)
 	}
-	s, err = Create(Meta{Workspace: t.TempDir(), Home: t.TempDir()})
-	if err != nil {
+	s.Status = StatusStopped
+	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if s.WorkspaceID.Real == "" || s.HomeID.Real != "" {
-		t.Fatalf("without a $HOME branch: %+v %+v", s.WorkspaceID, s.HomeID)
+	if err := os.Rename(home, home+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resume(s.ID, ws); err == nil || !strings.Contains(err.Error(), "another directory") {
+		t.Fatalf("resumed with an unbranched $HOME that is another directory: %v", err)
 	}
 }
 

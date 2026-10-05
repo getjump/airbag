@@ -112,6 +112,11 @@ func TestDotfilesRepoAsWorkspace(t *testing.T) {
 	writeCfg(t, filepath.Join(ws, "notes.md"), "notes\n")
 	symlink(t, filepath.Join(ws, "bashrc"), filepath.Join(home, ".bashrc"))
 	symlink(t, filepath.Join(ws, "claude.json"), filepath.Join(home, ".claude.json"))
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)
@@ -188,6 +193,11 @@ func TestWatchedDirLinkedToWorkspaceRoot(t *testing.T) {
 	ws := filepath.Join(home, "nvimcfg")
 	writeCfg(t, filepath.Join(ws, "init.lua"), "-- x\n")
 	symlink(t, "../nvimcfg", filepath.Join(home, ".config/nvim"))
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)
@@ -352,6 +362,11 @@ func TestWorkspaceGitTakesNoAlias(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	home, ws := t.TempDir(), t.TempDir()
 	symlink(t, ws, filepath.Join(home, "bin"))
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)
@@ -437,6 +452,11 @@ func TestShadowingConfigLinkedIntoWorkspace(t *testing.T) {
 	home, ws := t.TempDir(), t.TempDir()
 	writeCfg(t, filepath.Join(home, ".claude.json"), `{"numStartups":1}`)
 	symlink(t, filepath.Join(ws, "legacy.json"), filepath.Join(home, ".claude/.config.json"))
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)
@@ -512,6 +532,11 @@ func TestConfigLinkedIntoWorkspaceGit(t *testing.T) {
 	home, ws := t.TempDir(), t.TempDir()
 	writeCfg(t, filepath.Join(ws, ".git/claude.json"), `{"numStartups":1}`)
 	symlink(t, filepath.Join(ws, ".git/claude.json"), filepath.Join(home, ".claude.json"))
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)
@@ -560,6 +585,11 @@ func TestWatchedPathsInsideWorkspaceGit(t *testing.T) {
 			writeCfg(t, filepath.Join(ws, ".git/airbag/claude.json"), `{"numStartups":1}`)
 			symlink(t, filepath.Join(ws, ".git/nvim"), filepath.Join(home, ".config/nvim"))
 			symlink(t, filepath.Join(ws, ".git/airbag/claude.json"), filepath.Join(home, ".claude.json"))
+			for _, d := range []string{ws, home} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 			if err != nil {
 				t.Fatal(err)

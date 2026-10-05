@@ -41,6 +41,11 @@ func hostFixture(t *testing.T) (*session.Session, *policy.Policy, hostEndpoints)
 			t.Fatal(err)
 		}
 	}
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Cwd: ws})
 	if err != nil {
 		t.Fatal(err)

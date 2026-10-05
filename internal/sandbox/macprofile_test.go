@@ -33,6 +33,11 @@ func TestMacProfile(t *testing.T) {
 		}
 	}
 	proj, holes := ClaudeProjectState(ws, ws)
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true, Hidden: DefaultHidden,
 		HiddenHost:  []string{"/var/lib/incus/unix.socket"},
 		Passthrough: append(append([]string{}, DefaultPassthrough...), proj...), BranchHoles: holes})
@@ -152,6 +157,11 @@ func TestMacProfileNoMkdirThroughSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	proj, holes := ClaudeProjectState(ws, ws)
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true,
 		Passthrough: append(append([]string{}, DefaultPassthrough...), proj...), BranchHoles: holes})
 	if err != nil {
@@ -195,6 +205,11 @@ func TestMacProfileDeniesLinkedMemory(t *testing.T) {
 	if err := os.Symlink("../not-yet", filepath.Join(home, ".claude/projects/d")); err != nil {
 		t.Fatal(err)
 	}
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +242,11 @@ func TestMacProfileDeniesLinkedProjectsRoot(t *testing.T) {
 	}
 	if err := os.Symlink("store/projects", filepath.Join(home, ".claude/projects")); err != nil {
 		t.Fatal(err)
+	}
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true})
 	if err != nil {
@@ -270,6 +290,11 @@ func TestMacProfileDeniesLinkedReadOnlyState(t *testing.T) {
 	if err := os.Symlink("../dotfiles/settings.json", filepath.Join(home, ".claude/settings.json")); err != nil {
 		t.Fatal(err)
 	}
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -303,6 +328,11 @@ func TestMacProfileHardLinkedPassthroughReadOnly(t *testing.T) {
 	if err := os.Link(filepath.Join(home, ".bashrc"), filepath.Join(home, ".claude/.credentials.json")); err != nil {
 		t.Fatal(err)
 	}
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true, Passthrough: []string{".claude/.credentials.json"}})
 	if err != nil {
 		t.Fatal(err)
@@ -333,6 +363,11 @@ func TestMacProfileUncheckedPassthroughReadOnly(t *testing.T) {
 	}
 	defer func(n int) { maxPassFiles = n }(maxPassFiles)
 	maxPassFiles = 1
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true, Passthrough: []string{".claude/projects/x/"}})
 	if err != nil {
 		t.Fatal(err)
@@ -362,6 +397,11 @@ func TestMacProfileHardLinkedMemoryKeepsStateReadOnly(t *testing.T) {
 	}
 	if err := os.WriteFile(mem, []byte("notes\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true})
 	if err != nil {

@@ -26,6 +26,11 @@ func undoSession(t *testing.T) (*session.Session, *outbox.Box) {
 	t.Helper()
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -200,6 +205,11 @@ func mustScan(t *testing.T, s *session.Session) []review.Change {
 func TestCloneApplyRollback(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -258,6 +268,11 @@ func appliedReplacedDir(t *testing.T, inner string) (*session.Session, string) {
 	t.Helper()
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -565,6 +580,11 @@ func appliedOverlayReplacedDir(t *testing.T) (*session.Session, string) {
 	t.Helper()
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -745,6 +765,11 @@ func TestRollbackKeepsUserFileNamedLikeTemp(t *testing.T) {
 func TestRollbackKeepsFileInReplacedDirWithoutPrevious(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -835,6 +860,11 @@ func overlayReplacedDir(t *testing.T, real, agent map[string]string) (*session.S
 	t.Helper()
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -1420,6 +1450,11 @@ func TestConflictConfigLinkedIntoWorkspace(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(home, ".claude.json")); err != nil {
 		t.Fatal(err)
 	}
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1480,6 +1515,11 @@ func TestPartialApplyThenRunAgain(t *testing.T) {
 func TestApplyNewDirectoryOfLinks(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1553,6 +1593,11 @@ func TestApplyRefusesLinkedParent(t *testing.T) {
 func TestApplyRefusesLinkedParentBeforeJournal(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1627,6 +1672,11 @@ func rootSession(t *testing.T, ws string) *session.Session {
 	homeID, err := session.DirIDOf(home)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, WorkspaceID: wsID, HomeID: homeID, Clone: true})
 	if err != nil {

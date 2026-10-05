@@ -252,19 +252,21 @@ func Create(m Meta) (*Session, error) {
 		}
 	}
 	// Where the workspace and $HOME lead now; apply and resume refuse
-	// them once they are other directories. A path that does not exist
-	// (a test's made-up workspace) records nothing.
-	// $HOME only when it is branched: with it read-only nothing is
-	// applied there.
+	// them once they are other directories. A root that cannot be
+	// recorded refuses the session. $HOME is recorded branched or not:
+	// run writes there either way (passthrough and branch-hole
+	// directories, agent state on macOS). Only a $HOME that is not there
+	// and is not branched (HOME=/nonexistent with --no-home) has nothing
+	// to tell apart, and records nothing.
 	for _, r := range []struct {
 		path string
 		id   *DirID
 	}{{m.Workspace, &m.WorkspaceID}, {m.Home, &m.HomeID}} {
-		if r.path == "" || r.id.Real != "" || r.id == &m.HomeID && !m.OverHome {
+		if r.path == "" || r.id.Real != "" {
 			continue
 		}
 		id, err := RecordDirID(r.path)
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) && r.id == &m.HomeID && !m.OverHome {
 			continue
 		}
 		if err != nil {

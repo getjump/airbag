@@ -518,6 +518,11 @@ func TestApplyRecordsLinksThatHoldCommands(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(elsewhere, "python"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
