@@ -50,6 +50,19 @@ Codex binaries (they skip when the binary is missing). The model is
 Responses APIs, so no account or API key is needed. `demo/scenes.sh` records
 the GIFs the same way.
 
+`test/tty` runs sessions in a pseudo-terminal and checks the screen: a probe
+for an agent reports what crosses airbag's terminal relay (size, resize, query
+replies, paste, focus and mouse bytes, Ctrl-C), and the Claude Code and Codex
+TUIs work through a task against `test/mockapi` (each skips when its CLI is
+missing). The tests are behind the `e2e` build tag, so `go test ./...` leaves
+them out; run them as a regular user with `go test -tags e2e ./test/tty/... -v`.
+With `TTY_ARTIFACTS=dir` each test keeps its screens in `dir/<test>/`, as
+`NAME.txt` and, when `freeze` is in `PATH`, `NAME.svg`, with an asciicast
+recording, `session.cast` (`asciinema play` shows it); without it they go to a
+temporary directory that is removed. `TTY_DIRECT=1` runs the same programs
+without airbag, to check the harness itself where airbag cannot run. CI runs
+them in `.github/workflows/tty.yml` and keeps the artifacts.
+
 ## Where to help
 
 Open an issue before a large change, so we can agree on the shape first.

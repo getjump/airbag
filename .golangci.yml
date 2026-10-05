@@ -1,5 +1,9 @@
 version: "2"
 
+run:
+  # The PTY tests in test/tty are behind the e2e build tag.
+  build-tags: [e2e]
+
 # Linters that find bugs, on top of the standard set; style-only ones
 # are left out. Each enabled linter reports nothing for GOOS=linux and
 # GOOS=darwin (test/check.sh lint runs both). A finding that is safe is
