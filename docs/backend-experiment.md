@@ -96,4 +96,45 @@ an experiment choice, not a definition of PMF. No user outreach is automated.
 
 ## Measured results
 
-Pending the first CI run. Do not infer runtime performance from vendor claims.
+All six candidate runs passed in [CI run 37256655944](https://github.com/getjump/airbag/actions/runs/37256655944).
+Measured probe/harness commit: `80d25a2579e7abe7ece1278d337256a9540dc6c1`.
+Host: Ubuntu 24.04, x86_64, four CPUs, Linux 6.17.0-1022-azure; Go 1.27.1.
+Guest: one vCPU, 2 GiB RAM, ext4. These are two trials per candidate on one
+runner, not a general ranking. Medians in seconds:
+
+| Candidate | Cold build | Unchanged build | Incremental | Startup to ready | Preparation | Whole workload + preparation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Native | 44.819 | 0.812 | 0.929 | 0.035 | 0.203 | 63.345 |
+| gVisor systrap | 62.889 | 1.491 | 1.689 | 0.056 | 0.192 | 89.997 |
+| Firecracker | 47.469 | 0.817 | 0.928 | 0.851 | 1.634 | 67.796 |
+
+Unchanged medians pool three builds from each of two trials. Whole workload
+includes every build, selected tests and diagnostics, plus cleanup/shutdown;
+startup is already included and must not be added again. Preparation excludes
+the shared 3.874 s toolchain/root-image fixture and image/tool downloads.
+Compiler scratch and build cache live in the private workload tree; these
+numbers must not be compared directly to the different setup in PR #13.
+
+The microVM cold build was about 5.9% above native; its whole workload plus
+preparation was about 7.0% above native. This supports continuing a VM backend
+prototype rather than rejecting it on assumed build overhead. It does **not**
+establish that a VM is faster than Airbag policy FUSE: that gate is absent
+from every candidate here, and resource/security profiles are not equivalent.
+gVisor's cold build was about 40.3% above native on this workload. Two trials
+do not justify making either candidate the product default.
+
+The synthetic 2,048-file phase took 0.141 / 0.394 / 0.050 s for native /
+gVisor / microVM. This is consistent with different storage paths, but does
+not isolate filesystem overhead or establish representative build speed.
+All six outputs have the same SHA-256, all boundary probes passed and source
+inputs remained unchanged. The unrestricted negative control failed both
+boundary checks as expected. Full Airbag policy equivalence remains false.
+
+[Raw artifact, including consoles and configs](https://github.com/getjump/airbag/actions/runs/37256655944/artifacts/11323420973).
+The JSONL, metadata and versions are also preserved in
+`testdata/backend-lab/2026-10-05/`. The initial failed run is retained in
+[run 37255440736](https://github.com/getjump/airbag/actions/runs/37255440736):
+OCI UID did not own the writable directory, guest init remounted an existing
+devtmpfs, and POWER_OFF left the VMM running. These were harness defects,
+fixed before collecting the passing comparison; they are not discarded
+backend workload failures or evidence of missing KVM.

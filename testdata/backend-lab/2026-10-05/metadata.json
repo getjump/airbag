@@ -1,0 +1,12 @@
+{
+  "host_kernel": "6.17.0-1022-azure",
+  "source_sha256": "672f7bc572913fd02f5d92100ea0a43945ede720a57f4d871db1eb8a7512331b",
+  "host_architecture": "x86_64",
+  "host_cpu_count": 4,
+  "fixture_seconds": 3.8742806770000016,
+  "cpu_parallelism": 1,
+  "microvm_memory_mib": 2048,
+  "equivalent_full_airbag_policy": false,
+  "guest_telemetry_is_attestation": false,
+  "notes": "runsc/microVM are bare candidates; no Airbag proxy, HOME branch or FUSE/exec audit integration"
+}
