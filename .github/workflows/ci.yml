@@ -23,6 +23,7 @@ jobs:
   # lifecycle, on Linux and macOS.
   sdk:
     if: github.event_name != 'schedule'
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

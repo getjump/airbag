@@ -93,7 +93,12 @@ func (fw *forwarder) handle(c net.Conn) {
 	// The slot comes first: a connection waiting on the checks (a policy
 	// that asks serializes them) holds a goroutine and a host fd too.
 	fw.mu.Lock()
-	if fw.stopped || fw.max > 0 && fw.n >= fw.max {
+	if fw.stopped {
+		fw.mu.Unlock()
+		deny("forward stopped: the session is ending")
+		return
+	}
+	if fw.max > 0 && fw.n >= fw.max {
 		fw.mu.Unlock()
 		deny("too many open connections")
 		return

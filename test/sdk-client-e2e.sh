@@ -8,7 +8,13 @@ cp "$project/test/sdk-client/client_test.go" "$client_dir/client_test.go"
 cd "$client_dir"
 export GOWORK=off
 go mod init example.com/airbag-client
-go mod edit -go=1.27.1 -require=github.com/getjump/airbag@v0.0.0 -replace="github.com/getjump/airbag=$project"
+# The client needs at least the Go version airbag's go.mod names.
+gover=$(sed -n 's/^go \([0-9][0-9.]*\).*/\1/p' "$project/go.mod")
+[ -n "$gover" ] || {
+	echo "no go line in $project/go.mod" >&2
+	exit 1
+}
+go mod edit -go="$gover" -require=github.com/getjump/airbag@v0.0.0 -replace="github.com/getjump/airbag=$project"
 # -race needs cgo and a C compiler; where there is none (the WSL job) the
 # client still has to build and pass.
 race=-race
