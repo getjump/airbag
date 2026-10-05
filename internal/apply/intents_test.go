@@ -272,10 +272,24 @@ func TestCmdArgumentLinkedOut(t *testing.T) {
 		{"under a linked directory, not there yet", func(ws string) error {
 			return os.Symlink(outside, filepath.Join(ws, "dist"))
 		}, []string{"dist/report.txt"}, false},
+		{"with .. after a link", func(ws string) error {
+			if err := os.MkdirAll(filepath.Join(outside, "dir"), 0o755); err != nil {
+				return err
+			}
+			return os.Symlink(filepath.Join(outside, "dir"), filepath.Join(ws, "link"))
+		}, []string{"link/../hosts.yml"}, false},
+		{"absolute, through a link", func(ws string) error {
+			return os.Symlink(outside, filepath.Join(ws, "docs"))
+		}, []string{"WS/docs/hosts.yml"}, false},
+		{"after a short option", func(ws string) error {
+			return os.Symlink(filepath.Join(outside, "hosts.yml"), filepath.Join(ws, "notes.md"))
+		}, []string{"-onotes.md"}, false},
+		{"above the workspace", func(string) error { return nil }, []string{"../elsewhere.txt"}, false},
 		{"inside the workspace", func(ws string) error {
 			_ = os.WriteFile(filepath.Join(ws, "body.md"), []byte("ok\n"), 0o644)
+			_ = os.MkdirAll(filepath.Join(ws, "sub"), 0o755)
 			return os.Symlink("body.md", filepath.Join(ws, "notes.md"))
-		}, []string{"--body-file", "notes.md", "--title", "Fix it"}, true},
+		}, []string{"--body-file", "notes.md", "--title", "Fix it", "sub/../body.md", "--repo", "getjump/airbag", "WS/body.md", "/usr/share"}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, box := testBox(t)
@@ -283,7 +297,11 @@ func TestCmdArgumentLinkedOut(t *testing.T) {
 			if err := c.make(s.Workspace); err != nil {
 				t.Fatal(err)
 			}
-			it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: append([]string{"pubtool"}, c.args...), Cwd: s.Workspace})
+			args := make([]string, len(c.args))
+			for i, a := range c.args {
+				args[i] = strings.Replace(a, "WS", s.Workspace, 1)
+			}
+			it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: append([]string{"pubtool"}, args...), Cwd: s.Workspace})
 			var out bytes.Buffer
 			if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
 				t.Fatal(err)

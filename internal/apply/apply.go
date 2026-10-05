@@ -503,8 +503,8 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, i
 		return reject(box, it, fmt.Sprintf("%s resolves to %s, inside the workspace; deferred commands run only programs from outside it", it.Argv[0], prog), o)
 	}
 	if a := linkedOut(s.Workspace, cwd, it.Argv[1:]); a != "" {
-		return reject(box, it, fmt.Sprintf("%s leads through a link out of the workspace or to a secret file; "+
-			"the command would read or write there, which its arguments do not show", a), o)
+		return reject(box, it, fmt.Sprintf("%s leads out of the workspace (through a link or ..) or to a secret file; "+
+			"the command would read or write there, which its arguments do not show; run it yourself if you mean to", a), o)
 	}
 	rels := make([]string, 0, len(it.Files))
 	for rel := range it.Files {
@@ -574,68 +574,86 @@ func hostDir(s *session.Session, dir string) string {
 	return dir
 }
 
-// linkedOut returns the first argument that names a path in the
-// workspace, or the working directory itself, whose real place is
-// outside the workspace or is a secret file. The agent can make links
-// in the workspace (notes.md -> .env, out -> ~/.ssh), and a deferred
-// command is confirmed by its arguments, which do not show where such a
-// name leads. A name that does not exist yet is checked by its directory.
+// linkedOut returns the first argument that leads out of the
+// workspace or to a secret file, or the working directory when it is
+// outside. The agent can make links in the workspace (notes.md -> .env,
+// docs -> ~/.config), and a deferred command is confirmed by its
+// arguments, which do not show where such a name leads. Each name is
+// followed as the kernel follows it (see follow); an absolute name
+// outside the workspace is left alone, since it shows where it goes.
 func linkedOut(ws, cwd string, args []string) string {
 	realWS, err := filepath.EvalSymlinks(ws)
 	if err != nil {
 		return ws
 	}
-	if !within(realPrefix(cwd), realWS) {
+	realCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil || !within(realCwd, realWS) {
 		return cwd
 	}
 	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			_, v, ok := strings.Cut(a, "=")
-			if !ok {
-				continue
+		for _, p := range pathsIn(a) {
+			start := realCwd
+			if filepath.IsAbs(p) {
+				if !strings.HasPrefix(p, ws+"/") && !strings.HasPrefix(p, realWS+"/") {
+					continue
+				}
+				start = "/"
 			}
-			a = v
-		}
-		if a == "" {
-			continue
-		}
-		p := a
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(cwd, p)
-		}
-		if !within(p, ws) {
-			continue // shown as the path it is
-		}
-		real := realPrefix(filepath.Dir(p))
-		if fi, err := os.Lstat(p); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-			r, err := filepath.EvalSymlinks(p)
-			if err != nil {
-				return a // dangling: a write would create its target
+			real, ok := follow(start, p)
+			if !ok || !within(real, realWS) || secretfs.IsSecret(filepath.Base(real)) {
+				return a
 			}
-			real = r
-		} else {
-			real = filepath.Join(real, filepath.Base(p))
-		}
-		if !within(real, realWS) || secretfs.IsSecret(filepath.Base(real)) {
-			return a
 		}
 	}
 	return ""
 }
 
-// realPrefix resolves the links in the longest part of p that exists
-// and joins the rest on as written.
-func realPrefix(p string) string {
-	rest := ""
-	for d := p; ; d = filepath.Dir(d) {
-		if r, err := filepath.EvalSymlinks(d); err == nil {
-			return filepath.Join(r, rest)
-		}
-		if filepath.Dir(d) == d {
-			return p
-		}
-		rest = filepath.Join(filepath.Base(d), rest)
+// pathsIn returns what in an argument may be a path: the argument, the
+// value of --opt=value or -o=value, or what follows a short option
+// (-ofile).
+func pathsIn(a string) []string {
+	if !strings.HasPrefix(a, "-") {
+		return []string{a}
 	}
+	if _, v, ok := strings.Cut(a, "="); ok {
+		return []string{v}
+	}
+	if !strings.HasPrefix(a, "--") && len(a) > 2 {
+		return []string{a[2:]}
+	}
+	return nil
+}
+
+// follow resolves name from the real directory dir one component at a
+// time, as the kernel does: a link is replaced by where it leads before
+// a later ".." applies (link/../x is beside the link's target, not
+// beside the link). The part that does not exist yet is joined on as
+// written. ok is false for a link that leads nowhere, whose target a
+// write would create, or a loop of links.
+func follow(dir, name string) (string, bool) {
+	cur := dir
+	parts := strings.Split(name, "/")
+	for i, part := range parts {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, part)
+		fi, err := os.Lstat(next)
+		if err != nil {
+			return filepath.Join(append([]string{next}, parts[i+1:]...)...), true
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			if next, err = filepath.EvalSymlinks(next); err != nil {
+				return "", false
+			}
+		}
+		cur = next
+	}
+	return cur, true
 }
 
 func hashFile(p string) (string, error) {
