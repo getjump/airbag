@@ -42,6 +42,10 @@ Rules are type-checked when airbag starts: a misspelled field (`effect.knd`) is 
 error, not a rule that never matches. A `deny` or `ask` rule that fails while
 evaluating (say `command.argv[0]` on an effect with no command) counts as
 matched, and the message says so; guard such rules with `command.argv.size() > 0`.
+With `--fs-policy` this matters more: file events have no command, so an
+unguarded rule like that denies every file operation. Observed and predicted
+events also differ in their targets and approvals; see
+[runtime policy](runtime-policy.md#policy-and-audit).
 
 Verdicts are `allow`, `deny` and `ask`; a deny anywhere wins. An `ask` blocks the
 command and tells the agent to have you run `airbag approve a-N`; after that the

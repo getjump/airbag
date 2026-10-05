@@ -35,7 +35,10 @@ The mount order is the boundary:
 FUSE is above the merged view, never just below overlayfs's lower layer. A file
 created or copied into the writable upper is subject to the same checks. With
 `--no-home`, HOME stays read-only but its reads still go through policy FUSE.
-Agent state that normally passes through HOME is checked too.
+Agent state that normally passes through HOME is checked too. The policy
+filesystem does not carry the host's mount flags: if the host mounts HOME
+`noexec`, files there can be executed under `--no-home --fs-policy`, though
+not under `--no-home` alone.
 
 The backing descriptors are CLOEXEC and live only in PID 1. That supervisor is
 non-dumpable so the agent cannot reopen them through `/proc/1/fd` or ptrace. All
@@ -52,7 +55,7 @@ outside the captured view.
 | Create, mkdir, symlink, hardlink, FIFO/socket creation | `fs.write`; hardlink source also `fs.read` and `fs.write` |
 | Unlink, rmdir | `fs.delete` |
 | Rename | source `fs.delete`, destination `fs.write` and `fs.delete`; exchange also source `fs.write` |
-| Setattr: truncate, chmod, chown, timestamps | `fs.write`; executable chmod/create also `fs.exec_bit` |
+| Setattr: truncate, chmod, chown, timestamps | `fs.write`; executable chmod, create or mknod also `fs.exec_bit` |
 
 Rename conservatively checks destination deletion even when no destination
 exists. Device node creation is refused. Rules address the operation's path,
@@ -98,11 +101,32 @@ PID 1 itself is not under the exec filter. While it is installed, the kernel
 refuses the agent a seccomp listener of its own (EBUSY).
 
 The controller snapshots the actual executable pathname and argv from tracee
-memory, resolves normal aliases in the caller's root, and checks `proc.exec`.
+memory and checks `proc.exec`. The target is the path as the caller sees it,
+from its own root, in a chroot too: `/bin/tool` in a jail is checked as
+`/bin/tool` whether the caller names it relative to its working directory,
+absolutely or through a symlink. Symlinks resolve inside that root. A path
+through a `/proc` magic link (`/proc/self/exe`, `/dev/fd/N`) is checked as
+written, and so is one that does not resolve, which the kernel then fails.
 `execveat` handles directory descriptors and AT_EMPTY_PATH (including fexecve).
-Arguments are bounded to 256 entries, 4 KiB per string and 64 KiB total. An
-unreadable or over-limit invocation is logged as a denied `proc.exec.invalid`.
+A working directory or descriptor outside the caller's root, kept across
+`chroot`, has no path in it: that exec is denied as `proc.exec.invalid`.
 Notification IDs are validated before inspection and again before responding.
+
+Arguments are bounded to 256 entries, 4 KiB per string and 64 KiB in all. An
+exec past these limits, or one whose memory cannot be read, is denied and
+logged as `proc.exec.invalid`. This is a compatibility limit: `find -exec {} +`,
+`xargs` and long `sh -c` scripts can pass more, and with `--exec-policy` they
+fail with EACCES. Each check must also fit one 128 KiB frame on the private
+channel after JSON escaping, which makes a control character or `<` six bytes.
+An exec that does not fit is denied and logged as `proc.exec.invalid` without
+its argv; a file operation that does not fit is denied without a log entry.
+Later checks go on as usual.
+
+Ctrl-Z can be lost. If it arrives while a vfork child (posix_spawn uses one)
+waits for its exec check, the child stops, but its parent stays in vfork until
+the child execs and does not stop. When that parent is the agent's main
+process, airbag does not get the terminal back: the session waits until the
+child gets SIGCONT (`kill -CONT PID` from another terminal).
 
 **This is an attempted-invocation policy, not immutable executable identity
  enforcement.** Seccomp CONTINUE lets the kernel reread the tracee's path and
@@ -130,6 +154,24 @@ Allow/deny/ask use the existing CEL gate. Ask returns EACCES, creates an
 indefinitely paused syscall. Runtime approvals are scoped to source, effect,
 operation detail and (for exec) argv. Approving one argument vector does not
 approve different arguments to the same executable.
+
+Rules written for shell predictions see observed events too, and these differ:
+
+- File events have no command. A `deny` or `ask` rule that indexes
+  `command.argv[0]` fails on them and counts as matched, so with `--fs-policy`
+  it denies (or asks about) every file operation.
+- An observed exec target is an absolute path (`/usr/bin/python3.12`); a
+  predicted one is the command as typed (`python3`).
+- Approving a prediction does not approve the exec it leads to: a rule that
+  matches both asks again for the observed one.
+
+Guard such rules with `size(command.argv) > 0` and `effect.source`:
+
+```yaml
+  - name: ask-before-deploy
+    when: effect.source == "" && size(command.argv) > 0 && command.argv[0] == "deploy"
+    verdict: ask
+```
 
 The private runtime socketpair is inherited by PID 1, not mounted into the
 agent view. The agent-facing shim/control socket cannot forge runtime events.
@@ -172,8 +214,9 @@ on a command line.
 
 These backends remain opt-in until measured on representative toolchains.
 `test/runtime-policy-e2e.sh` checks Python file mutations, overlay upper writes
-and resume, make children, execveat, mmap, SQLite, locks, git branch isolation,
-symlinks, hardlinks, sockets, protected HOME, supervisor descriptors and taint.
+and resume, make children, execveat, exec in a chroot, mmap, SQLite, locks, git
+branch isolation, symlinks, hardlinks, sockets, protected HOME, supervisor
+descriptors and taint.
 CI runs it on each Linux runner with the other end-to-end tests.
 
 `sh test/runtime-policy-bench.sh` reports median wall times for a small C build
