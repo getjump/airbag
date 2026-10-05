@@ -4,11 +4,15 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,11 +23,23 @@ import (
 )
 
 // Noise in $HOME: caches and agent state, folded into one line per
-// group. A match ending in "/" is a directory prefix and its own group;
-// others are path.Match patterns.
+// group and left out by apply (a download cache holds code a host build
+// runs as it is, so what is folded must not reach the host). A match
+// ending in "/" is a directory prefix and its own group; others are
+// path.Match patterns. The first match counts.
 var homeNoise = []struct{ match, group, kind string }{
 	{".cache/", "", "cache"}, {".npm/", "", "cache"}, {"go/pkg/", "", "cache"},
-	{".cargo/registry/", "", "cache"}, {".local/share/", "", "cache"},
+	{".cargo/registry/", "", "cache"}, {".cargo/git/", "", "cache"},
+	{".m2/repository/", "", "cache"}, {".gradle/caches/", "", "cache"},
+	{".gradle/wrapper/dists/", "", "cache"}, {".gradle/daemon/", "", "cache"},
+	{".yarn/berry/cache/", "", "cache"}, {".bun/install/cache/", "", "cache"},
+	{".nuget/packages/", "", "cache"}, {".config/go/telemetry/", "", "cache"},
+	// Not all of ~/.local/share: it holds editor plugins (nvim) and
+	// dotfile managers' sources (chezmoi), which a user may want
+	// applied.
+	{".local/share/Trash/", "", "cache"}, {".local/share/recently-used.xbel", ".local/share/", "cache"},
+	{".local/share/zoxide/", "", "cache"}, {".local/share/pnpm/store/", "", "cache"},
+	{".local/share/virtualenv/", "", "cache"},
 	{".local/state/", "", "cache"}, {".rustup/", "", "cache"},
 	// Codex keeps its state in SQLite next to config.toml; config.toml,
 	// AGENTS.md, rules and user skills stay visible.
@@ -32,6 +48,19 @@ var homeNoise = []struct{ match, group, kind string }{
 	{".codex/skills/.system/", ".codex/", "agent state"}, {".codex/*.sqlite*", ".codex/", "agent state"},
 	{".codex/installation_id", ".codex/", "agent state"}, {".codex/.sandbox_migration", ".codex/", "agent state"},
 	{".codex/version.json", ".codex/", "agent state"}, {".codex/models_cache.json", ".codex/", "agent state"},
+	// Claude Code state that now goes through the branch (only the
+	// current workspace's transcripts pass through). settings.json,
+	// hooks, skills, CLAUDE.md and a project's memory/ are flagged, so
+	// they are not folded here; everything below is caches and logs,
+	// except shell snapshots and session env files, which the CLI
+	// sources: a change to one the host already has is flagged
+	// (hostShellState), so it is not folded either.
+	{".claude/projects/", ".claude/", "agent state"}, {".claude/sessions/", ".claude/", "agent state"},
+	{".claude/session-env/", ".claude/", "agent state"}, {".claude/shell-snapshots/", ".claude/", "agent state"},
+	{".claude/file-history/", ".claude/", "agent state"}, {".claude/todos/", ".claude/", "agent state"},
+	{".claude/statsig/", ".claude/", "agent state"}, {".claude/backups/", ".claude/", "agent state"},
+	{".claude/debug/", ".claude/", "agent state"}, {".claude/ide/", ".claude/", "agent state"},
+	{".claude/plans/", ".claude/", "agent state"},
 }
 
 const maxListed = 40
@@ -72,22 +101,18 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 
 	if s.OverHome {
 		fmt.Fprintf(w, "\nHome       %d changes outside the workspace\n", len(home))
-		folded := map[string]int{}
+		lines := map[string]int{}
 		var shown []Change
 		for _, c := range home {
-			if group, kind := Noise(c.Rel); group != "" && !flagged(c) {
-				folded[group+"… ("+kind+")"]++
-				continue
-			}
-			if repo := GitDir(c.Rel); repo != "" && !flagged(c) {
-				folded[repo+"… (git internals)"]++
+			if line := folded(c); line != "" {
+				lines[line]++
 				continue
 			}
 			shown = append(shown, c)
 		}
 		list(w, shown, "~/")
-		for _, dir := range sortedKeys(folded) {
-			fmt.Fprintf(w, "  · ~/%s %d files\n", dir, folded[dir])
+		for _, dir := range sortedKeys(lines) {
+			fmt.Fprintf(w, "  · ~/%s %d files\n", dir, lines[dir])
 		}
 	}
 
@@ -194,10 +219,14 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		}
 	}
 
-	if att := Attention(cs); len(att) > 0 {
+	if att := attentionLines(cs); len(att) > 0 {
 		fmt.Fprintf(w, "\nAttention\n")
-		for _, c := range att {
-			fmt.Fprintf(w, "  ! %-40s %s\n", display(c), strings.Join(c.Flags, ", "))
+		for _, a := range att {
+			if a.c == nil {
+				fmt.Fprintf(w, "  ! %-40s %s\n", "~/"+a.group, gitDirWhy(a.n))
+				continue
+			}
+			fmt.Fprintf(w, "  ! %-40s %s\n", display(*a.c), attentionWhy(*a.c))
 		}
 	}
 	if d > 50 {
@@ -241,6 +270,7 @@ func list(w io.Writer, all []Change, prefix string) {
 		if c.IsDir() {
 			name += "/"
 		}
+		name = OneLine(name)
 		flags := ""
 		if f := withoutOutside(c.Flags); len(f) > 0 {
 			flags = "  " + strings.Join(f, ", ")
@@ -251,12 +281,94 @@ func list(w io.Writer, all []Change, prefix string) {
 
 func display(c Change) string {
 	if c.Layer == "home" {
-		return "~/" + c.Rel
+		return OneLine("~/" + c.Rel)
 	}
-	return c.Rel
+	return OneLine(c.Rel)
+}
+
+// OneLine quotes a name the agent chose (a path, a link target) when it
+// holds a line break: the terminal-safe writer escapes other control
+// characters but keeps newlines, so a raw one could add lines that pass
+// for other changes.
+func OneLine(s string) string {
+	if strings.ContainsAny(s, "\n\r") {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 func flagged(c Change) bool { return len(withoutOutside(c.Flags)) > 0 }
+
+// folded returns the line review folds a change in $HOME into, "" when
+// the change is listed on its own. Apply leaves what is folded out
+// (Dropped), so the fold needs no decision. A cache is folded whatever
+// it holds, executables and links included. Agent state is folded
+// unless it carries a flag (memory, shell code a host session sources)
+// or is a link, which would lead a later session's path somewhere
+// else: those are applied. Git internals in $HOME are not folded:
+// objects and refs go with the config and hooks a git command runs.
+func folded(c Change) string {
+	if c.Layer != "home" {
+		return ""
+	}
+	group, kind := noise(c.Rel)
+	if group == "" || kind != "cache" && (flagged(c) || c.Type == fs.ModeSymlink) {
+		return ""
+	}
+	return group + "… (" + kind + ", not applied)"
+}
+
+// Dropped reports whether apply leaves a change out: review folds it as
+// a cache or agent state.
+func Dropped(c Change) bool { return folded(c) != "" }
+
+// DroppedState reports whether apply leaves a change out as agent state
+// rather than as a cache.
+func DroppedState(c Change) bool {
+	_, kind := noise(c.Rel)
+	return Dropped(c) && kind == "agent state"
+}
+
+// attentionLine is one line of the attention list: a change, or the
+// unflagged changes in one git directory in $HOME, counted.
+type attentionLine struct {
+	c     *Change
+	group string
+	n     int
+}
+
+func attentionLines(cs []Change) []attentionLine {
+	var out []attentionLine
+	at := map[string]int{}
+	for _, c := range Attention(cs) {
+		if c.Layer == "home" && !flagged(c) {
+			if repo := GitDir(c.Rel); repo != "" {
+				if i, ok := at[repo]; ok {
+					out[i].n++
+				} else {
+					at[repo] = len(out)
+					out = append(out, attentionLine{group: repo, n: 1})
+				}
+				continue
+			}
+		}
+		out = append(out, attentionLine{c: &c})
+	}
+	return out
+}
+
+// gitDirWhy says why a git directory in $HOME needs a decision.
+func gitDirWhy(n int) string {
+	return fmt.Sprintf("%d files in a repository's git directory in $HOME (its config and hooks run with the next git command there)", n)
+}
+
+// attentionWhy says why a change needs a decision.
+func attentionWhy(c Change) string {
+	if why := strings.Join(withoutOutside(c.Flags), ", "); why != "" {
+		return why
+	}
+	return "in $HOME, not a cache or agent state"
+}
 
 func withoutOutside(fl []string) []string {
 	var out []string
@@ -281,7 +393,9 @@ func GitDir(rel string) string {
 
 // Noise returns the folding group of a path in $HOME, "" when the path
 // is not noise, and what kind of noise it is.
-func Noise(rel string) (group, kind string) {
+func Noise(rel string) (group, kind string) { return noise(rel) }
+
+func noise(rel string) (group, kind string) {
 	for _, n := range homeNoise {
 		var hit bool
 		if strings.HasSuffix(n.match, "/") {
@@ -446,6 +560,52 @@ func renderShell(w io.Writer, effs []effects.Effect) {
 func Diff(w io.Writer, c Change) {
 	if c.IsDir() {
 		fmt.Fprintf(w, "%s %s/ (directory %s)\n", map[string]string{Added: "+", Deleted: "-", Replaced: "!"}[c.Kind], display(c), c.Kind)
+		return
+	}
+	// A symlink is shown by its target. diff would follow it, and print
+	// whatever host file the agent pointed it at.
+	if c.Type == fs.ModeSymlink {
+		old, cur := "", ""
+		if c.Kind != Added {
+			old, _ = os.Readlink(c.Path)
+		}
+		if c.Kind != Deleted {
+			cur, _ = os.Readlink(c.Upper)
+		}
+		fmt.Fprintf(w, "--- a/%s\n+++ b/%s\n", display(c), display(c))
+		if old != "" {
+			fmt.Fprintf(w, "-symlink -> %s\n", OneLine(old))
+		}
+		if cur != "" {
+			fmt.Fprintf(w, "+symlink -> %s\n", OneLine(cur))
+		}
+		return
+	}
+	// Agent state and copies of an agent config (Claude Code keeps
+	// backups of ~/.claude.json) may hold tokens: no contents.
+	// Only Claude Code's own backups, beside the config in $HOME: an
+	// agent file elsewhere with such a name is shown like any other.
+	if c.Layer == "home" && (!strings.Contains(filepath.ToSlash(c.Rel), "/") && strings.HasPrefix(c.Rel, ".claude.json") && configFor(filepath.ToSlash(c.Rel)) == nil ||
+		func() bool {
+			_, kind := Noise(c.Rel)
+			return kind == "agent state" && !agentMemory(c.Rel) && !slices.Contains(c.Flags, shellStateFlag)
+		}()) {
+		fmt.Fprintf(w, "%s %s (agent state; contents not shown)\n", map[string]string{Added: "+", Deleted: "-", Modified: "~", Replaced: "!"}[c.Kind], display(c))
+		return
+	}
+	// A config file is shown by the names of the keys that changed, by
+	// class, never their values, which may carry tokens.
+	if notes, ok := configNotes(c); ok {
+		var parts []string
+		for _, f := range notes {
+			if f != "persist" {
+				parts = append(parts, f)
+			}
+		}
+		if len(parts) == 0 {
+			parts = []string{"no key changed"}
+		}
+		fmt.Fprintf(w, "%s %s: %s\n", map[string]string{Added: "+", Deleted: "-", Modified: "~", Replaced: "!"}[c.Kind], display(c), strings.Join(parts, "; "))
 		return
 	}
 	a, b := c.Path, c.Upper

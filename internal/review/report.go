@@ -128,12 +128,16 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			deleted++
 		}
 	}
-	for _, c := range Attention(cs) {
-		target := filepath.ToSlash(c.Rel)
-		if c.Layer == "home" {
+	for _, a := range attentionLines(cs) {
+		if a.c == nil {
+			r.Attention = append(r.Attention, ReportItem{What: "change", Target: "~/" + a.group, Why: gitDirWhy(a.n)})
+			continue
+		}
+		target := filepath.ToSlash(a.c.Rel)
+		if a.c.Layer == "home" {
 			target = "~/" + target
 		}
-		r.Attention = append(r.Attention, ReportItem{What: "change", Target: target, Why: strings.Join(withoutOutside(c.Flags), ", ")})
+		r.Attention = append(r.Attention, ReportItem{What: "change", Target: target, Why: attentionWhy(*a.c)})
 	}
 	if deleted > manyDeletions {
 		r.Attention = append(r.Attention, ReportItem{What: "deletions", Target: s.Workspace, Why: fmt.Sprintf("%d files deleted in the workspace", deleted)})
@@ -222,6 +226,6 @@ func WriteAttention(w io.Writer, r Report) {
 	}
 	fmt.Fprintf(w, "Session %s: %d things need a decision\n", r.Session.ID, len(r.Attention))
 	for _, a := range r.Attention {
-		fmt.Fprintf(w, "  %-9s %-40s %s\n", a.What, clip(a.Target, 40), a.Why)
+		fmt.Fprintf(w, "  %-9s %-40s %s\n", a.What, clip(OneLine(a.Target), 40), a.Why)
 	}
 }

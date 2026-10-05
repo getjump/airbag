@@ -536,6 +536,15 @@ func markOpaque(dir string) {
 	_ = unix.Setxattr(dir, "user.overlay.opaque", []byte("y"), 0)
 }
 
+// clearOpaque makes dir an ordinary directory of the upper layer: what
+// it replaced is the host's now, and the next scan must not take it for
+// a replacement again.
+func clearOpaque(dir string) {
+	for _, attr := range []string{"user.overlay.opaque", "trusted.overlay.opaque"} {
+		_ = unix.Removexattr(dir, attr)
+	}
+}
+
 // fingerprint describes what is at p: absent, a directory, a symlink
 // target, or a file's mode and content hash.
 func fingerprint(p string) string {

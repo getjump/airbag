@@ -82,8 +82,10 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
 ## What the agent gets
 
 - **A branch of the world.** The workspace and `$HOME` are overlayfs branches; the
-  rest of the host is read-only. Nothing the agent writes reaches your files before
-  `airbag apply`.
+  rest of the host is read-only. Nothing the agent writes to the workspace reaches
+  your files before `airbag apply`, and almost nothing it writes to `$HOME` does
+  either — the exceptions are the narrow agent state below, which has to survive a
+  discard.
 - **One way out.** The sandbox has no network interface besides loopback and no
   DNS. Traffic leaves only through airbag's proxy, which allows model APIs
   (`--allow HOST` adds more) and logs every host. Package registries are reached
@@ -220,8 +222,56 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   the outbox and the effect log continue, and what the session learned stays (a
   secret read in the first run still narrows egress in the second). Iterate
   "agent, review, tell it what to fix, agent again" without applying in between.
-- **Its own state.** Transcripts and logins (`~/.claude/projects`, `~/.codex/sessions`,
-  tokens) pass through, so discarding a branch does not log you out.
+- **Its own state.** Only what must survive a discard passes straight through to the
+  real `$HOME`: the login (`~/.claude/.credentials.json`, `~/.codex/auth.json`, so a
+  discard does not log you out), the current workspace's Claude Code transcripts
+  (`~/.claude/projects/<this project>/`, so `claude --resume` works after a discard) and
+  Codex's transcripts and logs (`~/.codex/sessions`, which Codex keys by date, not by
+  project, so these are not narrowed to the workspace, and `~/.codex/log`). Mind what that means: a transcript the
+  agent wrote, resumed later outside airbag (`claude --continue`, `codex resume`),
+  brings that conversation back, so resume a sandboxed session inside airbag
+  (`airbag run --session`), and a login the agent changed inside a session is the
+  login your next host session uses. A path with a symlink in it (say `~/.claude`
+  pointing into a dotfiles repository) is not passed through: it stays in the branch,
+  or is read-only where the link leads out of `$HOME`. Nor is one holding a file with
+  another hard-linked name, which a write through it would change for real, or more
+  than 100 000 files to check for one. A session started by an older
+  airbag, resumed now, gets today's narrower list. Resumed from another directory,
+  a session passes that directory's transcripts through too, unless an earlier run
+  already changed them in the branch: then they stay in the branch, and airbag says so. Everything else an agent keeps in
+  `$HOME` — other projects' transcripts, sessions, shell snapshots, file history,
+  todos, caches — goes through the branch: review folds it into one `agent state`
+  or `cache` line, and neither a discard nor an apply carries it to the real `$HOME`
+  (a download cache holds code a host build runs as it is; `apply --only` naming a
+  `~/` path takes it anyway). Codex's thread index is in that state, so a sandboxed
+  Codex session is resumed with `airbag run --session`, not with `codex resume` on the
+  host. The exception is shell code Claude Code sources: a
+  change to a shell snapshot the host already has, and any change to a session's env
+  files (the host can resume a session by id), is flagged `persist` and shown in full;
+  the sandbox session's own new snapshots stay folded. A project's `memory/` (instructions loaded into later
+  sessions) stays in the branch too, flagged `agent instructions`, so you see it and
+  a discard drops it. `~/.claude.json` goes through the branch too, the whole file:
+  nothing in it reaches the real file before apply, Claude Code's own counters
+  included. Review shows it by key name, never value: keys the CLI rewrites every
+  run (counters, ids, migration markers) as `benign key(s)`, which need no decision;
+  an MCP server, a tool permission, a trust decision or the logged-in account flagged
+  `persist`; any other key as `unknown key(s)`. A new project's entry, written with the
+  CLI's own defaults (`false`, `[]`, `{}`, each where it belongs), is no change; a mode
+  that lets other users write the file is flagged. The legacy `~/.claude/.config.json`
+  is reviewed the same way, and a new one, which the CLI reads instead of
+  `~/.claude.json`, is flagged. If the host
+  rewrote or removed the file during the session, apply reports it as a conflict; leave
+  it out with `apply -i` or `--only`. Dotfiles kept as links (`~/.bashrc`, `~/.claude`,
+  `~/.claude.json` or a file deep in `~/.config/nvim` pointing into `~/dotfiles`, or into
+  the workspace when that is your dotfiles repository) are followed, through chains and
+  to targets that do not exist yet: a change found at a link's target is classified as
+  the path it stands for (apply writes a regular file in place of a link it replaces).
+  A link deeper than 5000 entries into a watched directory is not looked for, and
+  instruction files recognized by name wherever they are (`AGENTS.md`, `CLAUDE.md`) are
+  recognized by their own name only: a write through one that is a link to a file named
+  otherwise is shown under the target's name. On the macOS prototype,
+  which has no branch of `$HOME`, this narrowing is only partial; see
+  [docs/macos.md](docs/macos.md).
 
 ## What the review shows
 
@@ -239,7 +289,14 @@ Outbox     1
 ```
 
 `airbag review --attention` prints only what needs a decision: secret reads, flagged
-changes, many deletions, waiting pushes, blocked calls, refusals past the log's rate. `airbag review --json` prints
+changes, every change in `$HOME` that apply would carry over other than an agent
+config change of benign keys only (with the file's mode unchanged), many
+deletions, waiting pushes, blocked calls, refusals past the log's rate. Caches and
+agent state are not carried over, so they need no decision; a repository's git
+directory in `$HOME` is one line with its count of files. In `$HOME` a change is matched by where the write really landed,
+so one made through a link (`~/.bashrc` pointing into `~/dotfiles`) shows as a change
+to the link's target, which needs a decision even when review cannot tell what the
+link stands for. `airbag review --json` prints
 the whole review as data for editors and CI, with a versioned schema
 (`airbag.review/v1`; fields are only added within a version).
 

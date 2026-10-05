@@ -2,6 +2,7 @@ package review
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,6 +111,97 @@ func TestScanAndClassify(t *testing.T) {
 	}
 }
 
+// In $HOME, a change review neither folds nor flags still needs a
+// decision: a write through a link (~/.bashrc pointing into ~/dotfiles)
+// lands under a name no table knows. Caches, agent state, benign-only
+// config changes and the workspace's unflagged files do not.
+func TestAttentionUnknownHome(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	root := t.TempDir()
+	ws, home := filepath.Join(root, "ws"), filepath.Join(root, "home")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(p, data string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(home, ".claude.json"), `{"numStartups":1}`)
+	write(filepath.Join(s.HomeUpper(), ".claude.json"), `{"numStartups":2}`)
+	write(filepath.Join(s.HomeUpper(), "dotfiles/bashrc"), "alias x=y\n")
+	write(filepath.Join(s.HomeUpper(), "notes/todo.txt"), "x")
+	write(filepath.Join(s.HomeUpper(), ".cache/pip/x"), "x")
+	write(filepath.Join(s.HomeUpper(), ".claude/todos/t.json"), "[]")
+	write(filepath.Join(s.HomeUpper(), "src/repo/.git/objects/ab/cd"), "x")
+	// What a git command runs or reads as settings is shown.
+	write(filepath.Join(s.HomeUpper(), "src/repo/.git/config"), "[core]\n")
+	write(filepath.Join(s.HomeUpper(), ".git/hooks/post-checkout"), "#!/bin/sh\n")
+	if err := os.Chmod(filepath.Join(s.HomeUpper(), ".git/hooks/post-checkout"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Editor plugins live in ~/.local/share; the trash does too.
+	write(filepath.Join(s.HomeUpper(), ".local/share/nvim/lazy/p/init.lua"), "x")
+	write(filepath.Join(s.HomeUpper(), ".local/share/Trash/files/x"), "x")
+	// A new module is folded; a change to one the host has is not.
+	write(filepath.Join(home, "go/pkg/mod/m@v1/old.go"), "package m\n")
+	write(filepath.Join(s.HomeUpper(), "go/pkg/mod/m@v1/old.go"), "package m // changed\n")
+	write(filepath.Join(s.HomeUpper(), "go/pkg/mod/n@v1/new.go"), "package n\n")
+	write(filepath.Join(s.WSUpper(), "main.go"), "package main\n")
+	// A link in a cache is dropped with it; one in agent state is applied.
+	for _, l := range []string{".cache/link", ".claude/todos/link"} {
+		if err := os.Symlink("/elsewhere", filepath.Join(s.HomeUpper(), l)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range Attention(cs) {
+		got = append(got, c.Layer+":"+c.Rel)
+	}
+	// A cache is folded and left out by apply, a module the host has
+	// included; a git directory in $HOME is not folded.
+	want := []string{"home:.claude/todos/link", "home:.git/hooks/post-checkout", "home:.local/share/nvim/lazy/p/init.lua",
+		"home:dotfiles/bashrc", "home:notes/todo.txt", "home:src/repo/.git/config", "home:src/repo/.git/objects/ab/cd"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("attention %v, want %v", got, want)
+	}
+	r := BuildReport(s, cs, nil, nil, nil)
+	targets := map[string]string{}
+	for _, a := range r.Attention {
+		targets[a.Target] = a.Why
+	}
+	if targets["~/notes/todo.txt"] != "in $HOME, not a cache or agent state" {
+		t.Errorf("why %q", targets["~/notes/todo.txt"])
+	}
+	// One line for the repository's git directory, the hook (flagged
+	// executable) on its own.
+	if !strings.HasPrefix(targets["~/src/repo/.git/"], "2 files in a repository's git directory") {
+		t.Errorf("git directory line: %v", targets)
+	}
+	if _, ok := targets["~/.git/hooks/post-checkout"]; !ok {
+		t.Errorf("flagged hook not listed on its own: %v", targets)
+	}
+	for _, c := range cs {
+		want := false
+		for _, p := range []string{"go/pkg/", ".cache/", ".claude/todos/", ".local/share/Trash/"} {
+			want = want || strings.HasPrefix(c.Rel+"/", p)
+		}
+		want = want && !(c.Type == fs.ModeSymlink && strings.HasPrefix(c.Rel, ".claude/"))
+		if Dropped(c) != want {
+			t.Errorf("%s: dropped %v", c.Rel, Dropped(c))
+		}
+	}
+}
+
 func TestNoise(t *testing.T) {
 	for rel, want := range map[string]string{
 		".cache/go-build/ab/cd":            ".cache/ (cache)",
@@ -136,7 +228,9 @@ func TestPersistTable(t *testing.T) {
 		".bash_login": true, ".zlogin": true, ".config/environment.d/10-x.conf": true,
 		".local/share/dbus-1/services/x.service": true, ".local/share/applications/x.desktop": true,
 		".config/niri/config.kdl": true, ".gradle/init.d/x.gradle": true, ".cargo/config.toml": true,
-		".claude.json": true, ".claude.json.backup": false, ".local/share/fonts/a.ttf": false,
+		// ~/.claude.json is no longer persist by name: agentconfig.go
+		// flags it only when a key that runs code or changes trust moved.
+		".claude.json": false, ".claude.json.backup": false, ".local/share/fonts/a.ttf": false,
 		".local/lib/python3.12/site-packages/pkg/__init__.py": false, ".config/systemd": true,
 	} {
 		if got := persistReason(rel, persistHomeTable) != ""; got != want {

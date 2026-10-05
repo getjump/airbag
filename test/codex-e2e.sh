@@ -39,7 +39,7 @@ JSON
 [ ! -e codex.txt ] || fail "codex.txt reached the real workspace"
 rev=$("$AIRBAG" review)
 # shellcheck disable=SC2088 # "~/" as the review prints it
-for want in "3 tool calls" "Bash   echo from-codex > codex.txt" "~/.codex/… (agent state)" "+codex.txt" "git push origin main"; do
+for want in "3 tool calls" "Bash   echo from-codex > codex.txt" "~/.codex/… (agent state, not applied)" "+codex.txt" "git push origin main"; do
 	echo "$rev" | grep -qF -- "$want" || fail "review lacks '$want':
 $rev"
 done
