@@ -23,9 +23,12 @@ func TestCaptureFreezesFileBodyAndCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := []string{"gh", "pr", "create", "--repo", "getjump/airbag", "--base", "main", "--head", "work", "--title", "Fix", "--body-file", "notes.md"}
-	r, err := capturePullRequest(args, ws)
+	r, real, err := capturePullRequest(args, ws)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if want, _ := filepath.EvalSymlinks(path); real != want {
+		t.Fatalf("body pinned at %q, want %q", real, want)
 	}
 	if err := os.WriteFile(path, []byte("later\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -34,11 +37,11 @@ func TestCaptureFreezesFileBodyAndCommit(t *testing.T) {
 		t.Fatal("capture followed mutable input")
 	}
 	args[len(args)-1] = ".env"
-	if _, err := capturePullRequest(args, ws); err == nil {
+	if _, _, err := capturePullRequest(args, ws); err == nil {
 		t.Fatal("opened a secret body file")
 	}
 	args[len(args)-1] = "."
-	if _, err := capturePullRequest(args, ws); err == nil {
+	if _, _, err := capturePullRequest(args, ws); err == nil {
 		t.Fatal("accepted a directory")
 	}
 	// A benign name linked to a secret file is not read through.
@@ -49,8 +52,25 @@ func TestCaptureFreezesFileBodyAndCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	args[len(args)-1] = "linked.md"
-	if r, err := capturePullRequest(args, ws); err == nil {
+	if r, _, err := capturePullRequest(args, ws); err == nil {
 		t.Fatalf("read a body through a link: %q", r.PullRequest.Body)
+	}
+	// Through a linked directory the body is pinned where it really
+	// is, outside the workspace, so the host refuses the call.
+	out := t.TempDir()
+	if err := os.WriteFile(filepath.Join(out, "notes.md"), []byte("elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(out, filepath.Join(ws, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	args[len(args)-1] = "docs/notes.md"
+	_, real, err = capturePullRequest(args, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := filepath.EvalSymlinks(filepath.Join(out, "notes.md")); real != want {
+		t.Fatalf("body through a linked directory pinned at %q, want %q", real, want)
 	}
 }
 
@@ -68,7 +88,7 @@ func TestCaptureRefusesFIFO(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := capturePullRequest([]string{"gh", "pr", "create", "--repo", "getjump/airbag", "--base", "main", "--head", "work", "--title", "Fix", "--body-file", "body.md"}, ws)
+		_, _, err := capturePullRequest([]string{"gh", "pr", "create", "--repo", "getjump/airbag", "--base", "main", "--head", "work", "--title", "Fix", "--body-file", "body.md"}, ws)
 		done <- err
 	}()
 	select {
