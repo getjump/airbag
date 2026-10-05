@@ -185,3 +185,34 @@ func TestFailedVMMIsAProviderFailure(t *testing.T) {
 		t.Fatalf("the provider's own error is lost: %v", err)
 	}
 }
+
+// A command started from a subdirectory reached through a link runs in
+// the same subdirectory of the copy, not at its root; one whose directory
+// leads out of the workspace runs at the root.
+func TestCwdThroughALink(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "real", "repo")
+	if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(repo, "out")); err != nil {
+		t.Fatal(err)
+	}
+	for cwd, want := range map[string]string{
+		filepath.Join(base, "link", "repo", "sub"): "sub",
+		filepath.Join(repo, "sub"):                 "sub",
+		repo:                                       ".",
+	} {
+		if rel, ok := cwdIn(repo, cwd); !ok || rel != want {
+			t.Errorf("%s: %q %v, want %q", cwd, rel, ok, want)
+		}
+	}
+	for _, cwd := range []string{filepath.Join(repo, "out"), base} {
+		if rel, ok := cwdIn(repo, cwd); ok {
+			t.Errorf("%s is taken for %q in the workspace", cwd, rel)
+		}
+	}
+}

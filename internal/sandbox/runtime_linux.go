@@ -213,7 +213,7 @@ func runOptional(s *session.Session) (int, error) {
 		uid, gid = 1000, 1000
 	}
 	cwd := s.CloneDir()
-	if rel, err := filepath.Rel(s.Workspace, s.Cwd); err == nil && pathWithin(s.Cwd, s.Workspace) {
+	if rel, ok := cwdIn(s.Workspace, s.Cwd); ok {
 		cwd = filepath.Join(cwd, rel)
 	}
 	cfg := guestConfig{Backend: s.Backend, Strict: s.Strict, Argv: s.Argv, Env: agentEnvFor(s, ProxyAddr, "/run/airbag/bin", "/tmp", extra), Cwd: cwd, Workspace: s.CloneDir(), UID: uid, GID: gid}
@@ -478,6 +478,25 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 }
 
 func exportStage(s *session.Session) string { return filepath.Join(s.Dir, "ws", "export") }
+
+// cwdIn is cwd relative to workspace, both taken as the directories they
+// name: git gives the workspace resolved, while Getwd can keep a link the
+// shell went through (/link/repo/sub for /real/repo/sub). A cwd that
+// leads out of the workspace, through a link in it too, is not in it.
+func cwdIn(workspace, cwd string) (string, bool) {
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return p
+	}
+	ws, dir := resolve(workspace), resolve(cwd)
+	if !pathWithin(dir, ws) {
+		return "", false
+	}
+	rel, err := filepath.Rel(ws, dir)
+	return rel, err == nil
+}
 
 // vmmFailed ends a run whose Firecracker failed: the agent's own status
 // comes in the guest's result, so a VMM that exits nonzero, its config
