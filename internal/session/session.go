@@ -30,6 +30,7 @@ type Meta struct {
 	// identify legacy native sessions, not a stronger isolation guarantee.
 	Backend          string    `json:"backend,omitempty"`
 	Isolation        string    `json:"isolation,omitempty"`
+	Egress           string    `json:"egress,omitempty"`
 	RequireIsolation string    `json:"require_isolation,omitempty"`
 	ID               string    `json:"id"`
 	Created          time.Time `json:"created"`

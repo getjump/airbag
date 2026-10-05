@@ -3,7 +3,12 @@
 `airbag capabilities --json` describes the backend compiled into the binary.
 It does not probe the machine or attest a running session. `airbag doctor`
 checks host prerequisites. `airbag run` records the selected backend,
-isolation boundary and explicit requirement in session metadata.
+isolation boundary, egress and explicit requirement in session metadata.
+
+Egress is `allowlist-proxy`, except in a session started with `--nix-daemon`:
+the Nix daemon's builds and substitutes reach the network outside the proxy,
+and the session records `allowlist-proxy+nix-daemon`. That is fixed when the
+session is created; `run` prints it for every run.
 
 Only `--backend=native` is implemented. Linux uses namespaces, overlayfs and
 seccomp; macOS uses Seatbelt and a workspace clone. Both share the host
@@ -49,6 +54,7 @@ silently remove it.
 
 - Native execution exposes a shared host kernel to agent code.
 - Allowed destinations can receive agent data and perform remote effects.
+- `--nix-daemon` opens egress outside the proxy for the Nix daemon.
 - Agent-state passthroughs can survive discard.
 - Credential placeholders do not issue short-lived credentials or restrict
   the real token's service-level scopes.

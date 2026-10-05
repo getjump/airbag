@@ -3,6 +3,15 @@ package sandbox
 import (
 	"fmt"
 	"runtime"
+	"slices"
+)
+
+// Egress values. Agent traffic goes through airbag's allowlist proxy; a
+// run that leaves the Nix daemon's socket reachable (--nix-daemon) has a
+// second path, the daemon's builds and substitutes, outside the proxy.
+const (
+	EgressProxy          = "allowlist-proxy"
+	EgressProxyNixDaemon = "allowlist-proxy+nix-daemon"
 )
 
 // Backend describes the compiled execution boundary, not a successful probe
@@ -26,10 +35,11 @@ func NativeBackend() Backend { return nativeBackend(runtime.GOOS) }
 func nativeBackend(platform string) Backend {
 	b := Backend{
 		Schema: 1, Name: "native", Platform: platform, Isolation: "shared-kernel",
-		Readiness: "not-probed", Egress: "allowlist-proxy",
+		Readiness: "not-probed", Egress: EgressProxy,
 		Limitations: []string{
 			"agent code shares the host kernel; kernel exploits are outside this boundary",
 			"allowed network destinations can receive agent data and perform remote effects",
+			"--nix-daemon: the Nix daemon's builds and substitutes reach the network outside the proxy; such a session records egress " + EgressProxyNixDaemon,
 			"agent state passthroughs can persist without apply",
 			"credential placeholders do not provide JIT issuance, token scope or TTL",
 			"secret taint narrows egress; it is not a general automatic process kill switch",
@@ -43,6 +53,16 @@ func nativeBackend(platform string) Backend {
 		b.Limitations = append(b.Limitations, "macOS is a prototype; HOME has no branch")
 	default:
 		b.Isolation, b.Mechanism, b.Egress = "unsupported", "unsupported", "unsupported"
+	}
+	return b
+}
+
+// ForRun is b as a session with these hidden host paths runs it: one that
+// leaves the Nix daemon's socket reachable does not keep egress in the
+// proxy. A session that hides nothing (an older airbag's) is reported so.
+func (b Backend) ForRun(hiddenHost []string) Backend {
+	if b.Egress == EgressProxy && !slices.Contains(hiddenHost, NixDaemonSocket) {
+		b.Egress = EgressProxyNixDaemon
 	}
 	return b
 }
