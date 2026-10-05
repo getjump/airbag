@@ -363,3 +363,31 @@ func TestReportNamesTrustLinks(t *testing.T) {
 		t.Errorf("links inside the workspace, or removed, hold nothing: %s", w)
 	}
 }
+
+// The clone of a workspace named through a link is compared with where
+// the link leads, so the agent's deletions show; the real files are
+// named by the workspace's path.
+func TestScanTreeThroughLinkedRoot(t *testing.T) {
+	real, branch := t.TempDir(), t.TempDir()
+	for _, f := range []struct{ dir, name string }{{real, "gone.txt"}, {real, "keep.txt"}, {branch, "keep.txt"}, {branch, "new.txt"}} {
+		if err := os.WriteFile(filepath.Join(f.dir, f.name), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := ScanTree("ws", link, branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range cs {
+		got = append(got, c.Kind+":"+c.Rel+":"+c.Path)
+	}
+	want := []string{Deleted + ":gone.txt:" + filepath.Join(link, "gone.txt"), Added + ":new.txt:" + filepath.Join(link, "new.txt")}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
