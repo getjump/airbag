@@ -27,6 +27,8 @@ def workload():
             checks[name] = {"passed": True, "seconds": time.monotonic() - start}
         except (OSError, AssertionError, subprocess.SubprocessError) as error:
             checks[name] = {"passed": False, "error": str(error)}
+            if isinstance(error, subprocess.CalledProcessError):
+                checks[name]["stderr"] = error.stderr
 
     def cow():
         assert (root / "seed.txt").read_text() == "original\n"
@@ -75,6 +77,18 @@ def workload():
         file.rename(root / "object")
         assert (root / "object").read_bytes() == b"object bytes"
 
+    def fsync_before_chmod():
+        # Diagnostic only: force NFS writeback before making the file readonly.
+        # A pass here never substitutes for the actual Git/object pattern.
+        file = root / "object-synced.tmp"
+        with file.open("wb") as out:
+            out.write(b"object bytes")
+            out.flush()
+            os.fsync(out.fileno())
+            os.fchmod(out.fileno(), 0o444)
+        file.rename(root / "object-synced")
+        assert (root / "object-synced").read_bytes() == b"object bytes"
+
     def git():
         for argv in [["git", "init", "-q"], ["git", "add", "seed.txt"],
                      ["git", "-c", "user.name=Filesystem Probe", "-c", "user.email=probe@example.invalid",
@@ -92,8 +106,10 @@ def workload():
                             ("local_flock", locks), ("readonly_object", readonly_object),
                             ("git_commit_fsck", git)]:
         check(name, operation)
+    required_pass = all(value["passed"] for value in checks.values())
+    check("diagnostic_fsync_before_chmod", fsync_before_chmod)
     print("AGENTFS_PROBE " + json.dumps(checks), flush=True)
-    return 0 if all(value["passed"] for value in checks.values()) else 1
+    return 0 if required_pass else 1
 
 
 def mounted_workload(binary, db, home, env, backend, output):

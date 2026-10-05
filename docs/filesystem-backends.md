@@ -124,8 +124,48 @@ mount, COW base preservation, file fsync/stat/rename/read, aliases, mmap
 reads, local flock, the 0444 loose-object pattern, and a real local Git
 commit/fsck. `--cli-only` is explicitly labelled and never reports a mount.
 
-Mounted results pending CI. The local CLI-only observation established
-read-back `hello` and zero `tool_calls` rows. It did not test FUSE or macOS.
+Measured probe commit: `7917a87194c6a25edbb505f42a3f74d9ec1f1f81`.
+[CI run 37257296082](https://github.com/getjump/airbag/actions/runs/37257296082)
+tested official v0.6.4 release binaries on both platforms:
+
+| Check | Linux 6.17 / FUSE | macOS 15.7.9 ARM64 / NFS |
+| --- | --- | --- |
+| Real foreground mount | Pass | Pass |
+| COW write/delete and base unchanged | Pass | Pass |
+| Create/fsync/stat/rename/read | Pass | Pass |
+| Hardlinks, symlinks, mmap read, local flock | Pass | Pass |
+| Write, chmod 0444, close, rename | Pass | Fail: Permission denied |
+| Actual Git add/commit/fsck | Pass | Fail at git add |
+| `exec` with an overlay base | Fail: pool timeout | Fail: pool timeout |
+| `tool_calls` after our mounted operations | 0 rows | 0 rows |
+
+This establishes actual Mac mounting, but not sufficient compatibility for
+our coding workflow. The macOS job stays red for the real workload failures;
+the explicit foreground mount is not reported as a successful `exec`.
+Raw outputs and logs are committed in `testdata/agentfs/2026-10-05/`;
+[Linux artifact](https://github.com/getjump/airbag/actions/runs/37257296082/artifacts/11322649641)
+and [Mac artifact](https://github.com/getjump/airbag/actions/runs/37257296082/artifacts/11323256515)
+preserve the independent results. Neither platform populated the tool-call
+table in these paths; no complete filesystem-audit claim follows from that.
+
+Source analysis explains the `exec` failure: it keeps a pooled connection
+alive while `overlay.load()` asks for another; the inspected pool permits
+one connection and has a 30-second timeout. The explicit `mount` path scopes
+that first connection separately. Both official binaries produced the same
+timeout. This is an upstream integration defect, not missing FUSE/NFS support.
+
+The readonly/Git failure is consistent with delayed NFS writeback encountering
+the changed permissions. This remains a hypothesis: the updated probe adds
+a **non-gating diagnostic** with fsync before chmod, and captures Git stderr.
+A passing workaround must not convert a failing real Git task into a pass.
+The upstream [Mac Rust build report](https://github.com/tursodatabase/agentfs/issues/260)
+also motivates real build coverage, but is a different report, not our
+reproduction or evidence that all current versions fail.
+
+For adoption: fix/retest the upstream exec path and Mac readonly/Git behavior,
+then measure real builds and build the admission adapter. Reusing Linux
+storage is plausible; replacing our policy gate wholesale is not established.
+Keep the current Airbag filesystem implementation while these gaps remain.
 
 Primary sources:
 

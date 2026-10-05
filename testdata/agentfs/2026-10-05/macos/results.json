@@ -1,0 +1,60 @@
+{
+  "platform": "macOS-15.7.9-arm64-arm-64bit-Mach-O",
+  "architecture": "arm64",
+  "mounted": true,
+  "security_equivalence_tested": false,
+  "durability_equivalence_tested": false,
+  "version": "agentfs v0.6.4",
+  "cli_read_back": "hello",
+  "tool_calls_after_cli_read_write": 0,
+  "backend": "nfs",
+  "exec_overlay": {
+    "passed": false,
+    "exit_code": 1,
+    "seconds": 30.04097112500017
+  },
+  "mount_method": "mount-foreground",
+  "mount_and_workload_seconds": 0.6242545000000064,
+  "exit_code": 1,
+  "checks": {
+    "real_mount": {
+      "passed": true,
+      "cwd": "/private/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/airbag-agentfs-probe-b8ljvatq/mnt",
+      "mount": [
+        "127.0.0.1:/ on /private/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/airbag-agentfs-probe-b8ljvatq/mnt (nfs, nodev, nosuid, mounted by runner)"
+      ]
+    },
+    "cow": {
+      "passed": true,
+      "seconds": 0.006287041999939902
+    },
+    "create_fsync_stat_rename_read": {
+      "passed": true,
+      "seconds": 0.0027997499998946296
+    },
+    "hardlink_symlink": {
+      "passed": true,
+      "seconds": 0.004985082999837687
+    },
+    "mmap_read": {
+      "passed": true,
+      "seconds": 0.0017217919998984144
+    },
+    "local_flock": {
+      "passed": true,
+      "seconds": 0.0006418750001557783
+    },
+    "readonly_object": {
+      "passed": false,
+      "error": "[Errno 13] Permission denied"
+    },
+    "git_commit_fsck": {
+      "passed": false,
+      "error": "Command '['git', 'add', 'seed.txt']' returned non-zero exit status 128."
+    }
+  },
+  "host_base_unchanged": true,
+  "tool_calls_after_mounted_operations": 0,
+  "status": "failed",
+  "error": "mounted compatibility check failed; see checks and mount.log"
+}

@@ -1,0 +1,59 @@
+{
+  "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+  "architecture": "x86_64",
+  "mounted": true,
+  "security_equivalence_tested": false,
+  "durability_equivalence_tested": false,
+  "version": "agentfs v0.6.4",
+  "cli_read_back": "hello",
+  "tool_calls_after_cli_read_write": 0,
+  "backend": "fuse",
+  "exec_overlay": {
+    "passed": false,
+    "exit_code": 1,
+    "seconds": 30.008673482000006
+  },
+  "mount_method": "mount-foreground",
+  "mount_and_workload_seconds": 0.18700915600001622,
+  "exit_code": 0,
+  "checks": {
+    "real_mount": {
+      "passed": true,
+      "cwd": "/tmp/airbag-agentfs-probe-r5c8vbqp/mnt",
+      "mount": [
+        "agentfs:/tmp/airbag-agentfs-probe-r5c8vbqp/.agentfs/probe.db on /tmp/airbag-agentfs-probe-r5c8vbqp/mnt type fuse (rw,nosuid,nodev,relatime,user_id=1001,group_id=1001,default_permissions)"
+      ]
+    },
+    "cow": {
+      "passed": true,
+      "seconds": 0.001434786000004351
+    },
+    "create_fsync_stat_rename_read": {
+      "passed": true,
+      "seconds": 0.0008041339999920183
+    },
+    "hardlink_symlink": {
+      "passed": true,
+      "seconds": 0.0012196819999985564
+    },
+    "mmap_read": {
+      "passed": true,
+      "seconds": 0.00041312400000492744
+    },
+    "local_flock": {
+      "passed": true,
+      "seconds": 0.00015593600002716812
+    },
+    "readonly_object": {
+      "passed": true,
+      "seconds": 0.0006628610000234403
+    },
+    "git_commit_fsck": {
+      "passed": true,
+      "seconds": 0.04450057699997956
+    }
+  },
+  "host_base_unchanged": true,
+  "tool_calls_after_mounted_operations": 0,
+  "status": "passed"
+}
