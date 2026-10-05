@@ -51,7 +51,9 @@ func homeAliases(home string, roots []string) []homeAlias {
 		watched = append(watched, tree{cf.path, false})
 	}
 	for _, d := range hostShellState {
-		watched = append(watched, tree{strings.TrimSuffix(d.dir, "/"), true})
+		// Every change in a session's env files counts; whether one in
+		// the shell snapshots does depends on its own name.
+		watched = append(watched, tree{strings.TrimSuffix(d.dir, "/"), d.all})
 	}
 	// Each project's directory and its memory, not the transcripts.
 	if ents, err := os.ReadDir(filepath.Join(home, ".claude/projects")); err == nil {
@@ -123,8 +125,11 @@ func homeAliases(home string, roots []string) []homeAlias {
 				linked := name + "/" + filepath.ToSlash(sub)
 				add(linked, within)
 				t, err := filepath.EvalSymlinks(p)
-				if err != nil || strings.HasPrefix(t, dir+string(filepath.Separator)) {
-					return nil //nolint:nilerr // dangling, or walked here anyway
+				if err != nil || tr.whole && strings.HasPrefix(t, dir+string(filepath.Separator)) {
+					// Dangling, or walked here anyway under a name that
+					// classifies it the same. Not in a wildcard prefix's
+					// tree, where only the link's name matches.
+					return nil //nolint:nilerr // see above
 				}
 				if fi, err := os.Stat(t); err == nil && fi.IsDir() {
 					if _, ok := under(t, roots); ok {

@@ -308,3 +308,59 @@ func TestHoldsMemoryThroughLinkedProject(t *testing.T) {
 		}
 	}
 }
+
+// In a wildcard prefix's tree, a directory linked to another place in
+// the same tree is walked under the link's name, so a link inside it
+// keeps the name the pattern matches.
+func TestInTreeLinkedDirUnderWildcardPrefix(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	h := s.Home
+	writeCfg(t, filepath.Join(h, "dotfiles/x.pth"), "import os\n")
+	if err := os.MkdirAll(filepath.Join(h, ".local/lib/shared/site-packages"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, "shared", filepath.Join(h, ".local/lib/python3"))
+	symlink(t, filepath.Join(h, "dotfiles/x.pth"), filepath.Join(h, ".local/lib/shared/site-packages/x.pth"))
+	writeCfg(t, filepath.Join(s.HomeUpper(), "dotfiles/x.pth"), "import evil\n")
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == "dotfiles/x.pth" {
+			if !slices.Contains(c.Flags, "persist") {
+				t.Errorf("flags %v", c.Flags)
+			}
+			return
+		}
+	}
+	t.Fatalf("no change in %+v", cs)
+}
+
+// A workspace's git internals take no alias names: a linked dotfile's
+// repository objects are not the dotfile.
+func TestWorkspaceGitTakesNoAlias(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	symlink(t, ws, filepath.Join(home, "bin"))
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCfg(t, filepath.Join(s.WSUpper(), ".git/objects/ab/cdef"), "blob\n")
+	writeCfg(t, filepath.Join(s.WSUpper(), "tool"), "#!/bin/sh\n")
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]string{}
+	for _, c := range cs {
+		got[c.Rel] = c.Flags
+	}
+	if slices.Contains(got[".git/objects/ab/cdef"], "persist") {
+		t.Errorf(".git object flagged: %v", got[".git/objects/ab/cdef"])
+	}
+	if !slices.Contains(got["tool"], "persist") {
+		t.Errorf("a file in the linked ~/bin: %v", got["tool"])
+	}
+}
