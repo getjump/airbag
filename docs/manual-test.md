@@ -86,7 +86,7 @@ Run the same session tasks, then:
 - [ ] Steps list Codex's commands (Codex reports them as `Bash`);
 - [ ] a command an `airbag.yaml` rule denies is refused before it runs;
 - [ ] Network shows `chatgpt.com` or `api.openai.com`;
-- [ ] Home folds Codex's state into one `~/.codex/… (agent state)` line;
+- [ ] Home folds Codex's state into one `~/.codex/… (agent state, not applied)` line;
 - [ ] `airbag run -- codex resume` lists the earlier session.
 - [ ] `airbag run --strict -- codex` without the bypass flag prints the warning
   that Codex's own sandbox cannot start.

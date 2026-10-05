@@ -115,12 +115,20 @@ func appendNew(list []string, items ...string) []string {
 // matches reports whether a unit touches one of the given paths.
 func (u Unit) matches(paths []string) bool {
 	for _, c := range u.Changes {
-		for _, p := range paths {
-			p = strings.TrimSuffix(p, "/")
-			rel := strings.TrimPrefix(p, "~/")
-			if c.Path == p || strings.HasPrefix(c.Path, p+"/") || c.Rel == rel || strings.HasPrefix(c.Rel, rel+"/") {
-				return true
-			}
+		if changeMatches(c, paths) {
+			return true
+		}
+	}
+	return false
+}
+
+// changeMatches reports whether c is at or under one of paths.
+func changeMatches(c review.Change, paths []string) bool {
+	for _, p := range paths {
+		p = strings.TrimSuffix(p, "/")
+		rel := strings.TrimPrefix(p, "~/")
+		if c.Path == p || strings.HasPrefix(c.Path, p+"/") || c.Rel == rel || strings.HasPrefix(c.Rel, rel+"/") {
+			return true
 		}
 	}
 	return false

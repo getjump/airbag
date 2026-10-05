@@ -146,6 +146,22 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		return fmt.Errorf("session %s is still running", s.ID)
 	}
 	in := bufio.NewReader(o.In)
+	// What review folds in $HOME (caches, agent state) is left out: the
+	// fold is why it needs no decision, and a download cache holds code
+	// a host build runs as it is. --only naming it takes it anyway.
+	var kept []review.Change
+	dropped := 0
+	for _, c := range cs {
+		if review.Dropped(c) && !changeMatches(c, o.Only) {
+			dropped++
+			continue
+		}
+		kept = append(kept, c)
+	}
+	cs = kept
+	if dropped > 0 {
+		fmt.Fprintf(o.Out, "Leaving out %d cache and agent state files in $HOME (name one with --only to take it)\n", dropped)
+	}
 	chosen, err := choose(Units(cs), in, o)
 	if err != nil {
 		return err

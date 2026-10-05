@@ -52,7 +52,7 @@ var persistHomeTable = []persistence{
 	{"git", []string{".gitconfig", ".config/git/"}},
 	{"build tool and package source config", []string{
 		".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".config/pip/", ".pip/",
-		".cargo/config", ".cargo/config.toml", ".config/go/", ".m2/settings.xml",
+		".cargo/config", ".cargo/config.toml", ".config/go/env", ".m2/settings.xml",
 		".gradle/init.d/", ".gradle/init.gradle", ".gradle/gradle.properties",
 	}},
 	{"credential helpers that run commands", []string{".docker/", ".kube/", ".aws/config", ".config/gh/", ".ssh/"}},

@@ -291,10 +291,13 @@ func classify(s *session.Session, cs []Change) {
 }
 
 // sameMode reports whether a change keeps the mode of the file it
-// changes, or makes a new one.
+// changes, or makes a new one only its owner can read.
 func sameMode(c Change) bool {
 	fi, err := os.Lstat(c.Path)
-	return err != nil || fi.Mode().Perm() == c.Mode.Perm()
+	if errors.Is(err, fs.ErrNotExist) {
+		return c.Mode.Perm()&0o077 == 0
+	}
+	return err == nil && fi.Mode().Perm() == c.Mode.Perm()
 }
 
 func hasPrefix(rel string, patterns []string) bool {

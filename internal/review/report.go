@@ -128,12 +128,16 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			deleted++
 		}
 	}
-	for _, c := range Attention(cs) {
-		target := filepath.ToSlash(c.Rel)
-		if c.Layer == "home" {
+	for _, a := range attentionLines(cs) {
+		if a.c == nil {
+			r.Attention = append(r.Attention, ReportItem{What: "change", Target: "~/" + a.group, Why: gitDirWhy(a.n)})
+			continue
+		}
+		target := filepath.ToSlash(a.c.Rel)
+		if a.c.Layer == "home" {
 			target = "~/" + target
 		}
-		r.Attention = append(r.Attention, ReportItem{What: "change", Target: target, Why: attentionWhy(c)})
+		r.Attention = append(r.Attention, ReportItem{What: "change", Target: target, Why: attentionWhy(*a.c)})
 	}
 	if deleted > manyDeletions {
 		r.Attention = append(r.Attention, ReportItem{What: "deletions", Target: s.Workspace, Why: fmt.Sprintf("%d files deleted in the workspace", deleted)})

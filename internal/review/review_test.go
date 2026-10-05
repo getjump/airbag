@@ -2,6 +2,7 @@ package review
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,15 +164,37 @@ func TestAttentionUnknownHome(t *testing.T) {
 	for _, c := range Attention(cs) {
 		got = append(got, c.Layer+":"+c.Rel)
 	}
+	// A cache is folded and left out by apply, a module the host has
+	// included; a git directory in $HOME is not folded.
 	want := []string{"home:.cache/link", "home:.git/hooks/post-checkout", "home:.local/share/nvim/lazy/p/init.lua",
-		"home:dotfiles/bashrc", "home:go/pkg/mod/m@v1/old.go", "home:notes/todo.txt", "home:src/repo/.git/config"}
+		"home:dotfiles/bashrc", "home:notes/todo.txt", "home:src/repo/.git/config", "home:src/repo/.git/objects/ab/cd"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("attention %v, want %v", got, want)
 	}
 	r := BuildReport(s, cs, nil, nil, nil)
+	targets := map[string]string{}
 	for _, a := range r.Attention {
-		if a.Target == "~/notes/todo.txt" && a.Why != "in $HOME, not a cache or agent state" {
-			t.Errorf("why %q", a.Why)
+		targets[a.Target] = a.Why
+	}
+	if targets["~/notes/todo.txt"] != "in $HOME, not a cache or agent state" {
+		t.Errorf("why %q", targets["~/notes/todo.txt"])
+	}
+	// One line for the repository's git directory, the hook (flagged
+	// executable) on its own.
+	if !strings.HasPrefix(targets["~/src/repo/.git/"], "2 files in a repository's git directory") {
+		t.Errorf("git directory line: %v", targets)
+	}
+	if _, ok := targets["~/.git/hooks/post-checkout"]; !ok {
+		t.Errorf("flagged hook not listed on its own: %v", targets)
+	}
+	for _, c := range cs {
+		want := false
+		for _, p := range []string{"go/pkg/", ".cache/", ".claude/todos/", ".local/share/Trash/"} {
+			want = want || strings.HasPrefix(c.Rel+"/", p)
+		}
+		want = want && c.Type != fs.ModeSymlink
+		if Dropped(c) != want {
+			t.Errorf("%s: dropped %v", c.Rel, Dropped(c))
 		}
 	}
 }

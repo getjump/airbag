@@ -241,7 +241,9 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   already changed them in the branch: then they stay in the branch, and airbag says so. Everything else an agent keeps in
   `$HOME` — other projects' transcripts, sessions, shell snapshots, file history,
   todos, caches — goes through the branch: review folds it into one `agent state`
-  line and a discard drops it. The exception is shell code Claude Code sources: a
+  or `cache` line, and neither a discard nor an apply carries it to the real `$HOME`
+  (a download cache holds code a host build runs as it is; `apply --only` naming a
+  path takes it anyway). The exception is shell code Claude Code sources: a
   change to a shell snapshot the host already has, and any change to a session's env
   files (the host can resume a session by id), is flagged `persist` and shown in full;
   the sandbox session's own new snapshots stay folded. A project's `memory/` (instructions loaded into later
@@ -285,12 +287,11 @@ Outbox     1
 ```
 
 `airbag review --attention` prints only what needs a decision: secret reads, flagged
-changes, every change in `$HOME` that is not a cache, agent state, inert git data
-(objects, logs, the index) or an agent config change of benign keys only (with the
-file's mode unchanged), many deletions, waiting pushes, blocked calls, refusals
-past the log's rate. In a download cache whose entries a host build runs as they
-are (Go modules, crates, Maven and Gradle jars, npx packages, pre-commit hooks),
-only new entries are folded; a change to one the host already has needs a decision. In `$HOME` a change is matched by where the write really landed,
+changes, every change in `$HOME` that apply would carry over other than an agent
+config change of benign keys only (with the file's mode unchanged), many
+deletions, waiting pushes, blocked calls, refusals past the log's rate. Caches and
+agent state are not carried over, so they need no decision; a repository's git
+directory in `$HOME` is one line with its count of files. In `$HOME` a change is matched by where the write really landed,
 so one made through a link (`~/.bashrc` pointing into `~/dotfiles`) shows as a change
 to the link's target, which needs a decision even when review cannot tell what the
 link stands for. `airbag review --json` prints
