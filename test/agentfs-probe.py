@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Benign AgentFS release/mount compatibility probe, not a security benchmark."""
+import argparse
+import fcntl
+import json
+import mmap
+import os
+from pathlib import Path
+import platform
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+
+
+def workload():
+    root = Path.cwd()
+    checks = {}
+
+    def check(name, operation):
+        start = time.monotonic()
+        try:
+            operation()
+            checks[name] = {"passed": True, "seconds": time.monotonic() - start}
+        except (OSError, AssertionError, subprocess.SubprocessError) as error:
+            checks[name] = {"passed": False, "error": str(error)}
+
+    def cow():
+        assert (root / "seed.txt").read_text() == "original\n"
+        (root / "seed.txt").write_text("changed\n")
+        (root / "removed.txt").unlink()
+        assert not (root / "removed.txt").exists()
+
+    def basic():
+        file = root / "new.txt"
+        with file.open("wb") as out:
+            out.write(b"hello mounted filesystem\n")
+            out.flush()
+            os.fsync(out.fileno())
+        assert file.stat().st_size == 25
+        file.rename(root / "renamed.txt")
+        assert (root / "renamed.txt").read_bytes() == b"hello mounted filesystem\n"
+
+    def aliases():
+        file = root / "alias-source"
+        file.write_text("alias\n")
+        os.link(file, root / "hardlink")
+        os.symlink("alias-source", root / "symlink")
+        assert (root / "hardlink").read_text() == (root / "symlink").read_text() == "alias\n"
+        file.unlink()
+        assert (root / "hardlink").read_text() == "alias\n"
+
+    def mapping():
+        file = root / "mapped"
+        file.write_bytes(b"mapped bytes")
+        with file.open("rb") as inp, mmap.mmap(inp.fileno(), 0, access=mmap.ACCESS_READ) as view:
+            assert view[:] == b"mapped bytes"
+
+    def locks():
+        # NFS locallocks may satisfy this without any server-side lock policy.
+        with (root / "lock").open("w") as out:
+            fcntl.flock(out, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(out, fcntl.LOCK_UN)
+
+    def readonly_object():
+        # Git's loose-object pattern: create, write, chmod 0444, close, rename.
+        file = root / "object.tmp"
+        with file.open("wb") as out:
+            out.write(b"object bytes")
+            out.flush()
+            os.fchmod(out.fileno(), 0o444)
+        file.rename(root / "object")
+        assert (root / "object").read_bytes() == b"object bytes"
+
+    def git():
+        for argv in [["git", "init", "-q"], ["git", "add", "seed.txt"],
+                     ["git", "-c", "user.name=Filesystem Probe", "-c", "user.email=probe@example.invalid",
+                      "-c", "commit.gpgsign=false", "commit", "-qm", "local fixture"],
+                     ["git", "fsck", "--no-reflogs"]]:
+            subprocess.run(argv, check=True, capture_output=True, text=True, timeout=60)
+
+    mounts = subprocess.run(["mount"], capture_output=True, text=True, check=True).stdout
+    mounted = any(str(root) in line and ("fuse" in line.lower() or "nfs" in line.lower())
+                  for line in mounts.splitlines())
+    checks["real_mount"] = {"passed": mounted, "cwd": str(root),
+                            "mount": [line for line in mounts.splitlines() if str(root) in line]}
+    for name, operation in [("cow", cow), ("create_fsync_stat_rename_read", basic),
+                            ("hardlink_symlink", aliases), ("mmap_read", mapping),
+                            ("local_flock", locks), ("readonly_object", readonly_object),
+                            ("git_commit_fsck", git)]:
+        check(name, operation)
+    print("AGENTFS_PROBE " + json.dumps(checks), flush=True)
+    return 0 if all(value["passed"] for value in checks.values()) else 1
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--agentfs", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--workload", action="store_true")
+    parser.add_argument("--cli-only", action="store_true")
+    args = parser.parse_args()
+    if args.workload:
+        return workload()
+    if not args.agentfs or not args.output:
+        parser.error("--agentfs and --output required")
+    args.output.mkdir(parents=True, exist_ok=True)
+    result = {"platform": platform.platform(), "architecture": platform.machine(),
+              "mounted": False, "security_equivalence_tested": False,
+              "durability_equivalence_tested": False}
+    try:
+        with tempfile.TemporaryDirectory(prefix="airbag-agentfs-probe-") as private:
+            home = Path(private)
+            base = home / "base"
+            base.mkdir()
+            (base / "seed.txt").write_text("original\n")
+            (base / "removed.txt").write_text("original\n")
+            env = {"PATH": os.environ["PATH"], "HOME": private, "TMPDIR": private}
+            binary = str(args.agentfs.resolve())
+
+            def cli(*argv):
+                return subprocess.run([binary, *argv], cwd=home, env=env, check=True,
+                                      capture_output=True, text=True, timeout=180)
+
+            result["version"] = cli("--version").stdout.strip()
+            cli("init", "--base", str(base), "probe")
+            db = home / ".agentfs" / "probe.db"
+            cli("fs", str(db), "write", "cli.txt", "hello")
+            result["cli_read_back"] = cli("fs", str(db), "cat", "cli.txt").stdout.strip()
+            assert result["cli_read_back"] == "hello"
+            with sqlite3.connect(db) as conn:
+                result["tool_calls_after_cli_read_write"] = conn.execute("SELECT count(*) FROM tool_calls").fetchone()[0]
+            if not args.cli_only:
+                backend = "nfs" if sys.platform == "darwin" else "fuse"
+                result["backend"] = backend
+                start = time.monotonic()
+                proc = subprocess.run([binary, "exec", "--backend", backend, str(db),
+                                       sys.executable, str(Path(__file__).resolve()), "--workload"],
+                                      cwd=home, env=env, capture_output=True, text=True, timeout=180)
+                result["mount_and_workload_seconds"] = time.monotonic() - start
+                (args.output / "mount.log").write_text(proc.stdout + proc.stderr)
+                records = [json.loads(line.split(" ", 1)[1]) for line in proc.stdout.splitlines()
+                           if line.startswith("AGENTFS_PROBE ")]
+                result["exit_code"] = proc.returncode
+                if len(records) != 1:
+                    raise RuntimeError("mounted workload did not emit one result; see mount.log")
+                result["checks"] = records[0]
+                result["mounted"] = records[0]["real_mount"]["passed"]
+                result["host_base_unchanged"] = all((base / name).read_text() == "original\n"
+                                                    for name in ["seed.txt", "removed.txt"])
+                with sqlite3.connect(db) as conn:
+                    result["tool_calls_after_mounted_operations"] = conn.execute("SELECT count(*) FROM tool_calls").fetchone()[0]
+                if proc.returncode != 0 or not result["host_base_unchanged"]:
+                    raise RuntimeError("mounted compatibility check failed; see checks and mount.log")
+            result["status"] = "cli-only" if args.cli_only else "passed"
+    except (OSError, AssertionError, RuntimeError, subprocess.SubprocessError, sqlite3.Error) as error:
+        result.update(status="failed", error=str(error))
+        if isinstance(error, subprocess.CalledProcessError):
+            (args.output / "command-error.log").write_text((error.stdout or "") + (error.stderr or ""))
+    (args.output / "results.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result), flush=True)
+    return 1 if result["status"] == "failed" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
