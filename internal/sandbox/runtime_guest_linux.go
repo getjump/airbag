@@ -198,12 +198,8 @@ func guestAgent(c guestConfig, vm bool) int {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(c.UID), Gid: uint32(c.GID), NoSetGroups: false} //nolint:gosec // host IDs validated in Guest before conversion
 	}
 	err := cmd.Run()
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		if exit.ExitCode() < 0 {
-			return 128
-		}
-		return exit.ExitCode()
+	if code, ok := exitStatus(err); ok {
+		return code
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

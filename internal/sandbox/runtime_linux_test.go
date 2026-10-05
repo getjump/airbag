@@ -3,6 +3,8 @@
 package sandbox
 
 import (
+	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -135,5 +137,51 @@ func TestProviderGetsTheSignals(t *testing.T) {
 		if err != nil || code != 7 {
 			t.Errorf("SIG%s: code %d, %v", sig, code, err)
 		}
+	}
+}
+
+// A command a signal ended reports 128 plus the signal, as native does,
+// not one status for every signal.
+func TestExitStatusAsNative(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	for script, want := range map[string]int{"exit 3": 3, "kill -TERM $$": 143, "kill -KILL $$": 137, "kill -SEGV $$": 139} {
+		code, ok := exitStatus(exec.CommandContext(t.Context(), sh, "-c", script).Run()) //nolint:gosec // a fixed test script
+		if !ok || code != want {
+			t.Errorf("%s: %d %v, want %d", script, code, ok, want)
+		}
+	}
+	if _, ok := exitStatus(exec.CommandContext(t.Context(), filepath.Join(t.TempDir(), "missing")).Run()); ok { //nolint:gosec // a path that does not exist
+		t.Error("a command that did not start has an exit status")
+	}
+}
+
+// Firecracker exiting nonzero is a provider failure, not an agent that
+// ran: the run gets an error, and the export it left is gone.
+func TestFailedVMMIsAProviderFailure(t *testing.T) {
+	listen := func() net.Listener {
+		l, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(t.TempDir(), "s"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		return l
+	}
+	stage := filepath.Join(t.TempDir(), "export")
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code, err := vmmFailed(startImport(listen(), stage), 1, nil)
+	if code != 1 || err == nil || !strings.Contains(err.Error(), "firecracker exited with status 1") {
+		t.Fatalf("a failed VMM: %d %v", code, err)
+	}
+	if _, err := os.Lstat(stage); !os.IsNotExist(err) {
+		t.Fatalf("the export stage is left: %v", err)
+	}
+	cause := errors.New("start firecracker: no such file")
+	if _, err := vmmFailed(startImport(listen(), filepath.Join(t.TempDir(), "export")), 1, cause); !errors.Is(err, cause) {
+		t.Fatalf("the provider's own error is lost: %v", err)
 	}
 }

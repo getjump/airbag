@@ -330,11 +330,24 @@ func executeProvider(binary string, args []string) (int, error) {
 		}
 	}()
 	err := cmd.Wait()
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return exit.ExitCode(), nil
+	if code, ok := exitStatus(err); ok {
+		return code, nil
 	}
 	return 0, err
+}
+
+// exitStatus is how a command that ran ended, as native reports it: its
+// exit code, or 128 plus the signal that ended it. ok is false for an
+// error other than the command's own end.
+func exitStatus(err error) (code int, ok bool) {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return 0, false
+	}
+	if ws, isWait := exit.Sys().(syscall.WaitStatus); isWait && ws.Signaled() {
+		return 128 + int(ws.Signal()), true
+	}
+	return exit.ExitCode(), true
 }
 
 // rootfsCopier is the cp that stages a runtime's root filesystem: a
@@ -453,8 +466,7 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 	}
 	code, err := executeProvider(s.Runtime.Binary, []string{"--no-api", "--config-file", filepath.Join(dir, "firecracker.json")})
 	if err != nil || code != 0 {
-		im.abandon()
-		return code, err
+		return vmmFailed(im, code, err)
 	}
 	select {
 	case result := <-im.result:
@@ -466,6 +478,18 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 }
 
 func exportStage(s *session.Session) string { return filepath.Join(s.Dir, "ws", "export") }
+
+// vmmFailed ends a run whose Firecracker failed: the agent's own status
+// comes in the guest's result, so a VMM that exits nonzero, its config
+// or kernel refused or the VMM itself crashed, is a provider failure,
+// never an agent that ran and ended. Any export it left is abandoned.
+func vmmFailed(im *importer, code int, err error) (int, error) {
+	im.abandon()
+	if err == nil {
+		err = fmt.Errorf("firecracker exited with status %d before the guest's result; the branch is kept as it was", code)
+	}
+	return code, err
+}
 
 // importer takes the guest's one export connection into stage.
 type importer struct {
