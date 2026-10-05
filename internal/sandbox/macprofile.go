@@ -77,6 +77,15 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 	}
 	for _, f := range stateReadOnly {
 		p.NoWrite = append(p.NoWrite, filepath.Join(home, f))
+		// Seatbelt checks the path a write resolves to: a read-only path
+		// that is a link is denied where it really is too, with the
+		// directories above that place.
+		if r := follow(filepath.Join(s.Home, f)); r != filepath.Join(home, f) {
+			p.NoWrite = append(p.NoWrite, r)
+			for d := filepath.Dir(r); d != home && d != filepath.Dir(d); d = filepath.Dir(d) {
+				p.NoWriteRegex = append(p.NoWriteRegex, "^"+regexp.QuoteMeta(d)+"$")
+			}
+		}
 	}
 	// A branch hole cannot be served from a branch on macOS (there is
 	// none), so the profile denies writing it instead: memory/ edits are

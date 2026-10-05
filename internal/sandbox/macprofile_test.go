@@ -202,3 +202,36 @@ func TestMacProfileDeniesLinkedProjectsRoot(t *testing.T) {
 		t.Errorf("a transcript is denied")
 	}
 }
+
+// A read-only state path that is a link elsewhere in ~/.claude is
+// denied where it really is, whether that exists yet or not.
+func TestMacProfileDeniesLinkedReadOnlyState(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude/shared-rules"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("shared-rules", filepath.Join(home, ".claude/rules")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../dotfiles/settings.json", filepath.Join(home, ".claude/settings.json")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := filepath.EvalSymlinks(home)
+	for _, want := range []string{filepath.Join(h, ".claude/shared-rules"), filepath.Join(h, "dotfiles/settings.json")} {
+		if !slices.Contains(p.NoWrite, want) {
+			t.Errorf("%s not denied: %v", want, p.NoWrite)
+		}
+	}
+	if !slices.Contains(p.NoWriteRegex, "^"+regexp.QuoteMeta(filepath.Join(h, "dotfiles"))+"$") {
+		t.Errorf("dotfiles/ may be renamed: %v", p.NoWriteRegex)
+	}
+}

@@ -260,7 +260,10 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   the workspace when that is your dotfiles repository) are followed, through chains and
   to targets that do not exist yet: a change found at a link's target is classified as
   the path it stands for (apply writes a regular file in place of a link it replaces).
-  A link deeper than 5000 entries into a watched directory is not looked for. On the macOS prototype,
+  A link deeper than 5000 entries into a watched directory is not looked for, and
+  instruction files recognized by name wherever they are (`AGENTS.md`, `CLAUDE.md`) are
+  recognized by their own name only: a write through one that is a link to a file named
+  otherwise is shown under the target's name. On the macOS prototype,
   which has no branch of `$HOME`, this narrowing is only partial; see
   [docs/macos.md](docs/macos.md).
 
