@@ -73,7 +73,8 @@ the calls the model makes, `agent ◀` what the agent sends back. The same as a 
   effects (`net.connect`) and predicted ones (`net.egress`, `fs.delete`) answer
   `allow`, `deny` or `ask`.
 - **[More than one run](docs/agent.md#sessions-and-agent-state).**
-  `airbag run --session last` runs the agent again on the same branch.
+  `airbag run --session last -- claude --continue` runs the agent again on the
+  same branch.
 
 ## How it compares
 
