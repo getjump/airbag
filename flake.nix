@@ -43,7 +43,7 @@
           doCheck = true;
           checkPhase = ''
             runHook preCheck
-            go test ./internal/...
+            go test ./internal/... ./creds ./operation ./outbox ./policy ./proxy ./githubpr
             runHook postCheck
           '';
           installPhase = "mkdir -p $out";
