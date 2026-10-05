@@ -364,3 +364,58 @@ func TestWorkspaceGitTakesNoAlias(t *testing.T) {
 		t.Errorf("a file in the linked ~/bin: %v", got["tool"])
 	}
 }
+
+// Two links to one directory each name its contents: the second is not
+// skipped as walked already, and the name the pattern matches is found
+// whichever link comes first.
+func TestTwoLinksToOneDir(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	h := s.Home
+	writeCfg(t, filepath.Join(h, "dotfiles/x.pth"), "import os\n")
+	if err := os.MkdirAll(filepath.Join(h, ".local/lib/shared/site-packages"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, "shared", filepath.Join(h, ".local/lib/current"))
+	symlink(t, "shared", filepath.Join(h, ".local/lib/python3"))
+	symlink(t, filepath.Join(h, "dotfiles/x.pth"), filepath.Join(h, ".local/lib/shared/site-packages/x.pth"))
+	writeCfg(t, filepath.Join(s.HomeUpper(), "dotfiles/x.pth"), "import evil\n")
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == "dotfiles/x.pth" {
+			if !slices.Contains(c.Flags, "persist") {
+				t.Errorf("flags %v", c.Flags)
+			}
+			return
+		}
+	}
+	t.Fatalf("no change in %+v", cs)
+}
+
+// A host snapshot linked to another name in the same directory is
+// sourced through the link: the agent's new file at the link's target is
+// the host's snapshot, though no snapshot had that name.
+func TestSnapshotLinkedWithinSnapshots(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	h := s.Home
+	if err := os.MkdirAll(filepath.Join(h, ".claude/shell-snapshots"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, "snap-B.sh", filepath.Join(h, ".claude/shell-snapshots/snap-A.sh"))
+	writeCfg(t, filepath.Join(s.HomeUpper(), ".claude/shell-snapshots/snap-B.sh"), "export PATH=/tmp/x:/usr/bin\n")
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == ".claude/shell-snapshots/snap-B.sh" {
+			if !slices.Contains(c.Flags, shellStateFlag) {
+				t.Errorf("flags %v", c.Flags)
+			}
+			return
+		}
+	}
+	t.Fatalf("no change in %+v", cs)
+}

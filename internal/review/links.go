@@ -103,7 +103,10 @@ func homeAliases(home string, roots []string) []homeAlias {
 			if walked[dir] {
 				return // a loop of linked directories
 			}
+			// Only the directories on the way here: another link to one
+			// walked already gives its contents names of its own.
 			walked[dir] = true
+			defer delete(walked, dir)
 			within := ""
 			if tr.whole {
 				within, _ = under(dir, roots)
