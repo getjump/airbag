@@ -229,6 +229,26 @@ func TestTunnelPassesHalfClose(t *testing.T) {
 	}
 }
 
+// When the upstream finishes sending first, the agent is told at once
+// (not after Drain), while its own side stays open.
+func TestTunnelPassesUpstreamHalfClose(t *testing.T) {
+	target := listenTCP(t, func(c net.Conn) {
+		defer c.Close()
+		_, _ = c.Write([]byte("answer"))
+		_ = c.(*net.TCPConn).CloseWrite()
+		_, _ = io.Copy(io.Discard, c) // to the agent's end
+	})
+	lim := testLimits
+	lim.Drain = time.Hour
+	_, pa, _ := boundedProxy(t, lim)
+	c, br, _ := connectVia(t, pa, target)
+	defer c.Close()
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if b, err := io.ReadAll(br); err != nil || string(b) != "answer" {
+		t.Fatalf("the upstream's end did not reach the agent: %q %v", b, err)
+	}
+}
+
 // An intercepted connection the client keeps idle between requests is
 // closed after KeepAlive. Before, each kept about 6 goroutines.
 func TestInterceptIdleKeepAlive(t *testing.T) {
@@ -418,6 +438,69 @@ func TestMaxFlows(t *testing.T) {
 	if refused != 1 {
 		t.Fatalf("%d refusals logged, want 1: %+v", refused, effs)
 	}
+}
+
+// A connection to the proxy that sends no request is not a flow:
+// MaxFlows does not count it. Past twice MaxFlows such connections, one
+// more is closed at once; once some close, new ones are served again.
+func TestMaxConns(t *testing.T) {
+	lim := testLimits
+	lim.MaxFlows = 2
+	const most = 4
+	_, pa, _ := boundedProxy(t, lim)
+	g0, fd0 := usage()
+	dial := func() net.Conn {
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", pa)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	// served reports whether the proxy answers a request on c (a host
+	// it refuses: no upstream needed) rather than closing c.
+	served := func(c net.Conn) bool {
+		_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+		_, _ = io.WriteString(c, "GET http://host.invalid/ HTTP/1.1\r\nHost: host.invalid\r\n\r\n")
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			t.Fatalf("the proxy neither answered nor closed the connection: %v", err)
+		}
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusForbidden
+	}
+	var idle []net.Conn
+	for range most {
+		idle = append(idle, dial()) // accepted in order, before the ones below
+	}
+	for i := range 3 {
+		c := dial()
+		if served(c) {
+			t.Fatalf("connection %d past the %d idle ones was served", i+1, most)
+		}
+		c.Close()
+	}
+	if !served(idle[0]) {
+		t.Fatal("a connection within the cap was closed")
+	}
+	for _, c := range idle {
+		c.Close()
+	}
+	settle(t, g0, fd0, 1, 1, 3*time.Second)
+	idle = idle[:0]
+	for range most {
+		idle = append(idle, dial())
+	}
+	for i, c := range idle {
+		if !served(c) {
+			t.Fatalf("connection %d, after the others closed, was not served", i+1)
+		}
+		c.Close()
+	}
+	settle(t, g0, fd0, 1, 1, 3*time.Second)
 }
 
 // openFlows is how many flows p holds, once it is down to want or d

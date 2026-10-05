@@ -97,7 +97,8 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   it has waited 2 minutes for its next request, or, once one side has finished
   sending, when the other has been quiet for 30 seconds. A session holds at
   most 512 tunnels and forwarded requests at once (the mirror's are not
-  counted); one more gets `503`.
+  counted); one more gets `503`. It holds at most 1024 connections to the
+  proxy, counting those that wait for a request; one more is closed.
 - **Local services, by name.** `--allow tcp://127.0.0.1:5432` (or `allow:` in
   `airbag.yaml`) gives the agent `127.0.0.1:5432` in the sandbox, relayed by airbag
   to that address: a dev database, a cache, a service from `docker compose`. Each
@@ -432,9 +433,10 @@ The proxy, the forwards and the control socket run in airbag's process on the
 host and parse what the agent sends. airbag closes the connections there that
 stop carrying data (a request header must arrive within 30 seconds at the
 proxy and 10 at the control socket; the other bounds are
-[above](#what-the-agent-gets)) and caps the tunnels and forwarded connections a
-session holds at once. A connection that keeps moving bytes stays open as long
-as it does, and bandwidth and the rate of new connections are not limited.
+[above](#what-the-agent-gets)) and caps the tunnels, the forwarded connections
+and the connections to the proxy a session holds at once. A connection that
+keeps moving bytes stays open as long as it does, and bandwidth and the rate of
+new connections are not limited.
 
 ## License
 

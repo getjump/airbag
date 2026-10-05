@@ -183,6 +183,12 @@ func isASCII(s string) bool {
 }
 
 func (p *Proxy) Serve(l net.Listener) error {
+	// A connection that has not sent a request yet, or waits for its
+	// next one, is not a flow: past twice Limits.MaxFlows open at once,
+	// one more is closed.
+	if n := p.Limits.MaxFlows; n > 0 {
+		l = &capListener{Listener: l, max: 2 * int64(n)}
+	}
 	// A request's header must arrive within 30 s, and a connection
 	// waiting for its next request is closed after Limits.KeepAlive.
 	srv := &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second, IdleTimeout: p.Limits.KeepAlive}
