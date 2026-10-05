@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -123,6 +124,39 @@ func DirIDOf(p string) (DirID, error) {
 	return DirID{Real: real, Dev: u64(st.Dev), Ino: u64(st.Ino)}, nil
 }
 
+// Check refuses p when it is not the directory id was taken of: it
+// leads elsewhere now, or another directory was made at its path.
+func (id DirID) Check(p string) error {
+	got, err := DirIDOf(p)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%s, a root of the session: %w", p, err)
+	case got.Real != id.Real:
+		return fmt.Errorf("%s leads to %s now, not to %s as when the session began", p, got.Real, id.Real)
+	case got.Dev != id.Dev || got.Ino != id.Ino:
+		return fmt.Errorf("%s is another directory than when the session began (that one was moved or removed)", p)
+	}
+	return nil
+}
+
+// CheckRoots checks the session's workspace and $HOME against what it
+// recorded when it began; a session from before roots were recorded
+// has none to check.
+func (s *Session) CheckRoots() error {
+	for _, r := range []struct {
+		path string
+		id   DirID
+	}{{s.Workspace, s.WorkspaceID}, {s.Home, s.HomeID}} {
+		if r.id.Real == "" {
+			continue
+		}
+		if err := r.id.Check(r.path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // u64 widens a stat field, whose type differs between Linux and macOS.
 func u64[T int32 | uint32 | int64 | uint64](v T) uint64 { return uint64(v) }
 
@@ -162,6 +196,25 @@ func Create(m Meta) (*Session, error) {
 		if p != "" && within(root, p) {
 			return nil, fmt.Errorf("session root %s is inside %s; set AIRBAG_HOME elsewhere", root, p)
 		}
+	}
+	// Where the workspace and $HOME lead now; apply and resume refuse
+	// them once they are other directories. A path that does not exist
+	// (a test's made-up workspace) records nothing.
+	for _, r := range []struct {
+		path string
+		id   *DirID
+	}{{m.Workspace, &m.WorkspaceID}, {m.Home, &m.HomeID}} {
+		if r.path == "" || r.id.Real != "" {
+			continue
+		}
+		id, err := DirIDOf(r.path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		*r.id = id
 	}
 	m.ID = newID()
 	m.Created = time.Now()
@@ -342,6 +395,11 @@ func Resume(id, workspace string) (*Session, error) {
 		return nil, fmt.Errorf("session %s is running", s.ID)
 	case s.Status != StatusStopped:
 		return nil, fmt.Errorf("session %s is %s; only a stopped session can be resumed", s.ID, s.Status)
+	}
+	// A run on a moved root would branch another tree, and its
+	// passthrough paths would write where the root leads now.
+	if err := s.CheckRoots(); err != nil {
+		return nil, fmt.Errorf("%w; put the directory back to resume session %s", err, s.ID)
 	}
 	for _, d := range []string{s.WSWork(), s.HomeWork(), s.EtcWork(), s.RunDir()} {
 		_ = filepath.WalkDir(d, func(p string, de os.DirEntry, err error) error {

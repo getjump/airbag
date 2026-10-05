@@ -152,6 +152,10 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if s.Status == session.StatusRunning {
 		return fmt.Errorf("session %s is still running", s.ID)
 	}
+	// Before conflicts are read from what may be another tree.
+	if err := s.CheckRoots(); err != nil {
+		return fmt.Errorf("nothing applied: %w; put the directory back or discard the session", err)
+	}
 	in := bufio.NewReader(o.In)
 	// What review folds in $HOME (caches, agent state) is left out: the
 	// fold is why it needs no decision, and a download cache holds code
@@ -206,8 +210,8 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	}
 	rs := rootsOf(s)
 	for _, c := range picked {
-		if err := rs.held(c.Path, c.Rel); err != nil {
-			return fmt.Errorf("nothing applied: %w", err)
+		if err := rs.held(c.Layer, c.Path, c.Rel); err != nil {
+			return fmt.Errorf("nothing applied: %w; put the directory back or discard the session", err)
 		}
 		if err := parentsUnlinked(c, replacing); err != nil {
 			return fmt.Errorf("nothing applied: %w", err)
@@ -385,10 +389,12 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	if err != nil {
 		return err
 	}
-	if len(intents) > 0 {
-		// Pushes and deferred commands run in the workspace.
-		if err := rootsOf(s).check(s.Workspace); err != nil {
-			return fmt.Errorf("the session's outbox waits: %w", err)
+	// Pushes and deferred commands run in the workspace.
+	if slices.ContainsFunc(intents, func(it outbox.Intent) bool {
+		return it.Status == outbox.Pending || it.Status == string(operation.Approved) || it.Status == outbox.Running
+	}) {
+		if err := rootsOf(s).check("ws"); err != nil {
+			return fmt.Errorf("the session's outbox waits: %w; put the directory back to run it", err)
 		}
 	}
 	// After a failure the rest wait (a PR without its push means
@@ -956,50 +962,56 @@ func parentsUnlinked(c review.Change, replacing []string) error {
 	return nil
 }
 
-// roots maps the workspace and $HOME, as the session names them, to the
-// directories they were when it began.
-type roots map[string]session.DirID
+// roots holds the session's recorded roots by layer: "ws" the
+// workspace, "home" $HOME.
+type roots map[string]root
+
+type root struct {
+	path string
+	id   session.DirID
+}
 
 func rootsOf(s *session.Session) roots {
 	r := roots{}
 	if s.WorkspaceID.Real != "" {
-		r[s.Workspace] = s.WorkspaceID
+		r["ws"] = root{s.Workspace, s.WorkspaceID}
 	}
 	if s.HomeID.Real != "" {
-		r[s.Home] = s.HomeID
+		r["home"] = root{s.Home, s.HomeID}
 	}
 	return r
 }
 
-// check refuses a root that is another directory than when the session
-// began: the host renamed the workspace and put a link or a new
+// check refuses a layer whose root is another directory than when the
+// session began: the host renamed the workspace and put a link or a new
 // directory in its place, say. Every change below it, a new top-level
-// file included, would land there. A path the session did not record
-// (a session from before roots were recorded) is not checked.
-func (r roots) check(root string) error {
-	want, ok := r[root]
-	if !ok {
-		return nil
-	}
-	got, err := session.DirIDOf(root)
-	switch {
-	case err != nil:
-		return fmt.Errorf("%s, the session's root: %w", root, err)
-	case got.Real != want.Real:
-		return fmt.Errorf("%s leads to %s now, not to %s as when the session began, so the changes would land there; put the directory back or discard the session", root, got.Real, want.Real)
-	case got.Dev != want.Dev || got.Ino != want.Ino:
-		return fmt.Errorf("%s is another directory than when the session began (that one was moved or removed), so the changes would land in this one; put the directory back or discard the session", root)
+// file included, would land there. A session from before roots were
+// recorded has none, and is not checked.
+func (r roots) check(layer string) error {
+	if ro, ok := r[layer]; ok {
+		return ro.id.Check(ro.path)
 	}
 	return nil
 }
 
-// held checks the root of the layer a path at rel belongs to.
-func (r roots) held(path, rel string) error {
-	root, ok := strings.CutSuffix(path, string(filepath.Separator)+filepath.FromSlash(rel))
-	if !ok {
-		return fmt.Errorf("%s is not %s in its layer", path, rel)
+// held checks the root of the layer a change at path is in, found by
+// the layer, not by the spelling of the path the session was given (a
+// trailing slash in $HOME, say); the change must lie below it. A root
+// not recorded is not checked; a layer the session has no root for at
+// all is refused once any is recorded.
+func (r roots) held(layer, path, rel string) error {
+	ro, ok := r[layer]
+	switch {
+	case ok:
+	case len(r) == 0 || layer == "ws" || layer == "home":
+		return nil
+	default:
+		return fmt.Errorf("%s: the session has no %q layer", path, layer)
 	}
-	return r.check(root)
+	if filepath.Join(ro.path, filepath.FromSlash(rel)) != filepath.Clean(path) {
+		return fmt.Errorf("%s is not %s in %s", path, rel, ro.path)
+	}
+	return ro.id.Check(ro.path)
 }
 
 // copyFile replaces dst atomically: write a temp file next to it, then

@@ -11,11 +11,15 @@ permissions: {}
 
 # An ai:implement run holds its issue from claim through publish: a label
 # reapplied while one runs waits, so the second run's labels never land
-# between the first's. Any other event gets a group of its own, so a
-# run that skips every job never takes a waiting run's place.
+# between the first's. Only the owner's label joins the group; any other
+# event gets one of its own, so a run the gates skip never takes a
+# waiting run's place.
 concurrency:
   group: >-
-    ${{ github.event_name == 'issues' && github.event.label.name == 'ai:implement'
+    ${{ vars.AGENTS_ENABLED == 'true' && github.event_name == 'issues'
+    && github.event.label.name == 'ai:implement'
+    && github.event.sender.login == github.repository_owner
+    && github.event.sender.type == 'User'
     && format('claude-implement-{0}', github.event.issue.number)
     || format('claude-run-{0}', github.run_id) }}
   cancel-in-progress: false

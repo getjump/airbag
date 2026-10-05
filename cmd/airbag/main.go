@@ -254,15 +254,8 @@ func cmdRun(args []string) (int, error) {
 		pass := append([]string{}, sandbox.DefaultPassthrough...)
 		projPass, holes := sandbox.ClaudeProjectState(cwd, ws)
 		pass = append(pass, projPass...)
-		var wsID, homeID session.DirID
-		if wsID, err = session.DirIDOf(ws); err != nil {
-			return 1, err
-		}
-		if homeID, err = session.DirIDOf(home); err != nil {
-			return 1, err
-		}
 		meta := session.Meta{
-			Workspace: ws, Home: home, WorkspaceID: wsID, HomeID: homeID, OverHome: !*noHome,
+			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
 			Passthrough: pass, BranchHoles: holes, Hidden: hidden, HiddenHost: hiddenHost,

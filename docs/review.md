@@ -44,6 +44,11 @@ its version from before the apply stays in the session: `airbag discard` refuses
 to delete it until a later rollback restores it, or you pass `--force`. A push that
 already ran is not undone.
 
+A session records the directories its workspace and `$HOME` were when it began.
+If one is another directory now (moved away, with a link or a new directory at its
+path), apply, rollback, resume and the outbox change nothing there and say so; put
+the directory back first.
+
 ## Apply onto a git branch
 
 `apply --branch NAME` leaves your working tree alone and puts the result on a new

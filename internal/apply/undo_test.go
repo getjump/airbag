@@ -1663,6 +1663,9 @@ func TestApplyRefusesMovedRoot(t *testing.T) {
 	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Branch: "agent", Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
 		t.Fatalf("--branch went to a moved root: %v", err)
 	}
+	if gs, _ := listGenerations(s); len(gs) != 0 {
+		t.Fatalf("a refused apply started %d undo journals", len(gs))
+	}
 	g, err := beginGeneration(s)
 	if err != nil {
 		t.Fatal(err)
@@ -1801,5 +1804,72 @@ func TestFailedApplyRollbackRefusesMovedRoot(t *testing.T) {
 	}
 	if data, err := os.ReadFile(theirs); err != nil || string(data) != "theirs\n" {
 		t.Fatalf("the rollback removed what the link leads to: %q %v", data, err)
+	}
+}
+
+// The root of a change is found by its layer, so a $HOME given with a
+// trailing slash is checked like any other.
+func TestApplyRefusesMovedHomeSpelledWithSlash(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home + "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.HomeID.Real == "" {
+		t.Fatal("Create recorded no root for $HOME")
+	}
+	s.Status = session.StatusStopped
+	upper := filepath.Join(t.TempDir(), ".profile")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "home", Rel: ".profile", Path: filepath.Join(home, ".profile"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	elsewhere := moveRoot(t, home)
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("applied below a moved $HOME: %v", err)
+	}
+	g, err := beginGeneration(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.apply(c); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("the generation applied below a moved $HOME: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(elsewhere, ".profile")); err == nil {
+		t.Fatal("the change landed where the link leads")
+	}
+}
+
+// A change whose path is not its layer's root joined with its Rel is
+// refused once roots are recorded, and so is a layer the session has no
+// root for.
+func TestHeldNeedsTheLayersRoot(t *testing.T) {
+	ws := t.TempDir()
+	id, err := session.DirIDOf(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := roots{"ws": root{ws, id}}
+	if err := r.held("ws", filepath.Join(ws, "a/b"), "a/b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.held("ws", filepath.Join(t.TempDir(), "a/b"), "a/b"); err == nil {
+		t.Fatal("a path outside the layer's root passed")
+	}
+	if err := r.held("etc", "/etc/x", "x"); err == nil {
+		t.Fatal("a layer with no root passed")
+	}
+	if err := r.held("home", "/home/u/x", "x"); err != nil {
+		t.Fatalf("an unrecorded $HOME is not checked, as in sessions from before: %v", err)
 	}
 }

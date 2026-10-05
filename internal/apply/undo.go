@@ -162,7 +162,7 @@ func interrupted(s *session.Session) *generation {
 func (g *generation) apply(c review.Change) error {
 	// Checked before the previous version is moved, and again in
 	// applyOne for its own callers.
-	if err := g.roots.held(c.Path, c.Rel); err != nil {
+	if err := g.roots.held(c.Layer, c.Path, c.Rel); err != nil {
 		return err
 	}
 	if err := parentsUnlinked(c, nil); err != nil {
@@ -208,8 +208,8 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	// remove and restore there. Every entry is checked before anything
 	// moves, when an apply that failed rolls itself back too.
 	for _, e := range g.Entries {
-		if err := g.roots.held(e.Path, e.Rel); err != nil {
-			return len(g.Entries), fmt.Errorf("nothing rolled back: %w", err)
+		if err := g.roots.held(e.Layer, e.Path, e.Rel); err != nil {
+			return len(g.Entries), fmt.Errorf("nothing rolled back: %w; put the directory back, then roll back: your versions from before the apply are kept in %s", err, filepath.Join(g.dir, "saved"))
 		}
 	}
 	dirs := slices.Clone(g.Dirs) // directories the apply created, removed last, deepest first
