@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/getjump/airbag/internal/sandbox"
+	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 )
 
@@ -57,4 +58,21 @@ func validateExecution(s *session.Session, b sandbox.Backend, requested string) 
 		}
 	}
 	return b.Require(requested)
+}
+
+// validateRuntimeResume refuses what an optional runtime cannot carry on:
+// the runtime policies, and a secret file in the session's copy, which
+// the runtime would hand to the agent unmediated. PreflightRuntime checks
+// the real workspace; a file the earlier run wrote is only in the copy.
+func validateRuntimeResume(s *session.Session, b sandbox.Backend) error {
+	if b.Name == "native" {
+		return nil
+	}
+	if s.FilePolicy || s.ExecPolicy || s.RuntimeProfile || s.FileCache != "" && s.FileCache != "off" || s.RuntimeAudit == "buffered" {
+		return fmt.Errorf("session %s runs with runtime policy options, which %s does not run; resume it on the native backend", s.ID, b.Name)
+	}
+	if files := secretfs.Find(s.CloneDir()); len(files) != 0 {
+		return fmt.Errorf("session %s's copy holds a secret file (%s), which %s cannot mediate; review the session, then apply or discard it", s.ID, files[0], b.Name)
+	}
+	return nil
 }

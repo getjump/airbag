@@ -150,3 +150,59 @@ func TestCapabilitiesNamesTheBackendsCheck(t *testing.T) {
 		}
 	}
 }
+
+// A secret file the earlier run left in the copy is only there, so
+// resume checks the copy as well: the optional runtime would hand it to
+// the agent without the native mediation.
+func TestOptionalResumeRefusesASecretInTheCopy(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("optional runtimes are Linux only")
+	}
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := t.TempDir()
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Backend: "gvisor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(s.CloneDir(), "app"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.CloneDir(), "app", "main.go"), []byte("package main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gvisor, err := sandbox.SelectBackend("gvisor", "any")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := func() error {
+		_, err := session.ResumeChecked(s.ID, ws, func(s *session.Session) error { return validateRuntimeResume(s, gvisor) })
+		return err
+	}
+	if err := resume(); err != nil {
+		t.Fatalf("a copy without secret files is refused: %v", err)
+	}
+	s.Status = session.StatusStopped
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.CloneDir(), "app", ".env"), []byte("TOKEN=x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(s.Dir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resume(); err == nil || !strings.Contains(err.Error(), filepath.Join("app", ".env")) {
+		t.Fatalf("a secret file in the copy is not refused: %v", err)
+	}
+	if after, err := os.ReadFile(filepath.Join(s.Dir, "meta.json")); err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("refused resume changed metadata: %v", err)
+	}
+	if err := validateRuntimeResume(s, sandbox.NativeBackend()); err != nil {
+		t.Fatalf("native mediates the file and is refused: %v", err)
+	}
+}

@@ -282,8 +282,8 @@ func cmdRun(args []string) (int, error) {
 			if err := validateExecution(s, execution, *requireIsolation); err != nil {
 				return err
 			}
-			if execution.Name != "native" && (s.FilePolicy || s.ExecPolicy || s.RuntimeProfile || s.FileCache != "" && s.FileCache != "off" || s.RuntimeAudit == "buffered") {
-				return fmt.Errorf("session %s runs with runtime policy options, which %s does not run; resume it on the native backend", s.ID, execution.Name)
+			if err := validateRuntimeResume(s, execution); err != nil {
+				return err
 			}
 			if s.Runtime != runtimeConfig {
 				return errors.New("resume requires the same runtime rootfs, binary and kernel")
