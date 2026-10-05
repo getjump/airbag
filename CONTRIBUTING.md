@@ -96,7 +96,8 @@ Smaller, self-contained tasks are labeled
 - A change in behavior comes with a test: a unit test, and an e2e test under
   `test/` when it is about what a session does.
 - Commit messages: an imperative summary line, then what changed and why.
-- Update the README when something user-visible changes.
+- Update the README, or the page in `docs/` that covers it, when something
+  user-visible changes.
 - The maintainer's agent workflows, their labels and gates: [docs/agents.md](docs/agents.md).
 - Security problems: please report them privately, as [SECURITY.md](SECURITY.md)
   says, not in a public issue.
