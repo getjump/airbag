@@ -1473,3 +1473,42 @@ func TestPartialApplyThenRunAgain(t *testing.T) {
 		t.Fatalf("a host edit after the apply: conflicts %v", cf)
 	}
 }
+
+// A new directory that holds only links (node_modules/.bin) is applied:
+// it is made along with its links, as with files.
+func TestApplyNewDirectoryOfLinks(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	if err := os.MkdirAll(filepath.Join(s.CloneDir(), "node_modules/.bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../tool/cli.js", filepath.Join(s.CloneDir(), "node_modules/.bin/tool")); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if target, err := os.Readlink(filepath.Join(ws, "node_modules/.bin/tool")); err != nil || target != "../tool/cli.js" {
+		t.Fatalf("link not applied: %q %v", target, err)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "node_modules")); err == nil {
+		t.Fatal("rollback left the directories it made")
+	}
+}

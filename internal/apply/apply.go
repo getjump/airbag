@@ -743,6 +743,11 @@ func applyOne(c review.Change) error {
 		if err != nil {
 			return err
 		}
+		// Its directory, when new, is not applied on its own (Units: it
+		// is made along with what is in it), as copyFile does for files.
+		if err := os.MkdirAll(filepath.Dir(c.Path), 0o755); err != nil { //nolint:gosec // a directory in the user's workspace, with the usual mode less the umask
+			return err
+		}
 		_ = os.Remove(c.Path)
 		return os.Symlink(target, c.Path)
 	default:
