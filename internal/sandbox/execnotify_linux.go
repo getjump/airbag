@@ -161,8 +161,40 @@ func validNotification(fd int, id uint64) bool {
 // serveExec records attempted invocations, not successful execs. CONTINUE
 // necessarily re-reads tracee memory in the kernel: path/argv can race a second
 // tracee thread. This is NOT immutable executable identity enforcement.
-func serveExec(fd int, check func(runtimepolicy.Request) error) error {
+//
+// It returns nil once stop (the read end of a pipe) is readable or closed at
+// the other end, or once no task is left under the filter (POLLHUP, Linux
+// 5.8+); any other return is an error. NOTIF_RECV is entered only when poll
+// reports a notification: a blocked RECV does not return when its fd closes on
+// every kernel, so a server waiting there could outlive its session. A
+// notification withdrawn in between makes RECV fail with ENOENT, not block.
+// After serveExec returns, the caller closes the listener: an execve still
+// under the filter then fails with ENOSYS, never runs unchecked.
+func serveExec(fd, stop int, check func(runtimepolicy.Request) error) error {
+	fds := []unix.PollFd{
+		{Fd: int32(fd), Events: unix.POLLIN},   //nolint:gosec // an open descriptor fits an int32
+		{Fd: int32(stop), Events: unix.POLLIN}, //nolint:gosec // an open descriptor fits an int32
+	}
 	for {
+		fds[0].Revents, fds[1].Revents = 0, 0
+		if _, err := unix.Poll(fds, -1); err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return err
+		}
+		if fds[1].Revents != 0 {
+			return nil
+		}
+		if fds[0].Revents&unix.POLLNVAL != 0 {
+			return errors.New("exec listener closed")
+		}
+		if fds[0].Revents&unix.POLLIN == 0 {
+			if fds[0].Revents&(unix.POLLHUP|unix.POLLERR) != 0 {
+				return nil // no task is left under the filter
+			}
+			continue
+		}
 		var n execNotification
 		err := notifyIOCTL(fd, unix.SECCOMP_IOCTL_NOTIF_RECV, &n)
 		if errors.Is(err, unix.EINTR) || errors.Is(err, unix.ENOENT) {

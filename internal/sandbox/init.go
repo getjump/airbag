@@ -834,19 +834,30 @@ func runAgent(s *session.Session, ctl *os.File, client *runtimepolicy.Client) in
 			_ = syscall.Kill(pgrp, syscall.SIGKILL)
 			return 125
 		}
-		controllerDone := make(chan struct{})
-		defer func() { close(controllerDone); _ = unix.Close(listener) }()
-		go func() {
-			// serveExec returns only on an error. Past it no execve could
-			// be answered, so the agent stops rather than run unchecked.
-			err := serveExec(listener, client.Check)
-			select {
-			case <-controllerDone:
-				return
-			default:
-			}
-			fmt.Fprintln(os.Stderr, "airbag: exec controller stopped:", err)
+		var stop [2]int
+		if err := unix.Pipe2(stop[:], unix.O_CLOEXEC); err != nil {
+			_ = unix.Close(listener)
+			fmt.Fprintln(os.Stderr, "airbag: exec controller:", err)
 			_ = syscall.Kill(pgrp, syscall.SIGKILL)
+			return 125
+		}
+		served := make(chan struct{})
+		// Once the agent is gone the server stops and is waited for; the
+		// listener closes last, so a straggler's execve gets ENOSYS.
+		defer func() {
+			_ = unix.Close(stop[1])
+			<-served
+			_ = unix.Close(stop[0])
+			_ = unix.Close(listener)
+		}()
+		go func() {
+			defer close(served)
+			// Past an error no execve could be answered, so the agent stops
+			// rather than run unchecked.
+			if err := serveExec(listener, stop[0], client.Check); err != nil {
+				fmt.Fprintln(os.Stderr, "airbag: exec controller stopped:", err)
+				_ = syscall.Kill(pgrp, syscall.SIGKILL)
+			}
 		}()
 	}
 	// Signals airbag forwards from outside go to the agent's group, as
