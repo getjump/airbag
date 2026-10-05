@@ -13,11 +13,12 @@ daemons to install and no new runtime/plugin protocol.
   required authority, lifecycle transitions and results. It uses only the Go
   standard library. A request describes an action; it does not prove execution.
 - `policy`: compile CEL rules and evaluate explicit effect/command/label
-  snapshots. `Compile` requires an explicit allow or deny no-match fallback.
-  An uninitialized engine denies. Evaluation performs no filesystem, network,
-  credential, approval or persistence operations. Airbag's existing internal
-  loader/gate retain the native allow fallback, trusted config sources,
-  repository restrictions, labels and approvals.
+  snapshots. `Compile` requires an explicit allow or deny no-match fallback;
+  a deny names the rule `fallback`. A nil or uninitialized engine denies.
+  Evaluation performs no filesystem, network, credential, approval or
+  persistence operations. Airbag's existing internal loader/gate retain the
+  native allow fallback, trusted config sources, repository restrictions,
+  labels and approvals.
 - `audit`: the shared record and `Recorder` interface. The SQLite implementation
   stays internal. `Recorder.Add` has no durability acknowledgement. It must not
   replace runtime admission's commit-before-allow or secret-read barriers.
@@ -36,8 +37,9 @@ daemons to install and no new runtime/plugin protocol.
   sources and destinations must come from the trusted operator, not the agent.
 - `proxy`: the existing HTTP/CONNECT allowlist and credential mediation, with a
   `Gate` interface and an `audit.Recorder` instead of concrete Airbag session
-  objects. The owner manages its HTTP server/listener and calls `Proxy.Close`
-  to cancel tracked requests and hijacked tunnels.
+  objects. The owner serves it with `p.Serve(l)`, or
+  `p.HTTPServer().Serve(p.LimitListener(l))`, closes the listener, and calls
+  `Proxy.Close` to cancel tracked requests and hijacked tunnels.
 
 Public packages do not depend on Airbag session/runtime state or the internal
 policy loader and audit database. Proxy shares the small, stateless internal
@@ -116,9 +118,21 @@ It creates no real PRs and runs without Airbag's sandbox, session metadata or CL
 ## An independent egress host
 
 Supply a `Gate` and recorder to the proxy. A gate owns policy/approval/label
-state; `AllowsHost` may grant an explicit exception to the allowlist. Credential
-bindings and their real values remain with the trusted host. The embedding must
-give the client the proxy CA and placeholders, never its real credential values.
+state; `AllowsHost` may grant an explicit exception to the allowlist. With no
+`Gate`, the allowlist alone decides. `Tainted` must return a reason whenever
+the labels are not known to be clean (they could not be read, say): an empty
+answer keeps every allowed host open. Credential bindings and their real values
+remain with the trusted host. The embedding must give the client the proxy CA
+and placeholders, never its real credential values.
+
+Serve the proxy with `p.Serve(l)`, or `p.HTTPServer().Serve(p.LimitListener(l))`
+for a server of your own: either one caps the connections to the proxy and
+closes idle ones. Handing `p` to another `http.Server` (`httptest.NewServer`,
+say) drops both bounds. `proxy.New` sets the defaults; a `Proxy` made as a
+struct literal gets the same ones: the address guard, each `Limits` field left
+zero (a negative one turns that bound off), and no upstream proxy when
+`Upstream` is nil. A nil `Log`, or a `Gate` that holds a nil pointer, is
+answered with 503 rather than served without a record or a policy.
 
 The sandbox/container/VM must force traffic through this proxy. Proxy environment
 variables alone do not prevent bypass. If a secret read narrows egress, the
@@ -128,7 +142,9 @@ filesystem access. This API does not add LLM DLP, JIT credential issuance or TTL
 
 The external-client test runs a real TLS upstream and checks placeholder
 substitution, response masking, a policy denial on an allowlisted destination,
-and a custom recorder without SQLite/session objects.
+and a custom recorder without SQLite/session objects. It also serves a struct
+literal `Proxy`: loopback is refused, and admission stops at the default
+`MaxFlows`.
 
 ## Host authority and runtime adapters
 
@@ -144,9 +160,7 @@ tracked proxy flows and forwards before closing storage. Forward dials are
 cancelled. The same owner is used by both native platform entry points.
 The lifecycle tests exercise startup failure, close, repeated close and resume.
 
-The separate runtime/FUSE and approvals branches still need integration with
-these public imports and the host owner before merging them. It does not
-enable their features or claim equivalent capabilities between native, gVisor
+The host owner does not claim equivalent capabilities between native, gVisor
 and microVM execution. No build speed improvement is claimed: package
 boundaries do not remove FUSE crossings or audit commits.
 
