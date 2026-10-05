@@ -28,8 +28,7 @@ $ sh test/check.sh fuzz 30s       # every Fuzz target for 30s each
 from your `PATH`.
 
 The end-to-end tests run real sessions with the `airbag` in `PATH` (or
-`AIRBAG=/path/to/airbag`). They run on Linux only, as a regular user, not
-root:
+`AIRBAG=/path/to/airbag`), as a regular user, not root:
 
 ```console
 $ go install ./cmd/airbag
@@ -44,8 +43,9 @@ user can write (`sudo mkdir -m 1777 /var/lib/airbag-e2e`, or set
 and `test/codex-e2e.sh` skip when the agent's binary is missing. The model is
 `test/mockapi`, so no account or API key is needed.
 
-On macOS, `go build ./cmd/airbag` and `go test ./...` work; the end-to-end
-tests do not.
+On macOS, `go build ./cmd/airbag` and `go test ./...` work, and of the
+end-to-end tests `test/e2e.sh` and `test/agent-state-e2e.sh` run there (CI runs
+them on every macOS runner); the others are Linux-only.
 
 ## Style
 
