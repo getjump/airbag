@@ -2599,3 +2599,44 @@ func TestRollbackSavesTheSessionBeforeItsJournalGoes(t *testing.T) {
 		t.Fatalf("killed while its journal went, the session is left applied: %+v %v", saved, err)
 	}
 }
+
+// A rollback that leaves paths as they are keeps its journal marked
+// stopped until the session is saved: killed in between, apply refuses
+// rather than run the outbox on the half rolled-back tree as applied,
+// and the next rollback sets the session right.
+func TestRollbackLeavingPathsStaysStoppedUntilTheSessionIsSaved(t *testing.T) {
+	s, box, ws := modifiedApplied(t)
+	if err := os.WriteFile(filepath.Join(ws, "m.txt"), []byte("edited after the apply\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusApplied
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// What Rollback does before it saves the session; killed here.
+	g, err := lastGeneration(s)
+	if err != nil || g == nil {
+		t.Fatal(err)
+	}
+	g.roots = rootsOf(s)
+	var out bytes.Buffer
+	if left, err := g.rollback(&out); err != nil || left != 1 {
+		t.Fatalf("left %d: %v\n%s", left, err, out.String())
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "stopped part way") {
+		t.Fatalf("apply ran as applied on a rollback the session does not know of: %v", err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied {
+		t.Fatalf("the next rollback left the session applied: %+v %v", saved, err)
+	}
+	if g, err := lastGeneration(s); err != nil || g == nil || g.Stopped || !g.Partial {
+		t.Fatalf("the journal is not settled: %+v %v", g, err)
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "edited after the apply\n" {
+		t.Fatalf("the user's edit is not left as it is: %q", got)
+	}
+}

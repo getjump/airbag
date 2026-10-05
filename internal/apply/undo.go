@@ -480,8 +480,31 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
 		kept[i], kept[j] = kept[j], kept[i]
 	}
-	g.Entries, g.Dirs, g.Complete, g.Partial, g.Stopped = kept, still, true, true, false
+	// Stopped stays as it was: a rollback the user ran is marked so
+	// until its caller has saved the session (settle), which a partial
+	// generation alone would not stop apply from running on as applied.
+	// An apply's own rollback was never applied, and is not marked.
+	g.Entries, g.Dirs, g.Complete, g.Partial = kept, still, true, true
 	return left, g.save()
+}
+
+// settle ends a rollback once the session's own state says it is
+// rolled back: a generation rolled back in full goes (remove), one with
+// paths left is no longer marked stopped. Until then apply refuses, and
+// a rollback finishes it again.
+func (g *generation) settle(left int, out io.Writer) error {
+	if left == 0 {
+		g.remove(out)
+		return nil
+	}
+	if !g.Stopped {
+		return nil
+	}
+	g.Stopped = false
+	if err := g.save(); err != nil {
+		return fmt.Errorf("the rollback is done, but its journal still says stopped: %w; airbag rollback clears it", err)
+	}
+	return nil
 }
 
 // remove takes a generation that is rolled back in full out of the
@@ -826,24 +849,29 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if partial {
-		if left == 0 {
-			g.remove(out)
-		}
-		fmt.Fprintf(out, "Session %s: %d of the paths left by the last rollback are rolled back now; %d stay as they are.\n", s.ID, n-left, left)
-		return nil
-	}
+	// The session says rolled back before the journal stops saying the
+	// rollback is under way: with the session still applied and the
+	// journal gone or settled, a crash would leave apply to run the
+	// outbox on the rolled-back tree. A rollback that finishes an earlier
+	// partial one sets right a session that crash left applied.
+	save := !partial
 	if s.Status == session.StatusApplied {
-		s.Status = session.StatusStopped
+		s.Status, save = session.StatusStopped, true
 	}
-	s.Baseline = time.Now()
-	if err := s.Save(); err != nil {
+	if !partial {
+		s.Baseline = time.Now()
+	}
+	if save {
+		if err := s.Save(); err != nil {
+			return err
+		}
+	}
+	if err := g.settle(left, out); err != nil {
 		return err
 	}
-	// Only now: with the session still applied and the journal gone, a
-	// crash would leave apply to run the outbox on the rolled-back tree.
-	if left == 0 {
-		g.remove(out)
+	if partial {
+		fmt.Fprintf(out, "Session %s: %d of the paths left by the last rollback are rolled back now; %d stay as they are.\n", s.ID, n-left, left)
+		return nil
 	}
 	fmt.Fprintf(out, "Rolled back %d changes of session %s; they are back in the session (airbag review).\n", n-left, s.ID)
 	if left > 0 {
