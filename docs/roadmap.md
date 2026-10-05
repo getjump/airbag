@@ -5,6 +5,8 @@ What is next, and what is deliberately not, with the reason. Two reviews on
 an external review that argued for narrowing the first release to "the agent
 works apart, I see the consequences, I take the result onto a branch" and
 testing the niche with users before the backlog ([evaluation.md](evaluation.md)).
+Two experiments on stronger execution backends and on AgentFS as the branch's
+storage are summed up in [experiments.md](experiments.md).
 
 ## Next
 
