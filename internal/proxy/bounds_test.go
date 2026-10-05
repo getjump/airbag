@@ -721,7 +721,11 @@ func TestUpstreamProxyNeverAnswers(t *testing.T) {
 			_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 			_, _ = io.WriteString(c, "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n")
 			if tc.cut {
+				deadline := time.Now().Add(2 * time.Second)
 				for accepted.Load() == 0 {
+					if time.Now().After(deadline) {
+						t.Fatal("the upstream proxy was not dialled")
+					}
 					time.Sleep(10 * time.Millisecond)
 				}
 				p.Cut(Allowlist{}, "test")
