@@ -89,6 +89,42 @@ func TestMacProfile(t *testing.T) {
 	}
 }
 
+func TestFollowCanonicalizesMissingTargetAncestors(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(alias, "not-yet", "memory")
+	link := filepath.Join(root, "memory-link")
+	if err := os.Symlink(missing, link); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(canonical, "not-yet", "memory")
+	for _, path := range []string{missing, link} {
+		if got := follow(path); got != want {
+			t.Errorf("follow(%q) = %q, want %q", path, got, want)
+		}
+	}
+	// A dangling link on the way leads where the agent could make its
+	// target: memory/ is denied there, not under the link's name.
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(alias, "later"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := follow(filepath.Join(dangling, "memory")), filepath.Join(canonical, "later", "memory"); got != want {
+		t.Errorf("follow through a dangling link = %q, want %q", got, want)
+	}
+}
+
 func TestMacHomesHidden(t *testing.T) {
 	root := t.TempDir()
 	for _, d := range []string{"alice/.ssh", "Shared", "bob"} {

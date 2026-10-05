@@ -10,7 +10,7 @@ import (
 	"syscall"
 
 	"github.com/getjump/airbag/internal/control"
-	"github.com/getjump/airbag/internal/outbox"
+	"github.com/getjump/airbag/outbox"
 )
 
 // BinDir is the shim directory inside the sandbox: /run/airbag/bin on

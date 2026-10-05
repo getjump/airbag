@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/outbox"
 )
 
 func testBox(t *testing.T) (*session.Session, *outbox.Box) {
