@@ -13,9 +13,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -23,6 +25,9 @@ import (
 // Guest runs only in a prepared rootfs. The host never reads its session
 // metadata through a guest mount. This entry point is not a policy authority.
 func Guest(args []string) int {
+	if len(args) == 1 && args[0] == "userns" {
+		return 0 // checkNoUserNamespaces's child: it exists only if one was created
+	}
 	b, err := os.ReadFile(guestConfigPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "airbag guest:", err)
@@ -176,6 +181,14 @@ func guestExec(c guestConfig) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 125
 	}
+	if err := restrictGuest(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 125
+	}
+	if err := checkNoUserNamespaces(); err != nil {
+		fmt.Fprintln(os.Stderr, "airbag guest:", err)
+		return 125
+	}
 	path := c.Argv[0]
 	if !strings.Contains(path, "/") {
 		resolved, err := lookPath(path, c.Env)
@@ -190,6 +203,59 @@ func guestExec(c guestConfig) int {
 		return 126
 	}
 	return 0
+}
+
+// guestFilter is stacked on the agent's filter in an optional runtime.
+// It refuses clone3 with ENOSYS: its flags sit behind a pointer no filter
+// can read, so it could create the user namespace that clone is refused
+// (gVisor's OCI filter); glibc falls back to clone only on ENOSYS. clone3
+// is 435 on every ABI abisFor covers, x32 with its bit.
+func guestFilter() []unix.SockFilter {
+	b := newBuilder()
+	b.ld(offNr)
+	for _, nr := range []uint32{unix.SYS_CLONE3, unix.SYS_CLONE3 | x32SyscallBit} {
+		b.jeqNext(nr)
+		b.jmp("enosys")
+	}
+	b.ret(retAllow)
+	b.label("enosys")
+	b.ret(retENOSYS)
+	return b.resolve()
+}
+
+// restrictGuest installs guestFilter after restrictAgent, which has set
+// no_new_privs.
+func restrictGuest() error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	p := guestFilter()
+	prog := unix.SockFprog{Len: uint16(len(p)), Filter: &p[0]} //nolint:gosec // a fixed program of a few instructions
+	_, _, e := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER,
+		unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog))) //nolint:gosec // seccomp(2) takes a pointer to the program; KeepAlive below
+	runtime.KeepAlive(p)
+	if e != 0 {
+		return fmt.Errorf("seccomp: %w", e)
+	}
+	return nil
+}
+
+// checkNoUserNamespaces runs under the agent's filters, just before its
+// exec: clone3 must be refused by guestFilter (the kernel would answer
+// EINVAL to these arguments), and a child must not start in a new user
+// namespace (gVisor's OCI filter, the microVM's max_user_namespaces).
+// Both runtimes promise what --strict gives native; a runtime that
+// ignores a limit stops the run instead of leaving it open.
+func checkNoUserNamespaces() error {
+	if _, _, e := unix.RawSyscall(unix.SYS_CLONE3, 0, 0, 0); e != unix.ENOSYS {
+		return fmt.Errorf("clone3 is not filtered (%v); refusing to start the agent", e)
+	}
+	cmd := exec.CommandContext(context.Background(), "/run/airbag/bin/airbag", GuestArg, "userns")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER}
+	if err := cmd.Start(); err != nil {
+		return nil //nolint:nilerr // refused: what the check wants
+	}
+	_ = cmd.Wait()
+	return errors.New("a process can still create a user namespace; refusing to start the agent")
 }
 
 func serveRelay(l net.Listener, dial func() (net.Conn, error)) {

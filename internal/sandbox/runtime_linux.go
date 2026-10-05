@@ -227,8 +227,11 @@ func runGVisor(s *session.Session, dir, root string) (int, error) {
 				{"path": "/dev/random", "type": "c", "major": 1, "minor": 8, "fileMode": 438, "uid": 0, "gid": 0},
 				{"path": "/dev/urandom", "type": "c", "major": 1, "minor": 9, "fileMode": 438, "uid": 0, "gid": 0},
 			},
+			// runsc loads this only with --oci-seccomp (below), and its
+			// errno is always EPERM. clone3 is refused in the guest instead
+			// (guestFilter), with the ENOSYS glibc needs to fall back to clone.
 			"seccomp": map[string]any{"defaultAction": "SCMP_ACT_ALLOW", "syscalls": []map[string]any{
-				{"names": []string{"unshare", "setns", "clone3"}, "action": "SCMP_ACT_ERRNO", "errnoRet": 1},
+				{"names": []string{"unshare", "setns"}, "action": "SCMP_ACT_ERRNO", "errnoRet": 1},
 				{"names": []string{"clone"}, "action": "SCMP_ACT_ERRNO", "errnoRet": 1, "args": []map[string]any{{"index": 0, "value": syscall.CLONE_NEWUSER, "valueTwo": syscall.CLONE_NEWUSER, "op": "SCMP_CMP_MASKED_EQ"}}},
 			}},
 		},
@@ -247,7 +250,7 @@ func runGVisor(s *session.Session, dir, root string) (int, error) {
 		cmd := exec.CommandContext(context.Background(), s.Runtime.Binary, append(common, "delete", "--force", s.ID)...) //nolint:gosec // trusted runsc, fixed runtime operation
 		_ = cmd.Run()
 	}()
-	args := append(append([]string{}, common...), "--platform=systrap", "--network=none", "--host-uds=open", "--file-access=shared", "--overlay2=none", "run", "--bundle="+dir, s.ID)
+	args := append(append([]string{}, common...), "--platform=systrap", "--oci-seccomp", "--network=none", "--host-uds=open", "--file-access=shared", "--overlay2=none", "run", "--bundle="+dir, s.ID)
 	return executeProvider(s.Runtime.Binary, args)
 }
 

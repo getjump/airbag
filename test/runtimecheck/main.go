@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -43,7 +44,17 @@ func run() error {
 	if conn != nil {
 		_ = conn.Close()
 	}
-	checks["user_namespace_denied"] = unix.Unshare(unix.CLONE_NEWUSER) != nil
+	// unshare(CLONE_NEWUSER) fails with EINVAL in any multithreaded
+	// process, a Go program included, so it proves nothing; a child
+	// cloned into a new user namespace does.
+	child := exec.CommandContext(context.Background(), "/proc/self/exe", "userns-child")
+	child.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER}
+	checks["user_namespace_denied"] = child.Start() != nil
+	if child.Process != nil {
+		_ = child.Wait()
+	}
+	_, _, errno := unix.RawSyscall(unix.SYS_CLONE3, 0, 0, 0)
+	checks["clone3_unavailable"] = errno == unix.ENOSYS
 	checks["host_token_hidden"] = os.Getenv("BOUND_SOURCE_TOKEN") == ""
 	checks["placeholder_present"] = os.Getenv("CHECK_TOKEN") != "" && os.Getenv("CHECK_TOKEN") != "benign-runtime-bound-token"
 	proxy, err := url.Parse(os.Getenv("HTTPS_PROXY"))
@@ -129,6 +140,9 @@ func run() error {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "userns-child" {
+		return // started only if a user namespace could be created
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

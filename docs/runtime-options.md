@@ -45,7 +45,10 @@ exactly two host Unix sockets: the proxy and policy control channel. The helper
 bridges sandbox HTTP proxy traffic to its scoped socket. Rootfs is readonly;
 workspace and HOME/tmp are the only mutable views. The rootless guest uses virtual UID zero (mapped to the host user) so private
 files retain access permissions. This grants no host root identity. Agent capabilities are empty,
-no_new_privs is enabled and user namespace creation is denied.
+no_new_privs is enabled and user namespace creation is denied: the spec's seccomp
+rules refuse unshare, setns and clone with CLONE_NEWUSER (runsc loads them only
+with `--oci-seccomp`, always with EPERM), and a filter the guest adds refuses
+clone3 with ENOSYS, so glibc falls back to clone.
 
 Firecracker has no NIC. Guest-to-host vsock ports expose proxy, control and a
 bounded result export only. The guest init mounts private workspace storage,
@@ -56,6 +59,11 @@ export into a fresh confined directory, rejecting traversal, symlink parents,
 devices, hardlinks, duplicates and excessive sizes before publishing the branch.
 Guest exit status and exported files are **untrusted output**, not attestation.
 Existing review/apply guards decide whether and where output reaches real files.
+
+In both runtimes the agent gets native's filter (`--strict` adds the strict
+one) and the guest's clone3 filter. Just before the exec, under those filters,
+the guest checks that clone3 is refused and that a child cannot start in a new
+user namespace; otherwise it stops the run.
 
 ## Explicitly unsupported
 
@@ -101,6 +109,11 @@ Measured adapter commit: `e8cf0bb667f65b844dee18632e35f85a1f1c4db4`.
 A subsequent harness adds host negative controls for the exact direct-egress
 address, host-file readability/writeability and user namespace availability.
 These controls must succeed outside the sandbox before a guest denial counts.
+That run's `user_namespace_denied` called unshare(CLONE_NEWUSER) from Go,
+which fails with EINVAL in any multithreaded process, and runsc ignored the
+spec's seccomp rules without `--oci-seccomp`: the gVisor guest could create
+user namespaces, `--strict` included. The check now starts a child in a new
+user namespace, `clone3_unavailable` is added, and the run below predates both.
 Both providers pass all nine guest checks, host-observed credential use (two
 requests each), unchanged source before apply, resume and explicit file apply.
 The result is one trial per backend on one runner:
