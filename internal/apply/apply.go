@@ -22,6 +22,7 @@ import (
 
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/review"
+	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 )
 
@@ -501,6 +502,10 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, i
 	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, s.Workspace) {
 		return reject(box, it, fmt.Sprintf("%s resolves to %s, inside the workspace; deferred commands run only programs from outside it", it.Argv[0], prog), o)
 	}
+	if a := linkedOut(s.Workspace, cwd, it.Argv[1:]); a != "" {
+		return reject(box, it, fmt.Sprintf("%s leads through a link out of the workspace or to a secret file; "+
+			"the command would read or write there, which its arguments do not show", a), o)
+	}
 	rels := make([]string, 0, len(it.Files))
 	for rel := range it.Files {
 		rels = append(rels, rel)
@@ -567,6 +572,70 @@ func hostDir(s *session.Session, dir string) string {
 		}
 	}
 	return dir
+}
+
+// linkedOut returns the first argument that names a path in the
+// workspace, or the working directory itself, whose real place is
+// outside the workspace or is a secret file. The agent can make links
+// in the workspace (notes.md -> .env, out -> ~/.ssh), and a deferred
+// command is confirmed by its arguments, which do not show where such a
+// name leads. A name that does not exist yet is checked by its directory.
+func linkedOut(ws, cwd string, args []string) string {
+	realWS, err := filepath.EvalSymlinks(ws)
+	if err != nil {
+		return ws
+	}
+	if !within(realPrefix(cwd), realWS) {
+		return cwd
+	}
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			_, v, ok := strings.Cut(a, "=")
+			if !ok {
+				continue
+			}
+			a = v
+		}
+		if a == "" {
+			continue
+		}
+		p := a
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(cwd, p)
+		}
+		if !within(p, ws) {
+			continue // shown as the path it is
+		}
+		real := realPrefix(filepath.Dir(p))
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+			r, err := filepath.EvalSymlinks(p)
+			if err != nil {
+				return a // dangling: a write would create its target
+			}
+			real = r
+		} else {
+			real = filepath.Join(real, filepath.Base(p))
+		}
+		if !within(real, realWS) || secretfs.IsSecret(filepath.Base(real)) {
+			return a
+		}
+	}
+	return ""
+}
+
+// realPrefix resolves the links in the longest part of p that exists
+// and joins the rest on as written.
+func realPrefix(p string) string {
+	rest := ""
+	for d := p; ; d = filepath.Dir(d) {
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			return filepath.Join(r, rest)
+		}
+		if filepath.Dir(d) == d {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(d), rest)
+	}
 }
 
 func hashFile(p string) (string, error) {

@@ -241,3 +241,77 @@ func TestCmdProgramLinkedIntoWorkspace(t *testing.T) {
 		t.Fatalf("ran a program from the workspace: %q", out.String())
 	}
 }
+
+// A name in the workspace that leads out of it, or to a secret file, is
+// not handed to a host program: the user confirms the command by its
+// arguments, which do not show where the name leads.
+func TestCmdArgumentLinkedOut(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "hosts.yml"), []byte("token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		make func(ws string) error
+		args []string
+		runs bool
+	}{
+		{"to a secret file", func(ws string) error {
+			_ = os.WriteFile(filepath.Join(ws, ".env"), []byte("TOKEN=x\n"), 0o600)
+			return os.Symlink(".env", filepath.Join(ws, "notes.md"))
+		}, []string{"--body-file", "notes.md"}, false},
+		{"as an option value", func(ws string) error {
+			return os.Symlink(filepath.Join(outside, "hosts.yml"), filepath.Join(ws, "notes.md"))
+		}, []string{"--body-file=notes.md"}, false},
+		{"through a linked directory", func(ws string) error {
+			return os.Symlink(outside, filepath.Join(ws, "docs"))
+		}, []string{"docs/hosts.yml"}, false},
+		{"to a file not there yet", func(ws string) error {
+			return os.Symlink(filepath.Join(outside, "new.txt"), filepath.Join(ws, "out.txt"))
+		}, []string{"--output", "out.txt"}, false},
+		{"under a linked directory, not there yet", func(ws string) error {
+			return os.Symlink(outside, filepath.Join(ws, "dist"))
+		}, []string{"dist/report.txt"}, false},
+		{"inside the workspace", func(ws string) error {
+			_ = os.WriteFile(filepath.Join(ws, "body.md"), []byte("ok\n"), 0o644)
+			return os.Symlink("body.md", filepath.Join(ws, "notes.md"))
+		}, []string{"--body-file", "notes.md", "--title", "Fix it"}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, box := testBox(t)
+			log := tool(t, "pubtool", "0")
+			if err := c.make(s.Workspace); err != nil {
+				t.Fatal(err)
+			}
+			it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: append([]string{"pubtool"}, c.args...), Cwd: s.Workspace})
+			var out bytes.Buffer
+			if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+				t.Fatal(err)
+			}
+			if got := ran(log) != ""; got != c.runs {
+				t.Fatalf("ran = %v, want %v: %q", got, c.runs, out.String())
+			}
+			if !c.runs && status(t, box, it.ID) != outbox.Rejected {
+				t.Fatalf("not rejected: %q", out.String())
+			}
+		})
+	}
+}
+
+// The command does not run in a directory of the workspace that is a
+// link out of it.
+func TestCmdCwdLinkedOut(t *testing.T) {
+	s, box := testBox(t)
+	log := tool(t, "pubtool", "0")
+	if err := os.Symlink(t.TempDir(), filepath.Join(s.Workspace, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: filepath.Join(s.Workspace, "sub")})
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if ran(log) != "" || status(t, box, it.ID) != outbox.Rejected {
+		t.Fatalf("ran in a linked directory: %q", out.String())
+	}
+}
