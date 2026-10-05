@@ -153,6 +153,19 @@ v=$("$AIRBAG" run --strict -- sh -c "$corelimit" 2>/dev/null); discard
 echo "$v" | awk '$1 == "ok" { ok = 1 } /^Max core/ { s = $5; h = $6 } END { exit !(ok && s == "1" && h == "1") }' ||
 	fail "RLIMIT_CORE under --strict: expected a read, a change reported as done, and the limit still 1 byte, got: $v"
 
+# Started with a hard core limit of 0, which an unprivileged airbag
+# cannot raise to 1 (and at 0 a pipe core_pattern still runs), --strict
+# refuses to run and the default mode warns. Root may raise it, so this
+# runs as a regular user only.
+if [ "$(id -u)" != 0 ] && command -v prlimit >/dev/null; then
+	v=$(prlimit --core=0:0 "$AIRBAG" run --strict -- echo agent-ran 2>&1) || true; discard
+	echo "$v" | grep -q agent-ran && fail "--strict ran with a core limit it could not set: $v"
+	echo "$v" | grep -q "limit core dumps" || fail "--strict did not say why it stopped: $v"
+	v=$(prlimit --core=0:0 "$AIRBAG" run -- echo agent-ran 2>&1); discard
+	echo "$v" | grep -q agent-ran || fail "the default mode did not run with a core limit it could not set: $v"
+	echo "$v" | grep -q "could not limit core dumps" || fail "no warning for a core limit airbag could not set: $v"
+fi
+
 # gpg lowers its own core limit at start and stops if that fails; under
 # --strict the skipped change keeps it working.
 if command -v gpg >/dev/null; then

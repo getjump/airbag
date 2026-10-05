@@ -566,6 +566,13 @@ func runAgent(s *session.Session, ctl *os.File) int {
 	// core_pattern ("@" or "@@", Linux 6.16+) ignores the limit and is not
 	// covered. airbag doctor reports the host's core_pattern.
 	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 1, Max: 1}); err != nil {
+		// Started with a hard limit of 0, which an unprivileged process
+		// cannot raise, the limit stays 0, and a pipe core_pattern runs
+		// at 0: --strict, which also skips the agent's own changes to the
+		// limit, stops the run rather than keep it there.
+		if s.Strict {
+			fatal("limit core dumps", err)
+		}
 		fmt.Fprintf(os.Stderr, "airbag: warning: could not limit core dumps: %v\n", err)
 	}
 	// Close every inherited fd above stdio before the agent starts, so
