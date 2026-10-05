@@ -47,5 +47,9 @@ Nothing is released yet; this is what the first release holds.
   branch, not yet run on a real Mac ([docs/macos.md](docs/macos.md)).
 - `install.sh`, `go install` and a Nix flake; `airbag version` reports the
   module version for `go install ...@vX`.
+- Releases built by GoReleaser and published immutable: archives with
+  `LICENSE` and `README.md`, an SBOM per archive, `checksums.txt` signed with
+  Sigstore, and GitHub build provenance. [docs/verify.md](docs/verify.md)
+  shows how to check them and how to rebuild the binaries.
 
 [Unreleased]: https://github.com/getjump/airbag/commits/main
