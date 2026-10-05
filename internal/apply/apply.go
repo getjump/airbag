@@ -139,7 +139,7 @@ func changedInside(dir string, since func(string) time.Time) string {
 func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) error {
 	last, err := lastGeneration(s)
 	if err != nil {
-		return fmt.Errorf("nothing applied: %w; until it can be read, it is not known whether the last apply or rollback finished", err)
+		return fmt.Errorf("nothing applied: %w; until it can be read, it is not known whether the last apply or rollback finished: copy what you need from the saved/ directory beside it, then `airbag discard --force %s`", err, s.ID)
 	}
 	// Some real files rolled back and some not: no change, and no intent
 	// (a push, a command), runs on such a tree.

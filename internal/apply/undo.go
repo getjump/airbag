@@ -132,9 +132,18 @@ func listGenerations(s *session.Session) ([]genRef, error) {
 	}
 	var out []genRef
 	for _, e := range es {
-		if n, err := strconv.Atoi(e.Name()); err == nil && e.IsDir() {
-			out = append(out, genRef{n, filepath.Join(generationsDir(s), e.Name())})
+		n, err := strconv.Atoi(e.Name())
+		if err != nil || !e.IsDir() {
+			continue
 		}
+		dir := filepath.Join(generationsDir(s), e.Name())
+		// A directory a crash left before its journal was first written,
+		// with nothing saved in it, is no apply: apply, rollback and
+		// discard all pass it by, and the next apply takes its number.
+		if _, err := os.Lstat(filepath.Join(dir, "journal.json")); errors.Is(err, fs.ErrNotExist) && emptyOrAbsent(filepath.Join(dir, "saved")) {
+			continue
+		}
+		out = append(out, genRef{n, dir})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].n < out[j].n })
 	return out, nil
@@ -151,9 +160,7 @@ func loadGeneration(dir string) (*generation, error) {
 
 // lastGeneration is the journal of the last apply of s, nil when there
 // is none. One that cannot be read is an error, not none: whether that
-// apply, or a rollback of it, finished is not known. A directory a crash
-// left before its journal was first written, with nothing saved in it,
-// is no apply.
+// apply, or a rollback of it, finished is not known.
 func lastGeneration(s *session.Session) (*generation, error) {
 	gs, err := listGenerations(s)
 	if err != nil {
@@ -164,20 +171,8 @@ func lastGeneration(s *session.Session) (*generation, error) {
 	}
 	dir := gs[len(gs)-1].dir
 	g, err := loadGeneration(dir)
-	if errors.Is(err, fs.ErrNotExist) && emptyOrAbsent(filepath.Join(dir, "saved")) {
-		return nil, nil
-	}
 	if err != nil {
-		return nil, fmt.Errorf("read the undo journal %s: %w", dir, err)
-	}
-	return g, nil
-}
-
-// interrupted returns an apply of s that did not finish, if any.
-func interrupted(s *session.Session) (*generation, error) {
-	g, err := lastGeneration(s)
-	if err != nil || g == nil || g.Complete {
-		return nil, err
+		return nil, fmt.Errorf("read the undo journal %s: %w", filepath.Join(dir, "journal.json"), err)
 	}
 	return g, nil
 }

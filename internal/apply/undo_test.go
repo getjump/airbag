@@ -130,8 +130,8 @@ func TestApplyIsAllOrNothing(t *testing.T) {
 	if read(t, filepath.Join(ws, "mod.txt")) != "user\n" || read(t, filepath.Join(ws, "del.txt")) != "keep me\n" {
 		t.Fatal("a failed apply left changes behind")
 	}
-	if g, err := interrupted(s); err != nil || g != nil {
-		t.Fatalf("rolled-back generation still marked as interrupted: %v", err)
+	if g, err := lastGeneration(s); err != nil || g != nil && !g.Complete {
+		t.Fatalf("rolled-back generation still marked as interrupted: %+v %v", g, err)
 	}
 }
 
@@ -2113,6 +2113,15 @@ func TestApplyRefusesUnreadableJournal(t *testing.T) {
 	}
 	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err != nil {
 		t.Fatalf("a crash's empty generation refuses apply: %v", err)
+	}
+	if _, err := HeldVersions(s); err != nil {
+		t.Fatalf("a crash's empty generation refuses discard: %v", err)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("a crash's empty generation hides the apply before it from rollback: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "a.txt")); !os.IsNotExist(err) {
+		t.Fatalf("the apply is not rolled back: %v", err)
 	}
 }
 
