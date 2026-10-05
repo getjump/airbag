@@ -896,10 +896,11 @@ func TestForwardOnStoppedFlowCloses(t *testing.T) {
 // on it through a ResponseController.
 type deadlines struct {
 	*httptest.ResponseRecorder
-	set []time.Time
+	set, reads []time.Time
 }
 
 func (d *deadlines) SetWriteDeadline(t time.Time) error { d.set = append(d.set, t); return nil }
+func (d *deadlines) SetReadDeadline(t time.Time) error  { d.reads = append(d.reads, t); return nil }
 
 // The proxy's own answers, which have no flow to close them, are
 // written within AnswerWrite; a request starts with no deadline.
@@ -921,6 +922,11 @@ func TestAnswerHasWriteDeadline(t *testing.T) {
 		if len(w.set) != 2 || !w.set[0].IsZero() || w.set[1].Before(before) || w.set[1].After(time.Now().Add(AnswerWrite)) {
 			t.Errorf("%s: deadlines %v", target, w.set)
 		}
+		// What is left of the body is read after the answer, within
+		// AnswerWrite too.
+		if len(w.reads) != 1 || w.reads[0].Before(before.Add(AnswerWrite)) || w.reads[0].After(time.Now().Add(AnswerWrite)) {
+			t.Errorf("%s: read deadlines %v", target, w.reads)
+		}
 	}
 }
 
@@ -938,6 +944,11 @@ func (l *paceLog) SetWriteDeadline(t time.Time) error {
 	} else {
 		l.ev, l.at = append(l.ev, "d"), append(l.at, t)
 	}
+	return nil
+}
+
+func (l *paceLog) SetReadDeadline(t time.Time) error {
+	l.ev, l.at = append(l.ev, "r"), append(l.at, t)
 	return nil
 }
 
@@ -959,23 +970,30 @@ func TestMirrorAnswerIsPaced(t *testing.T) {
 	big := 3*pacedChunk + 1
 	cases := []struct {
 		name  string
+		body  string
 		serve func(http.ResponseWriter)
 		want  string
 	}{
-		{"header and body", func(w http.ResponseWriter) {
+		{"header and body", "", func(w http.ResponseWriter) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(make([]byte, big))
 		}, "clear d h d w65536 d w65536 d w65536 d w1 d"},
-		{"body only", func(w http.ResponseWriter) { _, _ = w.Write(make([]byte, 10)) }, "clear d w10 d"},
-		{"header only", func(w http.ResponseWriter) { w.WriteHeader(http.StatusOK) }, "clear d h d"},
-		{"empty write", func(w http.ResponseWriter) { _, _ = w.Write(nil) }, "clear d w0 d"},
+		{"body only", "", func(w http.ResponseWriter) { _, _ = w.Write(make([]byte, 10)) }, "clear d w10 d"},
+		{"header only", "", func(w http.ResponseWriter) { w.WriteHeader(http.StatusOK) }, "clear d h d"},
+		{"empty write", "", func(w http.ResponseWriter) { _, _ = w.Write(nil) }, "clear d w0 d"},
+		// A request body, which the mirror leaves unread, is read after
+		// the answer within AnswerWrite.
+		{"request body", "0123456789", func(w http.ResponseWriter) { _, _ = w.Write(make([]byte, 10)) }, "clear d w10 d r"},
 	}
 	for _, c := range cases {
 		log, _ := newLog(t)
 		p := New(nil, log)
 		p.Mirror = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { c.serve(w) })
 		w := &paceLog{ResponseRecorder: httptest.NewRecorder()}
-		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://airbag.mirror/npm/x", nil)
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://airbag.mirror/npm/x", strings.NewReader(c.body))
+		if c.body == "" {
+			r.ContentLength, r.Body = 0, http.NoBody
+		}
 		before := time.Now()
 		p.ServeHTTP(w, r)
 		if got := strings.Join(w.ev, " "); got != c.want {
