@@ -346,6 +346,11 @@ $ curl -fsSL https://raw.githubusercontent.com/getjump/airbag/main/install.sh | 
 $ airbag doctor
 ```
 
+`airbag capabilities [--json]` describes the compiled execution boundary.
+The current native backend shares the host kernel; gVisor and microVM are
+not implemented. `run --require-isolation=virtual-machine` refuses to run
+instead of falling back. See [execution boundaries](docs/execution-backends.md).
+
 The script installs the latest release for Linux or macOS 13 and later (amd64,
 arm64) into `~/.local/bin` after checking its SHA-256 against the release. Or
 from source, with Go 1.27.1 or newer:
