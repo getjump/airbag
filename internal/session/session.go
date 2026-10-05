@@ -115,7 +115,8 @@ type Meta struct {
 // a btrfs subvolume, an overlay) gets a new device number but keeps its
 // ID, while another filesystem mounted at the path, whose root can share
 // the inode, or a btrfs snapshot, which keeps the inode and the creation
-// time, has another ID.
+// time, has another ID. A recorded ID must match whatever the device: a
+// device formatted again keeps its number.
 type DirID struct {
 	Real string `json:"real"`
 	Dev  uint64 `json:"dev"`
@@ -152,7 +153,8 @@ func (id DirID) Check(p string) error {
 		return fmt.Errorf("%s leads to %s now, not to %s as when the session began", p, got.Real, id.Real)
 	case got.Ino != id.Ino || id.Born != 0 && got.Born != id.Born:
 		return fmt.Errorf("%s is another directory than when the session began: that one was moved or removed, or the filesystem gives new inode numbers on each mount (FAT, sshfs without use_ino)", p)
-	case got.Dev != id.Dev && (id.Born == 0 || id.FS == 0 || got.FS != id.FS):
+	case id.FS != 0 && got.FS != id.FS,
+		got.Dev != id.Dev && (id.Born == 0 || id.FS == 0):
 		return fmt.Errorf("%s is on another filesystem than when the session began: another one, or a snapshot of this one, is mounted there, "+
 			"or this one was mounted again and records nothing that tells it is the same", p)
 	}

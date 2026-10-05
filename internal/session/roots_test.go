@@ -130,3 +130,21 @@ func TestCheckComparesDeviceWithoutBirthTime(t *testing.T) {
 		t.Fatalf("another device passed: %v", err)
 	}
 }
+
+// A recorded filesystem ID must match even on the same device: a device
+// formatted again keeps its number, and its root its inode.
+func TestCheckComparesFilesystemIDOnSameDevice(t *testing.T) {
+	dir := t.TempDir()
+	id, err := DirIDOf(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.FS == 0 {
+		t.Skip("this filesystem gives no ID")
+	}
+	id.Born = 0
+	id.FS++
+	if err := id.Check(dir); err == nil || !strings.Contains(err.Error(), "another filesystem") {
+		t.Fatalf("another filesystem on the same device passed: %v", err)
+	}
+}

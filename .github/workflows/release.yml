@@ -28,8 +28,9 @@ jobs:
       attestations: write # store the build provenance
     steps:
       # Publishing the draft does not make it immutable; the setting does.
-      # It is read now, before anything is built, so no mutable release
-      # goes out; verify checks the published release itself.
+      # It is read now, before anything is built, and again right before
+      # publishing, so no mutable release goes out; verify checks the
+      # published release itself.
       - name: immutable releases are on
         env:
           GH_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
@@ -101,6 +102,17 @@ jobs:
           # One attestation for every file checksums.txt lists: the
           # archives, their SBOMs and install.sh.
           subject-checksums: dist/checksums.txt
+      # The setting may have been turned off while the release was built.
+      - name: immutable releases are still on
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          enabled=$(gh api "repos/$REPO/immutable-releases" --jq .enabled) || enabled=
+          [ "$enabled" = true ] || {
+            echo "::error::immutable releases were turned off for $REPO while the release was built; the draft stays unpublished: turn them on and run the release again, which replaces the draft"
+            exit 1
+          }
       - name: publish the draft; the release is immutable from here on
         env:
           GH_TOKEN: ${{ github.token }}
