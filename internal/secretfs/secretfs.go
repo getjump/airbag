@@ -78,13 +78,20 @@ func Open(workspace string) []File {
 
 // Find lists the workspace's secret files, relative to it.
 func Find(workspace string) []string {
+	// A walk does not enter a root that is a link (a workspace named
+	// through one), so it starts where the link leads: otherwise every
+	// secret file there would be missed, and served to the agent as is.
+	root := workspace
+	if r, err := filepath.EvalSymlinks(workspace); err == nil {
+		root = r
+	}
 	var out []string
-	_ = filepath.WalkDir(workspace, func(p string, d os.DirEntry, err error) error {
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // the walk has at least the agent's rights: what it cannot read, the agent cannot either
 		}
 		if d.IsDir() {
-			if p != workspace && skipDir(d.Name()) {
+			if p != root && skipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -96,7 +103,7 @@ func Find(workspace string) []string {
 		if err != nil || !st.Mode().IsRegular() {
 			return nil //nolint:nilerr // a file gone since the walk listed it has nothing to serve
 		}
-		if rel, err := filepath.Rel(workspace, p); err == nil {
+		if rel, err := filepath.Rel(root, p); err == nil {
 			out = append(out, rel)
 		}
 		return nil

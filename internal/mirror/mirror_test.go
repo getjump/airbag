@@ -154,3 +154,18 @@ func TestFetchesOnlyFromRegistries(t *testing.T) {
 		}
 	}
 }
+
+// Lock files of a workspace named through a link pin as usual.
+func TestFindPinsThroughLinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "go.sum"), []byte("github.com/BurntSushi/toml v1.4.0 h1:aaa=\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := FindPins(link).Has("https://proxy.golang.org/github.com/!burnt!sushi/toml/@v/v1.4.0.zip"); !ok {
+		t.Fatal("no pin from a lock file below a linked root")
+	}
+}

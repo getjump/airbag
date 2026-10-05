@@ -146,11 +146,18 @@ func cloneWorkspace(s *session.Session) error {
 	if err := os.MkdirAll(filepath.Dir(s.CloneDir()), 0o700); err != nil {
 		return err
 	}
-	out, err := exec.CommandContext(context.Background(), "/bin/cp", "-c", "-R", s.Workspace, s.CloneDir()).CombinedOutput() //nolint:gosec // absolute paths of the session's own workspace and clone
+	// cp -R copies a link named on its command line as a link, so a
+	// workspace named through one would give a clone that is a link to
+	// the real files. It copies from where the link leads.
+	src, err := filepath.EvalSymlinks(s.Workspace)
+	if err != nil {
+		return err
+	}
+	out, err := exec.CommandContext(context.Background(), "/bin/cp", "-c", "-R", src, s.CloneDir()).CombinedOutput() //nolint:gosec // absolute paths of the session's own workspace and clone
 	if err != nil {
 		_ = os.RemoveAll(s.CloneDir())
 		fmt.Fprintf(os.Stderr, "airbag: APFS clone failed (%s); copying instead\n", strings.TrimSpace(string(out)))
-		if out, err := exec.CommandContext(context.Background(), "/bin/cp", "-R", s.Workspace, s.CloneDir()).CombinedOutput(); err != nil { //nolint:gosec // absolute paths of the session's own workspace and clone
+		if out, err := exec.CommandContext(context.Background(), "/bin/cp", "-R", src, s.CloneDir()).CombinedOutput(); err != nil { //nolint:gosec // absolute paths of the session's own workspace and clone
 			return fmt.Errorf("copy the workspace: %w: %s", err, out)
 		}
 	}
