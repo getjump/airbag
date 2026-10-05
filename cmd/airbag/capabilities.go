@@ -19,7 +19,7 @@ func cmdCapabilities(args []string, out io.Writer) error {
 		return err
 	}
 	if len(fs.Args()) != 0 {
-		return fmt.Errorf("usage: airbag capabilities [--json]")
+		return fmt.Errorf("usage: airbag capabilities [--backend=native|gvisor|microvm] [--json]")
 	}
 	b, err := sandbox.SelectBackend(*backend, "any")
 	if err != nil {

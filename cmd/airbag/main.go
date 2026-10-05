@@ -76,7 +76,8 @@ const usage = `airbag — approve outcomes, not commands
   airbag log [ID]             raw effect log
   airbag approve [ID]         list or approve requests blocked by an "ask" rule
   airbag doctor               check that this machine can run airbag
-  airbag capabilities [--json] describe the compiled execution boundary and limits
+  airbag capabilities [--backend=NAME] [--json]
+                              describe a backend's execution boundary and limits
 
 run: --backend=native|gvisor|microvm; --require-isolation=any|shared-kernel|application-kernel|virtual-machine
      unavailable backends and unmet requirements fail before creating a session
