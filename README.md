@@ -267,6 +267,7 @@ Before more features comes a measurement on real work against the alternatives:
 - [Policies](docs/policies.md): rules over effects, deferred commands, bound credentials
 - [Runtime policy](docs/runtime-policy.md): opt-in file and exec checks on Linux, their audit and limits
 - [Threat model](docs/threat-model.md): what airbag protects against, and what not
+- [Execution boundaries](docs/execution-backends.md): `airbag capabilities`, `--require-isolation`, no fallback
 - [How airbag compares](docs/comparison.md): nono, try, AgentFS, Docker Sandboxes, agentsh
 - [Status in detail](docs/status.md): hooks, shell models, tests, the effect log
 - [Roadmap and decisions](docs/roadmap.md): what is deferred on purpose, and why

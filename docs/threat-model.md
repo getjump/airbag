@@ -11,6 +11,11 @@ exposure an unprivileged-user-namespace escape would use; but the kernel is stil
 boundary. `airbag doctor` reports the host sysctls that harden the rest, and
 where the host sends core dumps.
 
+`airbag capabilities [--json]` describes the compiled execution boundary.
+The current native backend shares the host kernel; gVisor and microVM are
+not implemented. `run --require-isolation=virtual-machine` refuses to run
+instead of falling back. See [execution boundaries](execution-backends.md).
+
 For hosts without a credential the proxy decides from the name the client asks for
 and does not see inside TLS. So a broad allowlist entry (`github.com`) is a way for
 data to leave, and domain fronting can reach a site behind the same CDN that the

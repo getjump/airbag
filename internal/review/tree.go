@@ -71,18 +71,25 @@ func ScanTree(layer, real, branch string) ([]Change, error) {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	err = filepath.WalkDir(real, func(p string, d fs.DirEntry, err error) error {
+	// A walk does not enter a root that is a link (a workspace named
+	// through one), and would miss every deletion: it starts where the
+	// link leads, and names the real files by the workspace's path.
+	root := real
+	if r, err := filepath.EvalSymlinks(real); err == nil {
+		root = r
+	}
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if p == real {
+		if p == root {
 			return nil
 		}
-		rel, _ := filepath.Rel(real, p)
+		rel, _ := filepath.Rel(root, p)
 		if _, err := os.Lstat(filepath.Join(branch, rel)); err == nil {
 			return nil
 		}
-		c := Change{Layer: layer, Rel: rel, Path: p, Upper: filepath.Join(branch, rel), Kind: Deleted, Type: d.Type().Type()}
+		c := Change{Layer: layer, Rel: rel, Path: filepath.Join(real, rel), Upper: filepath.Join(branch, rel), Kind: Deleted, Type: d.Type().Type()}
 		out = append(out, c)
 		if d.IsDir() {
 			return filepath.SkipDir

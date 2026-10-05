@@ -80,6 +80,10 @@ const usage = `airbag — approve outcomes, not commands
   airbag log [ID] [--json]    raw effect log with runtime source, PID and argv
   airbag approve [ID]         list or approve requests blocked by an "ask" rule
   airbag doctor               check that this machine can run airbag
+  airbag capabilities [--json] describe the compiled execution boundary and limits
+
+run: --backend=native; --require-isolation=any|shared-kernel|application-kernel|virtual-machine
+     unavailable backends and unmet requirements fail before creating a session
 
 ID defaults to the newest open session of the current workspace.
 `
@@ -136,6 +140,8 @@ func main() {
 		err = cmdLogArgs(args)
 	case "doctor":
 		err = cmdDoctor()
+	case "capabilities":
+		err = cmdCapabilities(args, os.Stdout)
 	case "approve":
 		err = cmdApprove(args)
 	case "version", "--version":
@@ -165,6 +171,8 @@ func cmdRun(args []string) (int, error) {
 		return 1, errors.New("already inside an airbag session")
 	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	backend := fs.String("backend", "native", "execution backend (only native is implemented)")
+	requireIsolation := fs.String("require-isolation", "any", "require an exact isolation boundary; never fall back")
 	var allow stringList
 	fs.Var(&allow, "allow", "extra host to allow, e.g. api.github.com or *.example.com (repeatable)")
 	noHome := fs.Bool("no-home", false, "do not branch $HOME (it stays read-only)")
@@ -201,6 +209,10 @@ func cmdRun(args []string) (int, error) {
 	if len(argv) == 0 {
 		return 2, errors.New("usage: airbag run [flags] -- AGENT [ARGS...]")
 	}
+	execution, err := sandbox.SelectBackend(*backend, *requireIsolation)
+	if err != nil {
+		return 2, err
+	}
 	if env := os.Getenv("AIRBAG_ALLOW"); env != "" {
 		allow = append(allow, strings.Split(env, ",")...)
 	}
@@ -210,7 +222,7 @@ func cmdRun(args []string) (int, error) {
 		return 1, err
 	}
 	ws := workspace(cwd)
-	if ws == home || ws == "/" {
+	if wholeHome(ws, home) {
 		return 1, fmt.Errorf("refusing to use %s as the workspace; cd into a project", ws)
 	}
 	pol, err := policy.Load(ws, home)
@@ -250,8 +262,14 @@ func cmdRun(args []string) (int, error) {
 	if *resume != "" {
 		// Same branch, same outbox and labels; this run's command, plus
 		// whatever this run's flags add.
-		if s, err = session.Resume(*resume, ws); err != nil {
+		if s, err = session.ResumeChecked(*resume, ws, func(s *session.Session) error {
+			return validateExecution(s, execution, *requireIsolation)
+		}); err != nil {
 			return 1, err
+		}
+		s.Backend, s.Isolation = execution.Name, execution.Isolation
+		if s.RequireIsolation == "" || *requireIsolation != "any" {
+			s.RequireIsolation = *requireIsolation
 		}
 		s.Argv, s.Cwd = argv, cwd
 		// A session from an older airbag may have stored a wider
@@ -284,6 +302,10 @@ func cmdRun(args []string) (int, error) {
 				s.Forwards = append(s.Forwards, f)
 			}
 		}
+		// What this session reaches: HiddenHost is fixed when it is
+		// created, whatever this run's --nix-daemon says; this run may add
+		// forwards.
+		s.Egress = execution.ForRun(s.HiddenHost, s.Forwards).Egress
 		if err := s.Save(); err != nil {
 			return 1, err
 		}
@@ -295,6 +317,8 @@ func cmdRun(args []string) (int, error) {
 		projPass, holes := sandbox.ClaudeProjectState(cwd, ws)
 		pass = append(pass, projPass...)
 		meta := session.Meta{
+			Backend: execution.Name, Isolation: execution.Isolation, RequireIsolation: *requireIsolation,
+			Egress:    execution.ForRun(hiddenHost, forwards).Egress,
 			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
@@ -318,6 +342,11 @@ func cmdRun(args []string) (int, error) {
 		if err != nil {
 			return 1, err
 		}
+	}
+	// The default boundary adds no line to run's output; one asked for, or
+	// egress outside the proxy, is stated.
+	if s.Backend != "native" || (s.RequireIsolation != "" && s.RequireIsolation != "any") || s.Egress != sandbox.EgressProxy {
+		fmt.Fprintf(os.Stderr, "airbag: backend %s · isolation %s · egress %s\n", execution.Name, execution.Isolation, s.Egress)
 	}
 	if filepath.Base(argv[0]) == "codex" && !slices.Contains(argv, "--dangerously-bypass-approvals-and-sandbox") && !slices.Contains(argv, "--yolo") {
 		if *strict {
@@ -380,6 +409,26 @@ func cmdHook(agent, event string) {
 		_, _ = os.Stdout.Write(out)
 	}
 	os.Exit(0)
+}
+
+// wholeHome reports a workspace that is $HOME or /, by the directory
+// it is: git names the top of a repository with links resolved, so a
+// repository at ~ on a system where /home is a link (/var/home) is
+// spelled differently from $HOME.
+func wholeHome(ws, home string) bool {
+	if c := filepath.Clean(ws); c == filepath.Clean(home) || c == "/" {
+		return true
+	}
+	a, err := os.Stat(ws)
+	if err != nil {
+		return false
+	}
+	for _, p := range []string{home, "/"} {
+		if b, err := os.Stat(p); err == nil && os.SameFile(a, b) {
+			return true
+		}
+	}
+	return false
 }
 
 // workspace is the git toplevel, or the current directory.

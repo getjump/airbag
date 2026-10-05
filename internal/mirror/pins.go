@@ -31,6 +31,10 @@ func (p Pins) Has(url string) (string, bool) {
 // FindPins walks the workspace for lock files.
 func FindPins(workspace string) Pins {
 	pins := Pins{}
+	// A walk does not enter a root that is a link: start where it leads.
+	if r, err := filepath.EvalSymlinks(workspace); err == nil {
+		workspace = r
+	}
 	_ = filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // an unreadable entry pins nothing, and fewer pins only make the mirror stricter
