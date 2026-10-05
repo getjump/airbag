@@ -91,13 +91,23 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   another port needs an entry that names it (`--allow git.corp:8443`). An
   allowed name that resolves to this machine, loopback, link-local (cloud
   metadata) or multicast is refused: the address is checked as the proxy
-  connects, so a DNS answer cannot change between check and use.
+  connects, so a DNS answer cannot change between check and use. The proxy
+  runs on the host, so what the agent holds open there is bounded. A
+  connection through it is closed when no byte has moved for 15 minutes, when
+  it has waited 2 minutes for its next request, or, once one side has finished
+  sending, when the other has been quiet for 30 seconds. A session holds at
+  most 512 tunnels and forwarded requests at once (the mirror's are not
+  counted); one more gets `503`. It holds at most 1024 connections to the
+  proxy, counting those that wait for a request; one more is closed.
 - **Local services, by name.** `--allow tcp://127.0.0.1:5432` (or `allow:` in
   `airbag.yaml`) gives the agent `127.0.0.1:5432` in the sandbox, relayed by airbag
   to that address: a dev database, a cache, a service from `docker compose`. Each
   connection is checked by policy (as a `net.connect` effect) and logged as
   `net.tcp`. After a secret read, forwards to other machines are refused and cut;
-  forwards to this machine stay. The Docker socket itself stays hidden.
+  forwards to this machine stay. A forwarded connection is closed after an hour
+  without a byte (database pools keep theirs idle long), or as at the proxy
+  once one side has finished; each forward relays at most 256 at once. The
+  Docker socket itself stays hidden.
 - **A package mirror.** Go, npm, pip, uv and yarn go through
   `http://airbag.mirror`, a read-only caching mirror of proxy.golang.org, npm and
   PyPI. Review lists every package and version the agent pulled; artifacts are
@@ -361,8 +371,12 @@ credentials:
 The agent sees `GH_TOKEN` set to a placeholder of the same shape (`ghp_` and
 random characters). For the bound hosts, and only for them, airbag terminates
 TLS with a certificate authority made for the session: its key stays in
-airbag's memory, and it is constrained to those hosts, so it cannot vouch for
-any other site. airbag replaces the placeholder with the value in the request's
+airbag's memory, and its name constraints permit only those names (and the
+names under them) and no name of the other kind (no IP address when the hosts
+are names, no DNS name when they are addresses), so a verifier that checks
+constraints, as Go and OpenSSL do, accepts it for no other site. Its
+extended key usage is TLS server authentication only. airbag
+replaces the placeholder with the value in the request's
 headers (Basic credentials included) and query, checks the real host against this
 machine's roots, and replaces the value with the placeholder in the response, so a
 host that echoes the request does not hand the token to the agent. A request whose
@@ -391,7 +405,9 @@ that is not a model API. Not covered: tokens in request bodies (OAuth flows),
 tools that pin certificates or keep their own trust store (Java), Go programs on
 macOS whose `go.mod` declares a Go version before 1.27, most Go tools today (they
 ignore `SSL_CERT_FILE` whichever Go builds them), and Node's built-in `fetch`, which ignores
-`HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` (Node 22.21 and later).
+`HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` (Node 22.21 and later). A protocol
+upgrade (a websocket) to a bound host is refused: airbag could not keep the
+value out of the upgraded stream.
 
 Which tools an agent may call is the agent's own setting (Claude Code's
 permissions, Codex's configuration), and airbag does not duplicate it. airbag
@@ -477,6 +493,15 @@ data to leave, and domain fronting can reach a site behind the same CDN that the
 allowlist does not name. Allow narrow names, and where that matters put an `ask`
 rule on `net.connect` for the broad ones: every connection passes it, while
 `net.egress` is predicted from known command lines only.
+
+The proxy, the forwards and the control socket run in airbag's process on the
+host and parse what the agent sends. airbag closes the connections there that
+stop carrying data (a request header must arrive within 30 seconds at the
+proxy and 10 at the control socket; the other bounds are
+[above](#what-the-agent-gets)) and caps the tunnels, the forwarded connections
+and the connections to the proxy a session holds at once. A connection that
+keeps moving bytes stays open as long as it does, and bandwidth and the rate of
+new connections are not limited.
 
 ## License
 
