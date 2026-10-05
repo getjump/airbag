@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/links"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/steps"
@@ -234,17 +235,24 @@ func linksOut(s *session.Session, cs []Change) int {
 		if c.Type != fs.ModeSymlink || c.Kind == Deleted {
 			continue
 		}
-		t, err := os.Readlink(c.Upper)
+		text, err := os.Readlink(c.Upper)
 		if err != nil {
 			n++
 			continue
 		}
-		if !filepath.IsAbs(t) {
-			t = filepath.Join(filepath.Dir(c.Path), t)
+		// One component at a time from the link's real directory, as
+		// apply will follow it, through the links already in the real
+		// files: publish -> cache/pkg with cache -> ~/.config, or
+		// cache/../secret, where the .. applies after cache is followed.
+		dir := "/"
+		if !filepath.IsAbs(text) {
+			dir = resolved(filepath.Dir(c.Path))
 		}
-		// Through the links already in the real files, as apply will
-		// follow it: publish -> cache/pkg, with cache -> ~/.config.
-		t = resolved(filepath.Clean(t))
+		t, ok := links.Follow(dir, text)
+		if !ok {
+			n++
+			continue
+		}
 		if !in(t, wsReal) || secretfs.IsSecret(strings.ToLower(filepath.Base(t))) {
 			n++
 		}

@@ -363,6 +363,10 @@ func TestReportNamesTrustLinks(t *testing.T) {
 	if w := why([]Change{link("publish", "cache/pkg")}, "i-1"); !strings.Contains(w, "1 links") {
 		t.Errorf("a link out through an existing link is not counted: %s", w)
 	}
+	// The .. applies where cache leads, not to the name.
+	if w := why([]Change{link("up", "cache/../secret")}, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("a .. after an existing link is not followed: %s", w)
+	}
 	if w := why([]Change{out}, "i-2"); strings.Contains(w, "trust-links") {
 		t.Errorf("a push names --trust-links, which does not hold it: %s", w)
 	}

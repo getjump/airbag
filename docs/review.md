@@ -47,7 +47,8 @@ already ran is not undone.
 A session records the directories its workspace and `$HOME` were when it began.
 If one is another directory now (moved away, with a link or a new directory at its
 path), apply, rollback, resume and the outbox change nothing there and say so; put
-the directory back first.
+the directory back first. Sessions made by development builds from before this
+check record nothing and are not checked: discard them.
 
 ## Apply onto a git branch
 
