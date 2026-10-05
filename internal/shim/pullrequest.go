@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/getjump/airbag/internal/operation"
 	"github.com/getjump/airbag/internal/secretfs"
 )
@@ -37,12 +39,15 @@ func capturePullRequest(argv []string, cwd string) (*operation.Request, error) {
 		if secretfs.IsSecret(filepath.Base(path)) {
 			return nil, fmt.Errorf("PR body names a secret file")
 		}
-		if st, err := os.Stat(path); err != nil || !st.Mode().IsRegular() {
-			return nil, fmt.Errorf("PR body must be a regular workspace file")
-		}
-		f, err := os.Open(path)
+		// The file itself, not a link: through a link the name checked
+		// above could stand for a secret file somewhere else.
+		f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 		if err != nil {
-			return nil, fmt.Errorf("read PR body: %w", err)
+			return nil, fmt.Errorf("PR body must be a regular workspace file, not a link: %w", err)
+		}
+		if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+			_ = f.Close()
+			return nil, fmt.Errorf("PR body must be a regular workspace file")
 		}
 		data, readErr := io.ReadAll(io.LimitReader(f, operation.MaxBody+1))
 		closeErr := f.Close()
