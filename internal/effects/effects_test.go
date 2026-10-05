@@ -40,10 +40,11 @@ func TestAppendOnly(t *testing.T) {
 	}
 }
 
-// Past the burst, deny entries of a kind are held to the rate and the
+// Past the burst, refused entries (deny, ask) of a kind are held to the
+// rate and the
 // rest are counted; the count is written before the kind's next entry
 // and when the log closes. Other entries and other kinds are written.
-func TestDenialsMetered(t *testing.T) {
+func TestRefusalsMetered(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "effects.db")
 	l, err := Open(path)
 	if err != nil {
@@ -52,16 +53,17 @@ func TestDenialsMetered(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	l.now = func() time.Time { return now }
 	deny := Effect{Kind: "net.egress", Target: "x:443", Verdict: "deny", Reason: "host not in allowlist"}
-	batch := make([]Effect, denyBurst+5)
+	batch := make([]Effect, refuseBurst+5)
 	for i := range batch {
 		batch[i] = deny
 	}
 	l.AddAll(batch)
 	l.Add(Effect{Kind: "net.egress", Target: "y:443", Verdict: "allow"})
 	l.Add(Effect{Kind: "proc.exec", Target: "rm", Verdict: "deny"})
+	l.Add(Effect{Kind: "net.egress", Target: "x:443", Verdict: "ask", Reason: "ask-rule"})
 	now = now.Add(time.Second)
 	l.Add(deny)
-	for range denyRate + 3 {
+	for range refuseRate + 3 {
 		l.Add(deny)
 	}
 	if err := l.Close(); err != nil {
@@ -79,15 +81,15 @@ func TestDenialsMetered(t *testing.T) {
 			drops = append(drops, e.Target+": "+e.Reason)
 		}
 	}
-	if n := count["net.egress deny"]; n != denyBurst+denyRate {
-		t.Errorf("%d deny entries written, want %d", n, denyBurst+denyRate)
+	if n := count["net.egress deny"]; n != refuseBurst+refuseRate {
+		t.Errorf("%d deny entries written, want %d", n, refuseBurst+refuseRate)
 	}
 	if count["net.egress allow"] != 1 || count["proc.exec deny"] != 1 {
 		t.Errorf("counts %v", count)
 	}
 	want := []string{
-		"net.egress: 5 net.egress denials not logged: more than 50 a second",
-		"net.egress: 4 net.egress denials not logged: more than 50 a second",
+		"net.egress: 6 net.egress refusals not logged: more than 50 a second",
+		"net.egress: 4 net.egress refusals not logged: more than 50 a second",
 	}
 	if strings.Join(drops, "\n") != strings.Join(want, "\n") {
 		t.Errorf("dropped entries:\n%s", strings.Join(drops, "\n"))
@@ -104,7 +106,7 @@ func TestDenialsMetered(t *testing.T) {
 }
 
 // Past maxMetered kinds, the rest share one meter.
-func TestDenialKindsBounded(t *testing.T) {
+func TestRefusalKindsBounded(t *testing.T) {
 	l, err := Open(filepath.Join(t.TempDir(), "effects.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +115,7 @@ func TestDenialKindsBounded(t *testing.T) {
 	for i := range 3 * maxMetered {
 		l.Add(Effect{Kind: fmt.Sprintf("k%d", i), Verdict: "deny"})
 	}
-	if len(l.denials) != maxMetered+1 {
-		t.Errorf("%d meters", len(l.denials))
+	if len(l.refusals) != maxMetered+1 {
+		t.Errorf("%d meters", len(l.refusals))
 	}
 }

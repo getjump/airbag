@@ -179,7 +179,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		}
 	}
 	if len(dropped) > 0 {
-		fmt.Fprintf(w, "\nNot logged %d denials, past %d a second of a kind%s\n", total(dropped), effects.DenyRate, hostList(dropped))
+		fmt.Fprintf(w, "\nNot logged %d refusals, past %d a second of a kind%s\n", total(dropped), effects.RefuseRate, hostList(dropped))
 	}
 
 	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))

@@ -177,7 +177,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	}
 	for _, kind := range sortedKeys(dropped) {
 		r.Attention = append(r.Attention, ReportItem{What: "log", Target: kind,
-			Why: fmt.Sprintf("%d denials not logged: more than %d a second", dropped[kind], effects.DenyRate)})
+			Why: fmt.Sprintf("%d refusals not logged: more than %d a second", dropped[kind], effects.RefuseRate)})
 	}
 	secrets := knownSecrets(s.Workspace)
 	for _, in := range intents {
