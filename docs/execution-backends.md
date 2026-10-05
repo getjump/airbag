@@ -54,5 +54,6 @@ silently remove it.
   the real token's service-level scopes.
 - Secret taint restricts egress; it is not a general process kill switch.
 
-Runtime FUSE/exec policies and typed external effects are separate work in
-PRs #9, #15 and #17. They must not be inferred from this capability report.
+Typed external effects ([effect-contract.md](effect-contract.md),
+[typed-pr-outbox.md](typed-pr-outbox.md)) and runtime FUSE/exec policies
+(PR #9) are separate from this report and must not be inferred from it.
