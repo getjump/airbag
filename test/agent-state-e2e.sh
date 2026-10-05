@@ -214,6 +214,20 @@ grep -q legacy "$HOME/.claude.json" && fail "a resumed legacy session wrote mcpS
 [ ! -e "$HOME/.claude/projects/-other/memory/MEMORY.md" ] || fail "a resumed legacy session wrote another project's memory"
 "$AIRBAG" discard --yes >/dev/null
 
+# A project whose memory/ is a link (into a notes folder, say): the
+# project directory is not passed through but stays in the branch, the
+# run works, and a write through the link is reviewed as memory.
+mkdir -p "$HOME/memstore" && echo 'linked memory' > "$HOME/memstore/L.md"
+mv "$proj/memory" "$T/memory.bak"
+ln -s "$HOME/memstore" "$proj/memory"
+"$AIRBAG" run -- sh -c "echo planted >> '$proj/memory/L.md'" >"$T/run.out" 2>&1 || fail "run with a linked memory/ failed: $(cat "$T/run.out")"
+grep -q "is a link); it stays in the branch" "$T/run.out" || fail "no notice for the linked memory/: $(cat "$T/run.out")"
+[ "$(cat "$HOME/memstore/L.md")" = "linked memory" ] || fail "a write through the linked memory/ reached the real file"
+"$AIRBAG" review | grep -q "memstore/L.md  agent instructions" || fail "the write through the linked memory/ is not flagged:
+$("$AIRBAG" review)"
+"$AIRBAG" discard --yes >/dev/null
+rm "$proj/memory" && mv "$T/memory.bak" "$proj/memory"
+
 # A ~/.claude that is a symlink out of $HOME: nothing under it passes
 # through, airbag creates nothing behind it, and the agent cannot write
 # the directory it points at.

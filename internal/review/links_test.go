@@ -243,3 +243,55 @@ func TestDanglingLinkBelowLinkedDir(t *testing.T) {
 	}
 	t.Fatalf("no change in %+v", cs)
 }
+
+// A linked directory inside a watched tree whose target holds links of
+// its own: those are found too, under the name they stand for.
+func TestNestedLinkChain(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	h := s.Home
+	writeCfg(t, filepath.Join(h, "dotfiles/shared/init.lua"), "-- x\n")
+	if err := os.MkdirAll(filepath.Join(h, ".config/nvim"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, filepath.Join(h, "dotfiles/nvim-lua"), filepath.Join(h, ".config/nvim/lua"))
+	symlink(t, filepath.Join(h, "dotfiles/shared/init.lua"), filepath.Join(h, "dotfiles/nvim-lua/plugin/init.lua"))
+	// A loop of linked directories ends.
+	symlink(t, filepath.Join(h, "dotfiles/nvim-lua"), filepath.Join(h, "dotfiles/nvim-lua/again"))
+	writeCfg(t, filepath.Join(s.HomeUpper(), "dotfiles/shared/init.lua"), "-- changed\n")
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == "dotfiles/shared/init.lua" {
+			if !slices.Contains(c.Flags, "persist") {
+				t.Errorf("flags %v", c.Flags)
+			}
+			return
+		}
+	}
+	t.Fatalf("no change in %+v", cs)
+}
+
+// The prefix of a wildcard pattern is no whole tree: a .pth file linked
+// to another place under .local/lib is found by the link's name.
+func TestLinkInsideWildcardPrefix(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	h := s.Home
+	writeCfg(t, filepath.Join(h, ".local/lib/shared/x.pth"), "import os\n")
+	symlink(t, "../../shared/x.pth", filepath.Join(h, ".local/lib/python3.12/site-packages/x.pth"))
+	writeCfg(t, filepath.Join(s.HomeUpper(), ".local/lib/shared/x.pth"), "import evil\n")
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == ".local/lib/shared/x.pth" {
+			if !slices.Contains(c.Flags, "persist") {
+				t.Errorf("flags %v", c.Flags)
+			}
+			return
+		}
+	}
+	t.Fatalf("no change in %+v", cs)
+}

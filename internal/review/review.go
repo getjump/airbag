@@ -206,6 +206,9 @@ func classify(s *session.Session, cs []Change) {
 			names = append(names, rel)
 		}
 		for _, a := range aliasRels(aliases, c.Path) {
+			if c.Layer == "ws" && strings.HasPrefix(rel, ".git/") {
+				break // git's own files; the workspace table flags hooks and config
+			}
 			if c.IsDir() {
 				a += "/"
 			}

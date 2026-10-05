@@ -147,6 +147,15 @@ func buildWorld(s *session.Session) error {
 			if _, err := os.Lstat(filepath.Join(realhome, p)); err != nil {
 				continue // not there: nothing to pass through
 			}
+			// A hole below it (the project's memory/) that is a link
+			// cannot be kept in the branch: the whole directory stays
+			// there instead.
+			if i := slices.IndexFunc(s.BranchHoles, func(h string) bool {
+				return strings.HasPrefix(h, p+"/") && noSymlinkSoFar(realhome, h) != nil
+			}); i >= 0 {
+				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (~/%s is a link); it stays in the branch\n", p, s.BranchHoles[i])
+				continue
+			}
 			pass = append(pass, p)
 		}
 		// A branch hole (a passed-through project's memory/) must stay a

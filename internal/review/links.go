@@ -34,23 +34,30 @@ const maxAliasEntries = 5000
 // every link inside a watched directory, which a dotfiles manager may
 // make file by file at any depth.
 func homeAliases(home string, roots []string) []homeAlias {
-	var watched []string
+	// whole: every path inside the tree is classified as the tree is, so
+	// a link from one place in it to another adds nothing. Not so for
+	// the prefix of a wildcard pattern (.local/lib for its *.pth).
+	type tree struct {
+		rel   string
+		whole bool
+	}
+	var watched []tree
 	for _, p := range persistHomeTable {
 		for _, pat := range p.patterns {
-			watched = append(watched, literalPrefix(pat))
+			watched = append(watched, tree{literalPrefix(pat), strings.HasSuffix(pat, "/") && !strings.Contains(pat, "*")})
 		}
 	}
 	for _, cf := range jsonConfigs {
-		watched = append(watched, cf.path)
+		watched = append(watched, tree{cf.path, false})
 	}
 	for _, d := range hostShellState {
-		watched = append(watched, strings.TrimSuffix(d.dir, "/"))
+		watched = append(watched, tree{strings.TrimSuffix(d.dir, "/"), true})
 	}
 	// Each project's directory and its memory, not the transcripts.
 	if ents, err := os.ReadDir(filepath.Join(home, ".claude/projects")); err == nil {
-		watched = append(watched, ".claude/projects")
+		watched = append(watched, tree{".claude/projects", false})
 		for _, e := range ents {
-			watched = append(watched, ".claude/projects/"+e.Name(), ".claude/projects/"+e.Name()+"/memory")
+			watched = append(watched, tree{".claude/projects/" + e.Name(), false}, tree{".claude/projects/" + e.Name() + "/memory", true})
 		}
 	}
 	var out []homeAlias
@@ -75,32 +82,59 @@ func homeAliases(home string, roots []string) []homeAlias {
 		}
 		out = append(out, homeAlias{rel, t})
 	}
-	for _, w := range watched {
+	for _, tr := range watched {
+		w := tr.rel
 		add(w, "")
 		if w == ".claude/projects" || strings.Count(w, "/") == 2 && strings.HasPrefix(w, ".claude/projects/") {
 			continue // the transcripts are not watched
 		}
-		// The links inside, wherever the directory really is.
+		// The links inside, wherever the directory really is, and inside
+		// a linked directory's target too, under the name it stands for.
 		root, err := filepath.EvalSymlinks(filepath.Join(home, w))
 		if err != nil {
 			continue
 		}
 		n := 0
-		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil //nolint:nilerr // an unreadable entry: skip it, look at the rest
+		walked := map[string]bool{}
+		var walk func(dir, name string)
+		walk = func(dir, name string) {
+			if walked[dir] {
+				return // a loop of linked directories
 			}
-			if n++; n > maxAliasEntries {
-				return filepath.SkipAll
+			walked[dir] = true
+			within := ""
+			if tr.whole {
+				within, _ = under(dir, roots)
 			}
-			if p != root && d.Type()&fs.ModeSymlink != 0 {
-				if sub, err := filepath.Rel(root, p); err == nil {
-					within, _ := under(root, roots)
-					add(w+"/"+filepath.ToSlash(sub), within)
+			_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return nil //nolint:nilerr // an unreadable entry: skip it, look at the rest
 				}
-			}
-			return nil
-		})
+				if n++; n > maxAliasEntries {
+					return filepath.SkipAll
+				}
+				if p == dir || d.Type()&fs.ModeSymlink == 0 {
+					return nil
+				}
+				sub, err := filepath.Rel(dir, p)
+				if err != nil {
+					return nil //nolint:nilerr // not below dir: nothing to name
+				}
+				linked := name + "/" + filepath.ToSlash(sub)
+				add(linked, within)
+				t, err := filepath.EvalSymlinks(p)
+				if err != nil || strings.HasPrefix(t, dir+string(filepath.Separator)) {
+					return nil //nolint:nilerr // dangling, or walked here anyway
+				}
+				if fi, err := os.Stat(t); err == nil && fi.IsDir() {
+					if _, ok := under(t, roots); ok {
+						walk(t, linked)
+					}
+				}
+				return nil
+			})
+		}
+		walk(root, w)
 	}
 	return out
 }
