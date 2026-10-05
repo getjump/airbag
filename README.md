@@ -14,6 +14,8 @@ apply it, take it onto a git branch, or throw it away.
 [![ci](https://github.com/getjump/airbag/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/getjump/airbag/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/getjump/airbag)](LICENSE)
 [![Go version from go.mod](https://img.shields.io/github/go-mod/go-version/getjump/airbag)](go.mod)
+[![platform: Linux, macOS prototype](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20prototype-informational)](#install)
+[![agents: Claude Code, Codex](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-informational)](docs/agent.md)
 
 [Install](#install) · [What you get](#what-you-get) · [How it compares](#how-it-compares) ·
 [Threat model](#threat-model) · [FAQ](#faq) · [Docs](#docs)
@@ -38,12 +40,13 @@ $ airbag rollback     # undo the last apply
 
 Requirements, `go install` and Nix: [Install](#install).
 
-![demo: the agent deletes src, reads .env, tries to send it out, plants a line in ~/.bashrc and pushes; airbag review shows all of it; discard, and nothing happened](demo/demo.gif)
+![demo: the agent deletes src, reads .env, tries to send it out, plants a line in ~/.bashrc and pushes; airbag review shows all of it; discard, and nothing happened](demo/demo.svg)
 
 The demo runs the real Claude Code; the "model" is `test/mockapi` playing a fixed
 script, so it is repeatable without an account (`demo/demo.sh`). `agent ▶` lines are
-the calls the model makes, `agent ◀` what the agent sends back. More scenes, one GIF
-each, in `demo/`: `sandbox`, `codex`, `ask`, `apply`, `mirror` (`demo/scenes.sh NAME`).
+the calls the model makes, `agent ◀` what the agent sends back. The same as a GIF:
+`demo/demo.gif`. More scenes, one GIF each, in `demo/`: `sandbox`, `codex`, `ask`,
+`apply`, `mirror` (`demo/scenes.sh NAME`; `demo/render.sh NAME` makes the SVG).
 
 ## What you get
 
