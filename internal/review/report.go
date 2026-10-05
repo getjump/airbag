@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/operation"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/steps"
@@ -90,7 +91,10 @@ type ReportIntent struct {
 	Argv   []string `json:"argv"`
 	Status string   `json:"status"`
 	// Files: workspace files the command runs only on, with SHA-256.
-	Files map[string]string `json:"files,omitempty"`
+	Files         map[string]string  `json:"files,omitempty"`
+	Request       *operation.Request `json:"request,omitempty"`
+	RequestDigest string             `json:"request_digest,omitempty"`
+	Result        *operation.Result  `json:"result,omitempty"`
 }
 
 // manyDeletions is when deletions in the workspace become one item.
@@ -185,15 +189,16 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	}
 	secrets := knownSecrets(s.Workspace)
 	for _, in := range intents {
-		r.Outbox = append(r.Outbox, ReportIntent{ID: in.ID, Kind: in.Kind, Argv: in.Argv, Status: in.Status, Files: in.Files})
-		if in.Status == outbox.Pending && intentHasSecret(in, secrets) {
+		r.Outbox = append(r.Outbox, ReportIntent{ID: in.ID, Kind: in.Kind, Argv: in.Argv, Status: in.Status, Files: in.Files, Request: in.Request, RequestDigest: in.RequestDigest, Result: in.TypedResult()})
+		if (in.Status == outbox.Pending || in.Status == string(operation.Approved)) && intentHasSecret(in, secrets) {
 			r.Attention = append(r.Attention, ReportItem{What: "secret", Target: in.ID, Why: "`" + outbox.Line(in.Argv) + "` carries a value from a secret file"})
 		}
 		switch in.Status {
-		case outbox.Pending:
+		case outbox.Pending, string(operation.Approved):
 			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "`" + outbox.Line(in.Argv) + "` waits for apply"})
 		case outbox.Unknown:
-			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "outcome unknown: " + in.Output})
+			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "outcome unknown: " + in.Output +
+				"; once checked, `airbag outbox resolve " + in.ID + " done|failed " + s.ID + "` lets the intents after it run"})
 		}
 	}
 	sort.SliceStable(r.Attention, func(i, j int) bool { return attentionRank(r.Attention[i].What) < attentionRank(r.Attention[j].What) })

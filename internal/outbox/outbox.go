@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getjump/airbag/internal/operation"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -38,7 +40,8 @@ const (
 const (
 	KindPush = "git.push"
 	// KindCmd: a call that a `defer:` entry in airbag.yaml holds back.
-	KindCmd = "cmd"
+	KindCmd         = "cmd"
+	KindPullRequest = operation.CreatePullRequest
 )
 
 type Intent struct {
@@ -48,10 +51,15 @@ type Intent struct {
 	Cwd  string   `json:"cwd"`
 	// Files the command names, relative to the workspace, with their
 	// SHA-256 when it was queued: it runs only on that content.
-	Files   map[string]string `json:"files,omitempty"`
-	Created time.Time         `json:"created"`
-	Status  string            `json:"status"`
-	Output  string            `json:"output,omitempty"`
+	Files         map[string]string  `json:"files,omitempty"`
+	Created       time.Time          `json:"created"`
+	Status        string             `json:"status"`
+	Output        string             `json:"output,omitempty"`
+	Request       *operation.Request `json:"request,omitempty"`
+	RequestDigest string             `json:"request_digest,omitempty"`
+	// CaptureError is transport-only: a deferred typed call cannot fall back
+	// to an arbitrary host command when its capture failed.
+	CaptureError string `json:"capture_error,omitempty"`
 }
 
 const schema = `
@@ -79,15 +87,25 @@ CREATE TRIGGER IF NOT EXISTS intent_status_no_update BEFORE UPDATE ON intent_sta
 	BEGIN SELECT RAISE(ABORT, 'intent history is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS intent_status_no_delete BEFORE DELETE ON intent_status
 	BEGIN SELECT RAISE(ABORT, 'intent history is append-only'); END;
+CREATE TABLE IF NOT EXISTS intent_requests (
+	intent TEXT PRIMARY KEY REFERENCES intents(id),
+	request TEXT NOT NULL,
+	digest TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS intent_requests_no_update BEFORE UPDATE ON intent_requests
+	BEGIN SELECT RAISE(ABORT, 'requests are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS intent_requests_no_delete BEFORE DELETE ON intent_requests
+	BEGIN SELECT RAISE(ABORT, 'requests are immutable'); END;
 `
 
 type Box struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 // Open opens the outbox in the session database at path.
 func Open(path string) (*Box, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_txlock=immediate")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +118,7 @@ func Open(path string) (*Box, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Box{db: db}, nil
+	return &Box{db: db, path: path}, nil
 }
 
 // addFiles brings a database from before deferred commands up to date.
@@ -119,9 +137,10 @@ func (b *Box) Close() error { return b.db.Close() }
 // current status.
 func (b *Box) List() ([]Intent, error) {
 	rows, err := b.db.QueryContext(context.Background(), `
-		SELECT i.id, i.kind, i.argv, i.cwd, i.created, i.files, s.status, s.output
+		SELECT i.id, i.kind, i.argv, i.cwd, i.created, i.files, s.status, s.output, coalesce(r.request, ''), coalesce(r.digest, '')
 		FROM intents i
 		JOIN intent_status s ON s.seq = (SELECT max(seq) FROM intent_status WHERE intent = i.id)
+		LEFT JOIN intent_requests r ON r.intent = i.id
 		ORDER BY i.rowid`)
 	if err != nil {
 		return nil, err
@@ -130,9 +149,17 @@ func (b *Box) List() ([]Intent, error) {
 	var out []Intent
 	for rows.Next() {
 		var in Intent
-		var argv, created, files string
-		if err := rows.Scan(&in.ID, &in.Kind, &argv, &in.Cwd, &created, &files, &in.Status, &in.Output); err != nil {
+		var argv, created, files, request string
+		if err := rows.Scan(&in.ID, &in.Kind, &argv, &in.Cwd, &created, &files, &in.Status, &in.Output, &request, &in.RequestDigest); err != nil {
 			return out, err
+		}
+		if request != "" {
+			in.Request = &operation.Request{}
+			if err := decodeRequest(request, in.RequestDigest, in.Kind, in.Request); err != nil {
+				return out, fmt.Errorf("intent %s: %w", in.ID, err)
+			}
+		} else if in.Kind == KindPullRequest {
+			return out, fmt.Errorf("intent %s: typed request is missing", in.ID)
 		}
 		_ = json.Unmarshal([]byte(argv), &in.Argv)
 		if files != "" {
@@ -146,6 +173,27 @@ func (b *Box) List() ([]Intent, error) {
 
 // Push queues an intent as pending and returns it with its ID.
 func (b *Box) Push(in Intent) (Intent, error) {
+	request := ""
+	if in.Request != nil {
+		if in.Kind != in.Request.Kind {
+			return in, fmt.Errorf("intent kind does not match request")
+		}
+		digest, err := in.Request.Digest()
+		if err != nil {
+			return in, err
+		}
+		if in.RequestDigest != "" && in.RequestDigest != digest {
+			return in, fmt.Errorf("request digest does not match payload")
+		}
+		in.RequestDigest = digest
+		encoded, err := json.Marshal(in.Request)
+		if err != nil {
+			return in, fmt.Errorf("encode request: %w", err)
+		}
+		request = string(encoded)
+	} else if in.Kind == KindPullRequest || in.RequestDigest != "" {
+		return in, fmt.Errorf("typed request is missing")
+	}
 	tx, err := b.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return in, err
@@ -175,6 +223,11 @@ func (b *Box) Push(in Intent) (Intent, error) {
 		in.ID, in.Kind, string(argv), in.Cwd, now, files); err != nil {
 		return in, err
 	}
+	if request != "" {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO intent_requests (intent, request, digest) VALUES (?, ?, ?)`, in.ID, request, in.RequestDigest); err != nil {
+			return in, err
+		}
+	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO intent_status (intent, t, status) VALUES (?, ?, ?)`, in.ID, now, Pending); err != nil {
 		return in, err
 	}
@@ -184,6 +237,16 @@ func (b *Box) Push(in Intent) (Intent, error) {
 // Update records a new status, and the command's output, for an intent.
 // The intent itself does not change.
 func (b *Box) Update(in Intent) error {
+	var typed int
+	if err := b.db.QueryRowContext(context.Background(), `SELECT count(*) FROM intent_requests WHERE intent = ?`, in.ID).Scan(&typed); err != nil {
+		return err
+	}
+	if typed != 0 {
+		if in.Status == string(operation.Approved) || in.Status == Running {
+			return fmt.Errorf("typed approvals and starts require their bound transition methods")
+		}
+		return b.transition(in.ID, in.RequestDigest, "", operation.State(in.Status), in.Output)
+	}
 	res, err := b.db.ExecContext(context.Background(), `INSERT INTO intent_status (intent, t, status, output)
 		SELECT id, ?, ?, ? FROM intents WHERE id = ?`,
 		time.Now().UTC().Format(time.RFC3339Nano), in.Status, in.Output, in.ID)

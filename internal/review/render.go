@@ -211,6 +211,10 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	secrets := knownSecrets(s.Workspace)
 	for _, in := range intents {
 		fmt.Fprintf(w, "  %-4s %-44s %s\n", in.ID, outbox.Line(in.Argv), in.Status)
+		if in.Request != nil && in.Request.PullRequest != nil {
+			p := in.Request.PullRequest
+			fmt.Fprintf(w, "       GitHub %s: %s → %s at %s\n       request %s; frozen body available in airbag outbox\n", p.Repository, p.Head, p.Base, p.HeadCommit, in.RequestDigest)
+		}
 		if len(in.Files) > 0 {
 			fmt.Fprintf(w, "       runs only on these as queued: %s\n", strings.Join(fileNames(in.Files), ", "))
 		}
@@ -633,6 +637,9 @@ func fileNames(m map[string]string) []string {
 // command line says, so a secret value in it leaves when it runs.
 func intentHasSecret(in outbox.Intent, secrets []string) bool {
 	line := strings.Join(in.Argv, " ")
+	if in.Request != nil && in.Request.PullRequest != nil {
+		line += "\n" + in.Request.PullRequest.Title + "\n" + in.Request.PullRequest.Body
+	}
 	for _, v := range secrets {
 		if strings.Contains(line, v) {
 			return true

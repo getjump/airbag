@@ -381,13 +381,26 @@ defer:
   - npm publish
 ```
 
-Each entry is a program and the words that pick its calls: `gh pr create` holds
-`gh pr create --title x` and `gh -R org/repo pr create`, while `gh pr list` runs
+Each entry is a program and the words that pick its calls: `gh pr create` selects
+PR creation, including `gh -R org/repo pr create`, while `gh pr list` runs
 in the sandbox as before. airbag puts a shim for the program first in the agent's
 PATH. The agent gets `queued as intent i-N` and carries on; review lists the call
 with the files it names. A call by full path (`/usr/bin/gh`) skips the shim and runs
 in the sandbox, so `defer:` is a convenience: the boundary is still that the agent
 holds no credentials.
+
+New `gh pr create` calls use a [typed request and preview](docs/typed-pr-outbox.md):
+commit the result first and supply explicit `--repo`, `--base`, `--head`,
+`--title` and `--body` or `--body-file`. The body bytes and exact head commit are
+frozen; incomplete/unsupported calls are refused. `airbag outbox [ID] [--json]`
+shows the exact proposed PR without a network call. Execution rebuilds a fixed
+GitHub API request after separate approval, checks the selected and remote
+commits, and verifies the returned PR. An uncertain result is never retried:
+the intents after it wait until you check GitHub and record what happened with
+`airbag outbox resolve INTENT done|failed`.
+It can run after branch import when that branch matches the captured commit
+and the intended remote head has already been pushed. Other deferred commands
+and old sessions use the generic behavior below.
 
 The command runs on your machine, with your environment and credentials, after
 `airbag apply` has written the files:
@@ -407,9 +420,10 @@ The command runs on your machine, with your environment and credentials, after
   directories) do not count; links to any directory outside, `/usr` included, or
   to a configuration file anyone may read, do. Remove
   or replace the links, or after inspecting them run `airbag apply --trust-links`;
-- after a failure the rest wait, since a pull request without its push means
-  nothing; after `apply --branch` they all wait, because the working tree is not
-  the result; if the session changed `.git/config` or hooks, they wait for
+- after a failure the rest wait in that apply, since a pull request without its push
+  means nothing; after an unknown outcome they wait until you record what happened
+  (`airbag outbox resolve`); after `apply --branch` generic commands wait, because the
+  working tree is not the result; if the session changed `.git/config` or hooks, they wait for
   `--trust-git`, as pushes do, and run with hooks and fsmonitor off;
 - rules see the call as an `intent.cmd` effect, so
   `'"untrusted" in session.labels && effect.kind == "intent.cmd"'` can refuse
@@ -498,8 +512,9 @@ tests, `nix develop` gives a shell with Go and the test tools.
 One static binary, no daemon, no Docker. Needs Linux 5.12+ with unprivileged user
 namespaces. On Ubuntu 23.10+ AppArmor restricts them; `airbag doctor` prints the
 one-time profile to install. On macOS there is a native prototype (Seatbelt
-around the agent, an APFS clone as the branch), not yet tried on a real Mac, and the
-Linux VM setup that works today; see [docs/macos.md](docs/macos.md).
+around the agent, an APFS clone as the branch), tested in CI on macOS 15 and 26 but
+not yet used on real work, and the Linux VM setup that works today; see
+[docs/macos.md](docs/macos.md).
 
 ## Status
 
