@@ -398,9 +398,12 @@ The command runs on your machine, with your environment and credentials, after
   and a file outside the workspace is refused when the agent queues the call
   (`/tmp` in the sandbox is not yours); pass text inline or put the file in the
   workspace; a call that names a secret file (`.env`, a key) is refused, and so is
-  one with a relative name, or a name under the workspace, that leads out of it
-  or to a secret file (`../x`, or through a link: `notes.md -> .env`,
-  `docs -> ~/.config`), or that runs in a directory outside it;
+  one that names the session's own storage;
+- while links the session put in your files lead into your home outside the
+  workspace, to a secret file or nowhere (`notes.md -> .env`, `docs -> ~/.config`),
+  the commands wait, whatever their arguments say: an argument that is or runs
+  through such a link would read or write there without showing it; remove or
+  replace the links and they run;
 - after a failure the rest wait, since a pull request without its push means
   nothing; after `apply --branch` they all wait, because the working tree is not
   the result; if the session changed `.git/config` or hooks, they wait for

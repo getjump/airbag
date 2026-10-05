@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
@@ -242,66 +243,56 @@ func TestCmdProgramLinkedIntoWorkspace(t *testing.T) {
 	}
 }
 
-// A name in the workspace that leads out of it, or to a secret file, is
-// not handed to a host program: the user confirms the command by its
-// arguments, which do not show where the name leads.
-func TestCmdArgumentLinkedOut(t *testing.T) {
-	outside := t.TempDir()
-	if err := os.WriteFile(filepath.Join(outside, "hosts.yml"), []byte("token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+// A deferred command waits while the session's links in the real files
+// lead into $HOME outside the workspace, to a secret file or nowhere: an
+// argument that is or runs through one reads or writes there without
+// showing it, however it is spelled.
+func TestCmdWaitsForLinksOut(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		make func(ws string) error
-		args []string
+		make func(ws, home string) (string, error) // the link; its path is recorded as applied
 		runs bool
 	}{
-		{"to a secret file", func(ws string) error {
+		{"to a secret file", func(ws, _ string) (string, error) {
 			_ = os.WriteFile(filepath.Join(ws, ".env"), []byte("TOKEN=x\n"), 0o600)
-			return os.Symlink(".env", filepath.Join(ws, "notes.md"))
-		}, []string{"--body-file", "notes.md"}, false},
-		{"as an option value", func(ws string) error {
-			return os.Symlink(filepath.Join(outside, "hosts.yml"), filepath.Join(ws, "notes.md"))
-		}, []string{"--body-file=notes.md"}, false},
-		{"through a linked directory", func(ws string) error {
-			return os.Symlink(outside, filepath.Join(ws, "docs"))
-		}, []string{"docs/hosts.yml"}, false},
-		{"to a file not there yet", func(ws string) error {
-			return os.Symlink(filepath.Join(outside, "new.txt"), filepath.Join(ws, "out.txt"))
-		}, []string{"--output", "out.txt"}, false},
-		{"under a linked directory, not there yet", func(ws string) error {
-			return os.Symlink(outside, filepath.Join(ws, "dist"))
-		}, []string{"dist/report.txt"}, false},
-		{"with .. after a link", func(ws string) error {
-			if err := os.MkdirAll(filepath.Join(outside, "dir"), 0o755); err != nil {
-				return err
-			}
-			return os.Symlink(filepath.Join(outside, "dir"), filepath.Join(ws, "link"))
-		}, []string{"link/../hosts.yml"}, false},
-		{"absolute, through a link", func(ws string) error {
-			return os.Symlink(outside, filepath.Join(ws, "docs"))
-		}, []string{"WS/docs/hosts.yml"}, false},
-		{"after a short option", func(ws string) error {
-			return os.Symlink(filepath.Join(outside, "hosts.yml"), filepath.Join(ws, "notes.md"))
-		}, []string{"-onotes.md"}, false},
-		{"above the workspace", func(string) error { return nil }, []string{"../elsewhere.txt"}, false},
-		{"inside the workspace", func(ws string) error {
+			return filepath.Join(ws, "notes.md"), os.Symlink(".env", filepath.Join(ws, "notes.md"))
+		}, false},
+		{"to a secret file in another case", func(ws, _ string) (string, error) {
+			_ = os.WriteFile(filepath.Join(ws, ".ENV"), []byte("TOKEN=x\n"), 0o600)
+			return filepath.Join(ws, "notes.md"), os.Symlink(".ENV", filepath.Join(ws, "notes.md"))
+		}, false},
+		{"into home", func(ws, home string) (string, error) {
+			_ = os.WriteFile(filepath.Join(home, "hosts.yml"), []byte("token\n"), 0o600)
+			return filepath.Join(ws, "docs"), os.Symlink(home, filepath.Join(ws, "docs"))
+		}, false},
+		{"nowhere, into home", func(ws, home string) (string, error) {
+			return filepath.Join(ws, "out.txt"), os.Symlink(filepath.Join(home, ".bashrc"), filepath.Join(ws, "out.txt"))
+		}, false},
+		{"in a loop of links", func(ws, _ string) (string, error) {
+			_ = os.Symlink("b", filepath.Join(ws, "a"))
+			return filepath.Join(ws, "notes.md"), os.Symlink("a/x", filepath.Join(ws, "notes.md"))
+		}, false},
+		{"from home into home", func(_, home string) (string, error) {
+			return filepath.Join(home, "notes.md"), os.Symlink(filepath.Join(home, ".netrc-like"), filepath.Join(home, "notes.md"))
+		}, false},
+		{"inside the workspace", func(ws, _ string) (string, error) {
 			_ = os.WriteFile(filepath.Join(ws, "body.md"), []byte("ok\n"), 0o644)
-			_ = os.MkdirAll(filepath.Join(ws, "sub"), 0o755)
-			return os.Symlink("body.md", filepath.Join(ws, "notes.md"))
-		}, []string{"--body-file", "notes.md", "--title", "Fix it", "sub/../body.md", "--repo", "getjump/airbag", "WS/body.md", "/usr/share"}, true},
+			return filepath.Join(ws, "notes.md"), os.Symlink("body.md", filepath.Join(ws, "notes.md"))
+		}, true},
+		{"to a system file", func(ws, _ string) (string, error) {
+			return filepath.Join(ws, "python"), os.Symlink("/bin/sh", filepath.Join(ws, "python"))
+		}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, box := testBox(t)
+			s.Home = filepath.Dir(s.Workspace) // the workspace is in $HOME
 			log := tool(t, "pubtool", "0")
-			if err := c.make(s.Workspace); err != nil {
+			link, err := c.make(s.Workspace, s.Home)
+			if err != nil {
 				t.Fatal(err)
 			}
-			args := make([]string, len(c.args))
-			for i, a := range c.args {
-				args[i] = strings.Replace(a, "WS", s.Workspace, 1)
-			}
-			it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: append([]string{"pubtool"}, args...), Cwd: s.Workspace})
+			s.Applied = map[string]time.Time{link: time.Now()}
+			it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "--body-file", "notes.md"}, Cwd: s.Workspace})
 			var out bytes.Buffer
 			if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
 				t.Fatal(err)
@@ -309,27 +300,37 @@ func TestCmdArgumentLinkedOut(t *testing.T) {
 			if got := ran(log) != ""; got != c.runs {
 				t.Fatalf("ran = %v, want %v: %q", got, c.runs, out.String())
 			}
-			if !c.runs && status(t, box, it.ID) != outbox.Rejected {
-				t.Fatalf("not rejected: %q", out.String())
+			if c.runs {
+				return
+			}
+			if status(t, box, it.ID) != outbox.Pending || !strings.Contains(out.String(), link) {
+				t.Fatalf("not held, or the link not named: %q", out.String())
+			}
+			// Once the user removes the link, the command runs.
+			if err := os.Remove(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+				t.Fatal(err)
+			}
+			if ran(log) == "" {
+				t.Fatalf("held after the link was removed: %q", out.String())
 			}
 		})
 	}
 }
 
-// The command does not run in a directory of the workspace that is a
-// link out of it.
-func TestCmdCwdLinkedOut(t *testing.T) {
+// An argument naming the session's own storage is refused, whatever the
+// spelling around its ID.
+func TestCmdNamesSessionStorage(t *testing.T) {
 	s, box := testBox(t)
 	log := tool(t, "pubtool", "0")
-	if err := os.Symlink(t.TempDir(), filepath.Join(s.Workspace, "sub")); err != nil {
-		t.Fatal(err)
-	}
-	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: filepath.Join(s.Workspace, "sub")})
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "--body-file=//var/tmp/airbag-501/S-TEST/./ws/clone/notes.md"}, Cwd: s.Workspace})
 	var out bytes.Buffer
 	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
 		t.Fatal(err)
 	}
 	if ran(log) != "" || status(t, box, it.ID) != outbox.Rejected {
-		t.Fatalf("ran in a linked directory: %q", out.String())
+		t.Fatalf("ran on the session's storage: %q", out.String())
 	}
 }

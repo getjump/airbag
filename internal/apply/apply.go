@@ -385,7 +385,7 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 		case outbox.KindPush:
 			status, err = runPush(s, box, it, risky, in, o)
 		case outbox.KindCmd:
-			status, err = runCmd(s, box, it, risky, in, o)
+			status, err = runCmd(s, box, it, risky, linksOut(s), in, o)
 		default:
 			status, err = reject(box, it, "unknown kind "+it.Kind, o)
 		}
@@ -482,7 +482,7 @@ func runPush(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, 
 // machine's PATH and not from the workspace, the files it names must
 // hold what they held when it was queued, and the user confirms each
 // one; --yes does not.
-func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, in *bufio.Reader, o Options) (string, error) {
+func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, links []string, in *bufio.Reader, o Options) (string, error) {
 	line := outbox.Line(it.Argv)
 	if s.Branch != "" {
 		// The working tree is not the session's result, so there is
@@ -502,9 +502,16 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, i
 	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, s.Workspace) {
 		return reject(box, it, fmt.Sprintf("%s resolves to %s, inside the workspace; deferred commands run only programs from outside it", it.Argv[0], prog), o)
 	}
-	if a := linkedOut(s.Workspace, cwd, it.Argv[1:]); a != "" {
-		return reject(box, it, fmt.Sprintf("%s leads out of the workspace (through a link or ..) or to a secret file; "+
-			"the command would read or write there, which its arguments do not show; run it yourself if you mean to", a), o)
+	if a := namesSession(s, it.Argv[1:]); a != "" {
+		return reject(box, it, fmt.Sprintf("%s names session %s's own storage, which holds what the agent wrote; "+
+			"name the file in the workspace instead, or run it yourself", a, s.ID), o)
+	}
+	if len(links) > 0 {
+		fmt.Fprintf(o.Out, "intent %s (`%s`) left pending: session %s put links in your files that lead into your home, "+
+			"to a secret file or nowhere: %s. The command could read or write through them, which its arguments do not show. "+
+			"Remove or replace them, then `airbag apply %s` runs it; or run it yourself\n",
+			it.ID, line, s.ID, strings.Join(links, ", "), s.ID)
+		return outbox.Pending, nil
 	}
 	rels := make([]string, 0, len(it.Files))
 	for rel := range it.Files {
@@ -574,62 +581,77 @@ func hostDir(s *session.Session, dir string) string {
 	return dir
 }
 
-// linkedOut returns the first argument that leads out of the
-// workspace or to a secret file, or the working directory when it is
-// outside. The agent can make links in the workspace (notes.md -> .env,
-// docs -> ~/.config), and a deferred command is confirmed by its
-// arguments, which do not show where such a name leads. Each name is
-// followed as the kernel follows it (see follow); an absolute name
-// outside the workspace is left alone, since it shows where it goes.
-func linkedOut(ws, cwd string, args []string) string {
-	realWS, err := filepath.EvalSymlinks(ws)
+// linksOut lists the links this session put in the real files that
+// lead into $HOME outside the workspace, to a secret file, or nowhere
+// (a write would create what they name): link and where it leads. A
+// deferred command is confirmed by its arguments, and an argument that
+// is, or runs through, such a link reads or writes there without
+// showing it (notes.md -> ~/.env, docs -> ~/.config). Each is checked
+// as it is now: one the user removed or replaced no longer counts.
+func linksOut(s *session.Session) []string {
+	realWS, err := filepath.EvalSymlinks(s.Workspace)
 	if err != nil {
-		return ws
+		realWS = s.Workspace
 	}
-	realCwd, err := filepath.EvalSymlinks(cwd)
-	if err != nil || !within(realCwd, realWS) {
-		return cwd
+	realHome, err := filepath.EvalSymlinks(s.Home)
+	if err != nil {
+		realHome = s.Home
 	}
-	for _, a := range args {
-		for _, p := range pathsIn(a) {
-			start := realCwd
-			if filepath.IsAbs(p) {
-				if !strings.HasPrefix(p, ws+"/") && !strings.HasPrefix(p, realWS+"/") {
-					continue
+	paths := make([]string, 0, len(s.Applied))
+	for p := range s.Applied {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	var out []string
+	for _, p := range paths {
+		fi, err := os.Lstat(p)
+		if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+			continue
+		}
+		t, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			// Dangling: where a write through it would land.
+			text, rerr := os.Readlink(p)
+			dir, derr := filepath.EvalSymlinks(filepath.Dir(p))
+			ok := rerr == nil && derr == nil
+			if ok {
+				if filepath.IsAbs(text) {
+					dir = "/"
 				}
-				start = "/"
+				t, ok = follow(dir, text)
 			}
-			real, ok := follow(start, p)
-			if !ok || !within(real, realWS) || secretfs.IsSecret(filepath.Base(real)) {
-				return a
+			if !ok {
+				out = append(out, p+" -> (nowhere)")
+				continue
 			}
+		}
+		home := s.Home != "" && within(t, realHome) && !within(t, realWS)
+		if home || secretfs.IsSecret(strings.ToLower(filepath.Base(t))) {
+			out = append(out, p+" -> "+t)
+		}
+	}
+	return out
+}
+
+// namesSession returns the first argument that names this session's own
+// storage (the clone or upper layer, which hold what the agent wrote and,
+// on macOS, copies of your files, links included), in any spelling that
+// carries the session's ID.
+func namesSession(s *session.Session, args []string) string {
+	id := strings.ToLower(s.ID)
+	for _, a := range args {
+		if id != "" && strings.Contains(strings.ToLower(a), id) {
+			return a
 		}
 	}
 	return ""
 }
 
-// pathsIn returns what in an argument may be a path: the argument, the
-// value of --opt=value or -o=value, or what follows a short option
-// (-ofile).
-func pathsIn(a string) []string {
-	if !strings.HasPrefix(a, "-") {
-		return []string{a}
-	}
-	if _, v, ok := strings.Cut(a, "="); ok {
-		return []string{v}
-	}
-	if !strings.HasPrefix(a, "--") && len(a) > 2 {
-		return []string{a[2:]}
-	}
-	return nil
-}
-
 // follow resolves name from the real directory dir one component at a
 // time, as the kernel does: a link is replaced by where it leads before
-// a later ".." applies (link/../x is beside the link's target, not
-// beside the link). The part that does not exist yet is joined on as
-// written. ok is false for a link that leads nowhere, whose target a
-// write would create, or a loop of links.
+// a later ".." applies. The part that does not exist yet is joined on as
+// written. ok is false for a link on the way that leads nowhere or a
+// loop of links.
 func follow(dir, name string) (string, bool) {
 	cur := dir
 	parts := strings.Split(name, "/")
