@@ -173,28 +173,46 @@ func TestAddClaudeProjectStateIgnoresEmptyScaffolding(t *testing.T) {
 	}
 }
 
-// A memory file with another name keeps its project out of the
-// passthrough: written through that name, it would change for real.
-func TestHardLinkedIn(t *testing.T) {
+// A file with another name keeps the passed-through path it is in out
+// of the passthrough: written through its name there, it would change
+// for real. A memory file in a hole of the path counts too.
+func TestHardLinked(t *testing.T) {
 	home := t.TempDir()
 	proj, hole := ".claude/projects/x", ".claude/projects/x/memory"
 	if err := os.MkdirAll(filepath.Join(home, hole), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	mem := filepath.Join(home, hole, "MEMORY.md")
-	if err := os.WriteFile(mem, []byte("notes\n"), 0o600); err != nil {
-		t.Fatal(err)
+	transcript := filepath.Join(home, proj, "s.jsonl")
+	for _, f := range []string{mem, transcript, filepath.Join(home, ".bashrc"), filepath.Join(home, ".claude/.credentials.json")} {
+		if err := os.WriteFile(f, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := hardLinkedIn(home, proj, []string{hole}); got != "" {
-		t.Fatalf("no link: %q", got)
-	}
-	if got := hardLinkedIn(home, proj, []string{".claude/projects/y/memory"}); got != "" {
-		t.Fatalf("a hole of another project or a missing one: %q", got)
+	for _, p := range []string{proj, ".claude/.credentials.json", ".claude/projects/y"} {
+		if got := hardLinked(home, p); got != "" {
+			t.Fatalf("%s, no link: %q", p, got)
+		}
 	}
 	if err := os.Link(mem, filepath.Join(home, proj, "t.jsonl")); err != nil {
 		t.Fatal(err)
 	}
-	if got := hardLinkedIn(home, proj, []string{hole}); got != hole+"/MEMORY.md" {
-		t.Fatalf("linked: %q", got)
+	if got := hardLinked(home, proj); got == "" {
+		t.Fatal("a memory file with a transcript-side name")
+	}
+	if err := os.Remove(filepath.Join(home, proj, "t.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(home, ".bashrc"), filepath.Join(home, proj, "b.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if got := hardLinked(home, proj); got != proj+"/b.jsonl" {
+		t.Fatalf("a transcript linked to ~/.bashrc: %q", got)
+	}
+	if err := os.Link(filepath.Join(home, ".claude/.credentials.json"), filepath.Join(home, ".claude.json")); err != nil {
+		t.Fatal(err)
+	}
+	if got := hardLinked(home, ".claude/.credentials.json"); got != ".claude/.credentials.json" {
+		t.Fatalf("a passed-through file with another name: %q", got)
 	}
 }

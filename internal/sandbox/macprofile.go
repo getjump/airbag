@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -66,6 +67,12 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 		p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(d, "/")))
 	}
 	for _, f := range s.Passthrough {
+		// Seatbelt rules match paths, so a file there with another name
+		// elsewhere would be written through this one: not writable.
+		if l := hardLinked(s.Home, strings.TrimSuffix(f, "/")); l != "" {
+			fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s stays read-only (~/%s has another hard link)\n", f, l)
+			continue
+		}
 		if strings.HasSuffix(f, "/") {
 			p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(f, "/")))
 		} else {

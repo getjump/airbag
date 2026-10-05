@@ -235,3 +235,31 @@ func TestMacProfileDeniesLinkedReadOnlyState(t *testing.T) {
 		t.Errorf("dotfiles/ may be renamed: %v", p.NoWriteRegex)
 	}
 }
+
+// A passed-through file with another hard-linked name stays read-only:
+// Seatbelt would let a write through this name reach the other.
+func TestMacProfileHardLinkedPassthroughReadOnly(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".bashrc"), []byte("# rc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(home, ".bashrc"), filepath.Join(home, ".claude/.credentials.json")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true, Passthrough: []string{".claude/.credentials.json"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := filepath.EvalSymlinks(home)
+	if slices.Contains(p.WriteFiles, filepath.Join(h, ".claude/.credentials.json")) {
+		t.Errorf("the hard-linked passthrough is writable: %v", p.WriteFiles)
+	}
+}
