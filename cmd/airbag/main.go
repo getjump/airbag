@@ -200,6 +200,11 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 		s.Argv, s.Cwd = argv, cwd
+		// A session from an older airbag may have stored a wider
+		// passthrough; keep only today's. This run's directory may have
+		// its own transcript directory.
+		sandbox.NarrowPassthrough(s)
+		sandbox.AddClaudeProjectState(s, cwd)
 		for _, h := range allow {
 			if !slices.Contains(s.Allow, h) {
 				s.Allow = append(s.Allow, h)
@@ -221,11 +226,16 @@ func cmdRun(args []string) (int, error) {
 		}
 		fmt.Fprintf(os.Stderr, "airbag: resuming session %s (run %d) on its branch\n", s.ID, s.Runs)
 	} else {
+		// The current workspace's transcript directory passes through so
+		// resume works across a discard; its memory/ stays in the branch.
+		pass := append([]string{}, sandbox.DefaultPassthrough...)
+		projPass, holes := sandbox.ClaudeProjectState(cwd, ws)
+		pass = append(pass, projPass...)
 		meta := session.Meta{
 			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
-			Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
+			Passthrough: pass, BranchHoles: holes, Hidden: hidden, HiddenHost: hiddenHost,
 			PassEnv: passEnv, Strict: *strict, Forwards: forwards,
 		}
 		if runtime.GOOS == "darwin" {
@@ -268,6 +278,9 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 	}
+	// Which agent configs the real $HOME has now, so apply can tell a
+	// host removal from a new file (sandbox.Run saves the session).
+	review.NoteHostConfigs(s)
 	code, err := sandbox.Run(s, proxy.Allowlist(s.Allow), pol)
 	if err != nil {
 		return code, err

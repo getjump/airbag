@@ -76,8 +76,8 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 	for _, c := range cs {
 		if c.Layer == "ws" {
 			wsChanges = append(wsChanges, c)
-		} else {
-			home = append(home, c)
+		} else if !review.Dropped(c) {
+			home = append(home, c) // what apply leaves out does not keep the session open
 		}
 	}
 	if !s.Clone {

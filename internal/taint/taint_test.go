@@ -3,6 +3,7 @@ package taint
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSet(t *testing.T) {
@@ -34,5 +35,27 @@ func TestSet(t *testing.T) {
 	}
 	if got := strings.Join(s.Labels(), ","); got != "secret,untrusted" {
 		t.Fatalf("Labels = %q", got)
+	}
+}
+
+// A later Add returns only once the first Add's hooks have run: a
+// secret read retried after its report gave up waiting must not go on
+// while the first report still closes tunnels.
+func TestAddWaitsForHooks(t *testing.T) {
+	s := NewSet()
+	release, running := make(chan struct{}), make(chan struct{})
+	s.OnAdd(func(Label, string) { close(running); <-release })
+	go s.Add(Secret, ".env")
+	<-running
+	second := make(chan bool)
+	go func() { second <- s.Add(Secret, ".env") }()
+	select {
+	case <-second:
+		t.Fatal("the second Add returned while the hooks ran")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if <-second {
+		t.Fatal("the second Add reported the label new")
 	}
 }

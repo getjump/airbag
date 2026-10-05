@@ -60,7 +60,7 @@ type ReportChange struct {
 
 // ReportItem is one thing the human should decide on.
 type ReportItem struct {
-	What   string `json:"what"`   // change, intent, blocked, secret, deletions
+	What   string `json:"what"`   // change, intent, blocked, secret, deletions, log
 	Target string `json:"target"` // a path, an intent ID, a host
 	Why    string `json:"why"`
 }
@@ -131,27 +131,34 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			deleted++
 		}
 	}
-	for _, c := range Attention(cs) {
-		target := filepath.ToSlash(c.Rel)
-		if c.Layer == "home" {
+	for _, a := range attentionLines(cs) {
+		if a.c == nil {
+			r.Attention = append(r.Attention, ReportItem{What: "change", Target: "~/" + a.group, Why: gitDirWhy(a.n)})
+			continue
+		}
+		target := filepath.ToSlash(a.c.Rel)
+		if a.c.Layer == "home" {
 			target = "~/" + target
 		}
-		r.Attention = append(r.Attention, ReportItem{What: "change", Target: target, Why: strings.Join(withoutOutside(c.Flags), ", ")})
+		r.Attention = append(r.Attention, ReportItem{What: "change", Target: target, Why: attentionWhy(*a.c)})
 	}
 	if deleted > manyDeletions {
 		r.Attention = append(r.Attention, ReportItem{What: "deletions", Target: s.Workspace, Why: fmt.Sprintf("%d files deleted in the workspace", deleted)})
 	}
 
 	seenU, seenPkg := map[string]bool{}, map[string]bool{}
+	dropped := map[string]int{}
 	for _, e := range effs {
 		switch {
+		case e.Kind == effects.Dropped:
+			dropped[e.Target] += effects.DroppedCount(e)
 		case e.Kind == "net.egress" || e.Kind == "net.tcp":
 			host, _, err := net.SplitHostPort(e.Target)
 			if err != nil {
 				host = e.Target
 			}
 			switch e.Verdict {
-			case "deny":
+			case "deny", "ask":
 				r.Network.Denied[e.Target]++
 			case "cut":
 				r.Network.Cut[e.Target]++
@@ -175,6 +182,10 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			r.Attention = append(r.Attention, ReportItem{What: "blocked", Target: e.Target, Why: e.Verdict + " by " + orUnnamed(e.Reason)})
 		}
 	}
+	for _, kind := range sortedKeys(dropped) {
+		r.Attention = append(r.Attention, ReportItem{What: "log", Target: kind,
+			Why: fmt.Sprintf("%d refusals not logged: more than %d a second", dropped[kind], effects.RefuseRate)})
+	}
 	secrets := knownSecrets(s.Workspace)
 	for _, in := range intents {
 		r.Outbox = append(r.Outbox, ReportIntent{ID: in.ID, Kind: in.Kind, Argv: in.Argv, Status: in.Status, Files: in.Files, Request: in.Request, RequestDigest: in.RequestDigest})
@@ -193,7 +204,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 }
 
 func attentionRank(what string) int {
-	return map[string]int{"secret": 0, "change": 1, "deletions": 2, "intent": 3, "blocked": 4}[what]
+	return map[string]int{"secret": 0, "change": 1, "deletions": 2, "intent": 3, "blocked": 4, "log": 5}[what]
 }
 
 func orUnnamed(rule string) string {
@@ -218,6 +229,6 @@ func WriteAttention(w io.Writer, r Report) {
 	}
 	fmt.Fprintf(w, "Session %s: %d things need a decision\n", r.Session.ID, len(r.Attention))
 	for _, a := range r.Attention {
-		fmt.Fprintf(w, "  %-9s %-40s %s\n", a.What, clip(a.Target, 40), a.Why)
+		fmt.Fprintf(w, "  %-9s %-40s %s\n", a.What, clip(OneLine(a.Target), 40), a.Why)
 	}
 }

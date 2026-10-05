@@ -122,13 +122,50 @@ $ ./airbag review              # then apply, apply --branch NAME, or discard
 | | Linux | macOS prototype |
 |---|---|---|
 | Workspace branch | overlayfs, at the workspace's own path | an APFS clone (`cp -c`) in the session directory; the agent works at that path |
-| `$HOME` | a branch, reviewed | read-only, except the agent's state (`~/.claude`, `~/.codex`, without their settings, hooks and instructions); caches (`TMPDIR`, Go, npm, pip, uv, cargo) point into the session |
+| `$HOME` | a branch, reviewed: agent state goes through the branch, only the login and this workspace's transcripts pass through | read-only, except the agent's state (`~/.claude`, `~/.codex`), within which settings, hooks, rules, output styles, workflows, agent memory and instructions stay read-only; caches (`TMPDIR`, Go, npm, pip, uv, cargo) point into the session |
+| Agent state in `$HOME` | through the branch (one `agent state` line in review), dropped on discard | writable in place, persists, not reviewed (no branch of `$HOME`) |
+| `~/.claude.json` | through the branch, reviewed by key name: counters listed as benign, MCP servers, permissions and trust flagged `persist`; nothing reaches the real file before apply | writable in place, persists in full, not reviewed |
+| A project's `memory/` | in the branch, flagged `agent instructions`, dropped on discard | every project's `memory/` denied by the profile: an edit fails rather than being reviewed |
 | Network | network namespace, only the proxy | Seatbelt allows outbound traffic only to the proxy's localhost port and airbag's control socket |
 | Secret files | served through FUSE, a read taints the session | not readable at all, in the clone or the real workspace (no FUSE, so a read could not be tracked) |
 | Credentials | hidden by bind mounts | denied by the profile |
 | Shims, outbox, mirror, policies, review, apply, rollback, `--branch`, `--session` | yes | the same code |
 | Agent hooks (steps per tool call) | managed settings in a private `/etc` | not installed: managed settings need root on macOS |
 | Terminal | a pseudo-terminal of its own, TIOCSTI filtered | the agent shares your terminal |
+
+Because the prototype has no branch of `$HOME`, the narrowing that keeps agent
+state out of the real files on Linux cannot be expressed in full by the Seatbelt
+profile. What it does express: writing any project's `memory/` is denied, as are
+the instruction and settings files listed above, so Claude Code's auto-memory
+cannot persist unreviewed (the cost is that a memory edit fails instead of being
+dropped on discard). Because a deny on a path does not cover renaming one of its
+ancestors, `~/.claude`, `~/.codex`, `~/.claude/projects` and each project
+directory cannot be created, removed or renamed either; airbag makes this
+workspace's project directory before the run. Seatbelt checks the path a write
+resolves to, so a `memory/` that is a link, or lies under a linked project
+directory or a linked `~/.claude/projects`, is denied where it really is too,
+with the directories above that place. Seatbelt rules match paths, not files: a
+file in a passed-through path that has another hard-linked name is denied (the
+whole path, when it cannot be checked in full), and when a memory file or other
+protected file has another name, or the protected files cannot all be checked,
+both `~/.claude` and `~/.codex` stay read-only for the session, since a write
+through that name would not be a write to the denied path. A protected path that
+is a link (a `hooks/` kept in a dotfiles repository) is checked where it leads.
+This is checked when the session starts, and counts every other name, even one
+outside any place the agent may write: a dotfiles setup that hard-links
+`~/.claude/CLAUDE.md` makes the state read-only, and airbag says which file to
+turn into a copy or a symlink. What it cannot:
+`~/.claude.json` stays writable, so a change to it — including MCP servers,
+permissions and per-project trust — persists in full without review, and the
+rest of `~/.claude` and `~/.codex` persists as before. Protection there is by
+path, and Seatbelt matches paths, not files: a protected file with another name in
+a place the agent may write (`~/.claude.json`, a temporary directory) can be
+written through that name. airbag does not add a rule for each such layout; the
+fix is to give the agent its state in the session instead (see the roadmap), or a
+branch of `$HOME` on macOS (the NFS overlay, step 2 above), after which the same
+code path applies. Independently of the platform, Codex keys its
+transcripts by date (`~/.codex/sessions/<year>/<month>/…`), not by project, so a
+discard keeps every project's Codex transcripts, not only this workspace's.
 
 What to report from a first run: whether Claude Code and Codex start and finish a
 task, which Seatbelt denials they hit (`log stream --predicate 'eventMessage
