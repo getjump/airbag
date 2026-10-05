@@ -266,3 +266,51 @@ func TestCmdProgramLinkedIntoWorkspace(t *testing.T) {
 		t.Fatalf("ran a program from the workspace: %q", out.String())
 	}
 }
+
+// After an outcome that is not known, the intents queued later wait
+// until the user records what happened; then they run.
+func TestUnknownHoldsLaterIntentsUntilResolved(t *testing.T) {
+	s, box := testBox(t)
+	log := tool(t, "pubtool", "0")
+	push, _ := box.Push(outbox.Intent{Kind: outbox.KindPush, Argv: []string{"git", "push", "origin", "main"}, Cwd: s.Workspace})
+	push.Status, push.Output = outbox.Unknown, "airbag stopped while this ran"
+	if err := box.Update(push); err != nil {
+		t.Fatal(err)
+	}
+	cmd, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: s.Workspace})
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if ran(log) != "" || !strings.Contains(out.String(), "airbag outbox resolve "+push.ID) {
+		t.Fatalf("ran after an unknown outcome: %q", out.String())
+	}
+	if err := box.Resolve(cmd.ID, true); err == nil {
+		t.Fatal("recorded an outcome for a pending intent")
+	}
+	if err := box.Resolve(push.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if ran(log) == "" || status(t, box, cmd.ID) != outbox.Done || status(t, box, push.ID) != outbox.Done {
+		t.Fatalf("did not run after the outcome was recorded: %q", out.String())
+	}
+}
+
+// A command left pending by --yes holds nothing back.
+func TestPendingCmdDoesNotHoldLaterIntents(t *testing.T) {
+	s, box := testBox(t)
+	log := tool(t, "pubtool", "0")
+	first, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "one"}, Cwd: s.Workspace})
+	second, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "two"}, Cwd: s.Workspace})
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("n\ny\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if status(t, box, first.ID) != outbox.Rejected || status(t, box, second.ID) != outbox.Done || !strings.Contains(ran(log), "two") {
+		t.Fatalf("first %s, second %s: %q", status(t, box, first.ID), status(t, box, second.ID), out.String())
+	}
+}

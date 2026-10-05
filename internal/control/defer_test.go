@@ -59,9 +59,9 @@ func ask(t *testing.T, s *Server, in outbox.Intent) DeferReply {
 }
 
 func TestDeferQueues(t *testing.T) {
-	s := deferServer(t, "defer: [gh pr create]\n")
+	s := deferServer(t, "defer: [pubtool release]\n")
 	notes := filepath.Join(s.Root, "docs", "notes.md")
-	d := ask(t, s, outbox.Intent{Argv: []string{"gh", "pr", "create", "--body-file", notes}, Cwd: s.Root,
+	d := ask(t, s, outbox.Intent{Argv: []string{"pubtool", "release", "--body-file", notes}, Cwd: s.Root,
 		Files: map[string]string{notes: "abc"}})
 	if d.Queued == nil || d.Queued.Kind != outbox.KindCmd || d.Queued.Files["docs/notes.md"] != "abc" {
 		t.Fatalf("not queued: %+v", d)
