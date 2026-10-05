@@ -285,7 +285,12 @@ Outbox     1
 ```
 
 `airbag review --attention` prints only what needs a decision: secret reads, flagged
-changes, many deletions, waiting pushes, blocked calls, refusals past the log's rate. `airbag review --json` prints
+changes, every change in `$HOME` that is not a cache, agent state or an agent config
+change of benign keys only, many deletions, waiting pushes, blocked calls, refusals
+past the log's rate. In `$HOME` a change is matched by where the write really landed,
+so one made through a link (`~/.bashrc` pointing into `~/dotfiles`) shows as a change
+to the link's target, which needs a decision even when review cannot tell what the
+link stands for. `airbag review --json` prints
 the whole review as data for editors and CI, with a versioned schema
 (`airbag.review/v1`; fields are only added within a version).
 

@@ -447,6 +447,11 @@ func privateGroup(gid int) bool {
 // or no other key changed.
 func configFlags(c Change) []string {
 	notes, _ := configNotes(c)
+	return withoutBenign(notes)
+}
+
+// withoutBenign drops the note that lists benign keys.
+func withoutBenign(notes []string) []string {
 	return slices.DeleteFunc(notes, func(n string) bool { return strings.HasPrefix(n, benignNote) })
 }
 

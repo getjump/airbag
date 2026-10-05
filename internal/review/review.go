@@ -42,6 +42,8 @@ type Change struct {
 	// $HOME it is in (classify).
 	cfg  *jsonConfig
 	home string
+	// benign: an agent config change of benign keys only (classify).
+	benign bool
 }
 
 func (c Change) IsDir() bool { return c.Type == fs.ModeDir }
@@ -254,7 +256,11 @@ func classify(s *session.Session, cs []Change) {
 			// keys, by class: "persist" only when one of them runs code
 			// or changes trust, unknown keys listed plainly, and benign
 			// counters with no flag, so they need no decision.
-			c.Flags = append(c.Flags, configFlags(*c)...)
+			if notes, ok := configNotes(*c); ok {
+				flags := withoutBenign(notes)
+				c.Flags = append(c.Flags, flags...)
+				c.benign = len(flags) == 0
+			}
 			// A file or link in place of a directory takes what was in it
 			// away, as a replacement does, though Scan says Modified.
 			kind := c.Kind
@@ -357,11 +363,14 @@ func Attention(cs []Change) []Change {
 		if c.IsDir() && c.Kind == Added {
 			continue // the files inside carry the flags
 		}
-		for _, f := range c.Flags {
-			if f != "outside workspace" {
-				out = append(out, c)
-				break
-			}
+		// In $HOME, where an agent has no work of its own, what is not
+		// known to be harmless needs a look too: what review folds
+		// (caches, agent state, git internals) and agent config changes
+		// of benign keys only are known. Matching is by where a write
+		// really landed, so one made through a link (~/.bashrc into
+		// ~/dotfiles) is under a name no table knows, and shows here.
+		if flagged(c) || c.Layer == "home" && folded(c) == "" && !c.benign {
+			out = append(out, c)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })

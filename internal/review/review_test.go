@@ -110,6 +110,58 @@ func TestScanAndClassify(t *testing.T) {
 	}
 }
 
+// In $HOME, a change review neither folds nor flags still needs a
+// decision: a write through a link (~/.bashrc pointing into ~/dotfiles)
+// lands under a name no table knows. Caches, agent state, benign-only
+// config changes and the workspace's unflagged files do not.
+func TestAttentionUnknownHome(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	root := t.TempDir()
+	ws, home := filepath.Join(root, "ws"), filepath.Join(root, "home")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(p, data string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(home, ".claude.json"), `{"numStartups":1}`)
+	write(filepath.Join(s.HomeUpper(), ".claude.json"), `{"numStartups":2}`)
+	write(filepath.Join(s.HomeUpper(), "dotfiles/bashrc"), "alias x=y\n")
+	write(filepath.Join(s.HomeUpper(), "notes/todo.txt"), "x")
+	write(filepath.Join(s.HomeUpper(), ".cache/pip/x"), "x")
+	write(filepath.Join(s.HomeUpper(), ".claude/todos/t.json"), "[]")
+	write(filepath.Join(s.HomeUpper(), "src/repo/.git/objects/ab/cd"), "x")
+	write(filepath.Join(s.WSUpper(), "main.go"), "package main\n")
+	if err := os.Symlink("/elsewhere", filepath.Join(s.HomeUpper(), ".cache/link")); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range Attention(cs) {
+		got = append(got, c.Layer+":"+c.Rel)
+	}
+	want := []string{"home:.cache/link", "home:dotfiles/bashrc", "home:notes/todo.txt"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("attention %v, want %v", got, want)
+	}
+	r := BuildReport(s, cs, nil, nil, nil)
+	for _, a := range r.Attention {
+		if a.Target == "~/notes/todo.txt" && a.Why != "in $HOME, not a cache or agent state" {
+			t.Errorf("why %q", a.Why)
+		}
+	}
+}
+
 func TestNoise(t *testing.T) {
 	for rel, want := range map[string]string{
 		".cache/go-build/ab/cd":            ".cache/ (cache)",

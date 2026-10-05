@@ -133,7 +133,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 		if c.Layer == "home" {
 			target = "~/" + target
 		}
-		r.Attention = append(r.Attention, ReportItem{What: "change", Target: target, Why: strings.Join(withoutOutside(c.Flags), ", ")})
+		r.Attention = append(r.Attention, ReportItem{What: "change", Target: target, Why: attentionWhy(c)})
 	}
 	if deleted > manyDeletions {
 		r.Attention = append(r.Attention, ReportItem{What: "deletions", Target: s.Workspace, Why: fmt.Sprintf("%d files deleted in the workspace", deleted)})

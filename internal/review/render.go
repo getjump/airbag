@@ -90,24 +90,18 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 
 	if s.OverHome {
 		fmt.Fprintf(w, "\nHome       %d changes outside the workspace\n", len(home))
-		folded := map[string]int{}
+		lines := map[string]int{}
 		var shown []Change
 		for _, c := range home {
-			// A symlink is never folded: applied, it would lead a later
-			// session's path somewhere else.
-			if group, kind := Noise(c.Rel); group != "" && !flagged(c) && c.Type != fs.ModeSymlink {
-				folded[group+"… ("+kind+")"]++
-				continue
-			}
-			if repo := GitDir(c.Rel); repo != "" && !flagged(c) {
-				folded[repo+"… (git internals)"]++
+			if line := folded(c); line != "" {
+				lines[line]++
 				continue
 			}
 			shown = append(shown, c)
 		}
 		list(w, shown, "~/")
-		for _, dir := range sortedKeys(folded) {
-			fmt.Fprintf(w, "  · ~/%s %d files\n", dir, folded[dir])
+		for _, dir := range sortedKeys(lines) {
+			fmt.Fprintf(w, "  · ~/%s %d files\n", dir, lines[dir])
 		}
 	}
 
@@ -217,7 +211,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	if att := Attention(cs); len(att) > 0 {
 		fmt.Fprintf(w, "\nAttention\n")
 		for _, c := range att {
-			fmt.Fprintf(w, "  ! %-40s %s\n", display(c), strings.Join(c.Flags, ", "))
+			fmt.Fprintf(w, "  ! %-40s %s\n", display(c), attentionWhy(c))
 		}
 	}
 	if d > 50 {
@@ -289,6 +283,32 @@ func OneLine(s string) string {
 }
 
 func flagged(c Change) bool { return len(withoutOutside(c.Flags)) > 0 }
+
+// folded returns the line review folds a change in $HOME into, "" when
+// the change is listed on its own: caches, agent state and git
+// internals, when they carry no flag. A symlink is never folded as a
+// cache or agent state: applied, it would lead a later session's path
+// somewhere else.
+func folded(c Change) string {
+	if c.Layer != "home" || flagged(c) {
+		return ""
+	}
+	if group, kind := Noise(c.Rel); group != "" && c.Type != fs.ModeSymlink {
+		return group + "… (" + kind + ")"
+	}
+	if repo := GitDir(c.Rel); repo != "" {
+		return repo + "… (git internals)"
+	}
+	return ""
+}
+
+// attentionWhy says why a change needs a decision.
+func attentionWhy(c Change) string {
+	if why := strings.Join(withoutOutside(c.Flags), ", "); why != "" {
+		return why
+	}
+	return "in $HOME, not a cache or agent state"
+}
 
 func withoutOutside(fl []string) []string {
 	var out []string

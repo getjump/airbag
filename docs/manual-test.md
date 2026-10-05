@@ -50,7 +50,7 @@ $ airbag diff
 - [ ] Steps list the agent's tool calls with the files each one changed;
 - [ ] Network shows `api.anthropic.com` and any denied hosts;
 - [ ] the real files are unchanged (`git status` is clean);
-- [ ] `airbag review --attention` lists the waiting push and any flagged change;
+- [ ] `airbag review --attention` lists the waiting push, any flagged change and any change in `$HOME` outside caches and agent state;
 - [ ] `airbag review --json | jq -r .schema` prints `airbag.review/v1`.
 
 ## Iterate, then take the result
