@@ -923,6 +923,37 @@ func TestAnswerHasWriteDeadline(t *testing.T) {
 	}
 }
 
+// The mirror's answers have no flow either: each pacedChunk of one goes
+// out within AnswerWrite, so a whole package written at once is bounded
+// per chunk, not as a whole.
+func TestMirrorAnswerIsPaced(t *testing.T) {
+	log, _ := newLog(t)
+	p := New(nil, log)
+	const size = 3*pacedChunk + 1
+	p.Mirror = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if n, err := w.Write(make([]byte, size)); n != size || err != nil {
+			t.Errorf("write: %d %v", n, err)
+		}
+	})
+	w := &deadlines{ResponseRecorder: httptest.NewRecorder()}
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://airbag.mirror/npm/x", nil)
+	before := time.Now()
+	p.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || w.Body.Len() != size {
+		t.Fatalf("%d, %d bytes", w.Code, w.Body.Len())
+	}
+	// The request's clear, the header's deadline, then one per chunk.
+	if len(w.set) != 1+1+4 || !w.set[0].IsZero() {
+		t.Fatalf("deadlines %v", w.set)
+	}
+	for _, d := range w.set[1:] {
+		if d.Before(before) || d.After(time.Now().Add(AnswerWrite)) {
+			t.Errorf("deadlines %v", w.set)
+		}
+	}
+}
+
 // Cut closes every flow before it writes the log, which another writer
 // may hold up: a secret read waits for the closes, not for the log.
 func TestCutClosesBeforeLogging(t *testing.T) {

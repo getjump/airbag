@@ -212,6 +212,47 @@ func answer(w http.ResponseWriter, msg string, code int) {
 	http.Error(w, msg, code)
 }
 
+// pacedChunk is how much of a paced answer must go out within
+// AnswerWrite.
+const pacedChunk = 64 << 10
+
+// paced writes the mirror's answers, which have no flow to close them
+// either and may be whole packages: each pacedChunk bytes must go out
+// within AnswerWrite. A client that asks for a package and reads none
+// of it would otherwise hold the connection in a blocked write; one
+// that reads slowly keeps going. What net/http writes after the
+// handler returns goes out under the last deadline, which the next
+// request on the connection clears (ServeHTTP).
+type paced struct {
+	http.ResponseWriter
+	rc *http.ResponseController
+}
+
+func (w paced) renew() { _ = w.rc.SetWriteDeadline(time.Now().Add(AnswerWrite)) }
+
+func (w paced) WriteHeader(code int) {
+	w.renew()
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w paced) Write(b []byte) (int, error) {
+	n := 0
+	for len(b) > 0 {
+		c := min(len(b), pacedChunk)
+		w.renew()
+		m, err := w.ResponseWriter.Write(b[:c])
+		n += m
+		if err != nil {
+			return n, err
+		}
+		b = b[c:]
+	}
+	return n, nil
+}
+
+// Unwrap lets a ResponseController reach the connection.
+func (w paced) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The previous response on this connection may have left a write
 	// deadline (answer, forward); this request starts without one.
@@ -262,7 +303,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	target := r.Host
 	if p.Mirror != nil && host == "airbag.mirror" && r.Method != http.MethodConnect {
-		p.Mirror.ServeHTTP(w, r)
+		p.Mirror.ServeHTTP(paced{w, http.NewResponseController(w)}, r)
 		return
 	}
 	if !p.Allow.Allows(host) && (p.Gate == nil || !p.Gate.AllowsHost(host)) {
