@@ -54,10 +54,9 @@ would bring it back; please read it before starting on one of those.
 
 **Run it on a Mac.** The macOS prototype ([docs/macos.md](docs/macos.md)) puts
 one Seatbelt profile around the agent, uses an APFS clone as the branch and the
-proxy on a localhost port. It is built and unit-tested on Linux and has not run
-on a Mac yet. Run it with Claude Code or Codex and report what the page asks
-for. The probe in `cmd/airbag-macprobe` decides whether the workspace branch
-moves to NFS on localhost, as AgentFS does.
+proxy on a localhost port. CI runs its unit tests, `test/e2e.sh` and the probe
+in `cmd/airbag-macprobe` on hosted macOS runners, but nobody has used it on real
+work yet. Run it with Claude Code or Codex and report what the page asks for.
 
 **Use it on real work.** [docs/evaluation.md](docs/evaluation.md) is the plan
 for telling whether airbag is worth using against a worktree with the agent's
