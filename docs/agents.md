@@ -171,8 +171,10 @@ is off; disable the workflow there if you do not use the board.
 - Comments trigger only when they start with `@claude`, so an agent quoting the
   phrase mid-sentence does not. Sanitised agent text has no live `@` mention.
 - One run per issue at a time (`concurrency` per issue, not cancelling), with
-  turn, budget and time limits. A third request while one runs and one waits
-  replaces the waiting one.
+  turn, budget and time limits. An `ai:implement` run holds the issue until its
+  publish job has set the labels, so a label reapplied meanwhile starts only
+  after it. A third request while one runs and one waits replaces the waiting
+  one.
 - `AGENTS_ENABLED` stops everything; `no-agent` stops one item.
 
 ## Remaining gaps
