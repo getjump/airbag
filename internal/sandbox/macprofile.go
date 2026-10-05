@@ -76,7 +76,10 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 			p.NoWrite = append(p.NoWrite, filepath.Join(home, l))
 		}
 		if !full {
-			fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s could not be checked in full for hard links\n", f)
+			// One not looked at may have another name: none is writable.
+			fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s stays read-only (it could not be checked in full for hard links)\n", f)
+			p.NoWrite = append(p.NoWrite, filepath.Join(home, strings.TrimSuffix(f, "/")))
+			continue
 		}
 		if strings.HasSuffix(f, "/") {
 			p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(f, "/")))

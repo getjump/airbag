@@ -485,9 +485,12 @@ var maxPassFiles = 100000
 // false when p could not be walked in full (too many files, an
 // unreadable directory): it may hold more.
 func hardLinks(root, p string) (linked []string, full bool) {
-	n := 0
-	err := filepath.WalkDir(filepath.Join(root, p), func(q string, d fs.DirEntry, err error) error {
+	n, top := 0, filepath.Join(root, p)
+	err := filepath.WalkDir(top, func(q string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if q != top && errors.Is(err, fs.ErrNotExist) {
+				return nil // gone since it was listed
+			}
 			return err
 		}
 		if !d.Type().IsRegular() {
@@ -497,7 +500,9 @@ func hardLinks(root, p string) (linked []string, full bool) {
 			return errTooMany
 		}
 		var st unix.Stat_t
-		if err := unix.Lstat(q, &st); err != nil {
+		if err := unix.Lstat(q, &st); errors.Is(err, unix.ENOENT) {
+			return nil
+		} else if err != nil {
 			return err
 		}
 		if st.Nlink > 1 {

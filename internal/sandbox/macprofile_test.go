@@ -263,3 +263,33 @@ func TestMacProfileHardLinkedPassthroughReadOnly(t *testing.T) {
 		t.Errorf("the hard-linked passthrough is not denied: %v", p.NoWrite)
 	}
 }
+
+// A passthrough that cannot be checked in full for hard links is denied
+// whole: a file past the check may have another name.
+func TestMacProfileUncheckedPassthroughReadOnly(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	dir := filepath.Join(home, ".claude/projects/x")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"a.jsonl", "b.jsonl"} {
+		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func(n int) { maxPassFiles = n }(maxPassFiles)
+	maxPassFiles = 1
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true, Passthrough: []string{".claude/projects/x/"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := filepath.EvalSymlinks(home)
+	if !slices.Contains(p.NoWrite, filepath.Join(h, ".claude/projects/x")) {
+		t.Errorf("an unchecked passthrough is not denied: %v", p.NoWrite)
+	}
+}
