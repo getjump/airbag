@@ -78,14 +78,8 @@ func (fw *forwarder) handle(c net.Conn) {
 	deny := func(reason string) {
 		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "deny", Reason: reason})
 	}
-	if fw.gate.Tainted() != "" && !fw.local() {
-		deny("secret-taint")
-		return
-	}
-	if d, _ := fw.gate.Check(policy.Input{Effect: models.Effect{Kind: "net.connect", Target: fw.f.Host, Detail: strconv.Itoa(fw.f.Port)}}); d.Verdict != policy.Allow {
-		deny(d.Rule)
-		return
-	}
+	// The slot comes first: a connection waiting on the checks (a policy
+	// that asks serializes them) holds a goroutine and a host fd too.
 	fw.mu.Lock()
 	if fw.max > 0 && fw.n >= fw.max {
 		fw.mu.Unlock()
@@ -99,6 +93,14 @@ func (fw *forwarder) handle(c net.Conn) {
 		fw.n--
 		fw.mu.Unlock()
 	}()
+	if fw.gate.Tainted() != "" && !fw.local() {
+		deny("secret-taint")
+		return
+	}
+	if d, _ := fw.gate.Check(policy.Input{Effect: models.Effect{Kind: "net.connect", Target: fw.f.Host, Detail: strconv.Itoa(fw.f.Port)}}); d.Verdict != policy.Allow {
+		deny(d.Rule)
+		return
+	}
 	up, err := fw.dial(context.Background(), "tcp", fw.target())
 	if err != nil {
 		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "allow", Reason: "unreachable: " + err.Error()})

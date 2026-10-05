@@ -308,3 +308,42 @@ func TestForwarderCap(t *testing.T) {
 		t.Fatalf("%d refusals logged, want 1: %+v", refused, effs)
 	}
 }
+
+// A connection holds its slot from the start, before the checks: with
+// one slot taken by a connection still dialling, the next is refused for
+// the cap, not checked, so connections waiting on a check stay bounded.
+func TestForwarderSlotBeforeChecks(t *testing.T) {
+	gate, log, path := forwardTest(t)
+	fw := newForwarder(session.Forward{Host: "db.example.test", Port: 1}, gate, log)
+	fw.max = 1
+	entered, release := make(chan struct{}), make(chan struct{})
+	fw.dial = func(context.Context, string, string) (net.Conn, error) {
+		close(entered)
+		<-release
+		return nil, errors.New("not dialled")
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	done := make(chan struct{})
+	go func() { fw.handle(b); close(done) }()
+	<-entered
+	gate.Mark(taint.Secret, ".env") // the next connection's checks would refuse it
+	c, d := net.Pipe()
+	defer c.Close()
+	fw.handle(d)
+	close(release)
+	<-done
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	effs, _ := effects.Read(path)
+	var got []string
+	for _, e := range effs {
+		if e.Kind == "net.tcp" {
+			got = append(got, e.Verdict+" "+e.Reason)
+		}
+	}
+	if len(got) == 0 || got[0] != "deny too many open connections" {
+		t.Fatalf("net.tcp effects = %q, want the second connection refused for the cap first", got)
+	}
+}
