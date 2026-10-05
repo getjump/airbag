@@ -157,9 +157,13 @@ outside any place the agent may write: a dotfiles setup that hard-links
 turn into a copy or a symlink. What it cannot:
 `~/.claude.json` stays writable, so a change to it — including MCP servers,
 permissions and per-project trust — persists in full without review, and the
-rest of `~/.claude` and `~/.codex` persists as before. The fix is a branch of
-`$HOME` on macOS (the NFS overlay, step 2 above), after which the same code
-path applies. Independently of the platform, Codex keys its
+rest of `~/.claude` and `~/.codex` persists as before. Protection there is by
+path, and Seatbelt matches paths, not files: a protected file with another name in
+a place the agent may write (`~/.claude.json`, a temporary directory) can be
+written through that name. airbag does not add a rule for each such layout; the
+fix is to give the agent its state in the session instead (see the roadmap), or a
+branch of `$HOME` on macOS (the NFS overlay, step 2 above), after which the same
+code path applies. Independently of the platform, Codex keys its
 transcripts by date (`~/.codex/sessions/<year>/<month>/…`), not by project, so a
 discard keeps every project's Codex transcripts, not only this workspace's.
 
