@@ -5,9 +5,11 @@ package sandbox
 import (
 	"bytes"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/session"
 )
@@ -60,4 +62,59 @@ func TestExportPublishesOnlyComplete(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A provider that fails with an export half sent leaves nothing behind:
+// abandon stops the importer, though the connection is still open, and
+// removes the stage. With no connection at all it returns as well.
+func TestAbandonedExportLeavesNoStage(t *testing.T) {
+	whole, err := sent(t, guestSkipping(guestWorkspace(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen := func() net.Listener {
+		l, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(t.TempDir(), "s"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		return l
+	}
+	abandoned := func(im *importer) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() { im.abandon(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("abandon waits for an export that will not come")
+		}
+		if _, err := os.Lstat(im.stage); !os.IsNotExist(err) {
+			t.Fatalf("the stage is left: %v", err)
+		}
+	}
+
+	l := listen()
+	stage := filepath.Join(t.TempDir(), "export")
+	im := startImport(l, stage)
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "unix", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(whole[:len(whole)/2]); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if _, err := os.Lstat(stage); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the import never began")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	abandoned(im)
+
+	abandoned(startImport(listen(), filepath.Join(t.TempDir(), "export")))
 }

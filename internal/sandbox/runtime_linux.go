@@ -379,6 +379,10 @@ func ext4Image(mkfs, source, path string, size int64) error {
 }
 
 func runMicroVM(s *session.Session, dir, root string) (int, error) {
+	// An export a killed run left behind holds disk the images need.
+	if err := os.RemoveAll(exportStage(s)); err != nil {
+		return 1, err
+	}
 	rootImage, workImage := filepath.Join(dir, "root.ext4"), filepath.Join(dir, "work.ext4")
 	mkfs, err := hostTool("mkfs.ext4", s.Workspace)
 	if err != nil {
@@ -428,23 +432,7 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 	}
 	l = netcap.Limit(l, 1)
 	listeners = append(listeners, l)
-	imported := make(chan exportResult, 1)
-	go func() {
-		conn, err := l.Accept()
-		if err != nil {
-			imported <- exportResult{code: 1, err: err}
-			return
-		}
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
-		stage := exportStage(s)
-		_ = os.RemoveAll(stage)
-		if err := os.MkdirAll(stage, 0o700); err != nil {
-			imported <- exportResult{code: 1, err: err}
-			return
-		}
-		imported <- receiveExport(conn, stage)
-	}()
+	im := startImport(l, exportStage(s))
 	config := map[string]any{
 		"boot-source":    map[string]any{"kernel_image_path": s.Runtime.Kernel, "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/run/airbag/bin/airbag " + GuestArg},
 		"drives":         []map[string]any{{"drive_id": "rootfs", "path_on_host": rootImage, "is_root_device": true, "is_read_only": true}, {"drive_id": "work", "path_on_host": workImage, "is_root_device": false, "is_read_only": false}},
@@ -462,17 +450,63 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 	}
 	code, err := executeProvider(s.Runtime.Binary, []string{"--no-api", "--config-file", filepath.Join(dir, "firecracker.json")})
 	if err != nil || code != 0 {
+		im.abandon()
 		return code, err
 	}
 	select {
-	case result := <-imported:
+	case result := <-im.result:
 		return publishExport(s, result)
 	case <-time.After(10 * time.Second):
+		im.abandon()
 		return publishExport(s, exportResult{code: 1, err: errors.New("the guest ended without a workspace export")})
 	}
 }
 
 func exportStage(s *session.Session) string { return filepath.Join(s.Dir, "ws", "export") }
+
+// importer takes the guest's one export connection into stage.
+type importer struct {
+	l      net.Listener
+	stage  string
+	conns  chan net.Conn
+	result chan exportResult
+}
+
+func startImport(l net.Listener, stage string) *importer {
+	im := &importer{l: l, stage: stage, conns: make(chan net.Conn, 1), result: make(chan exportResult, 1)}
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			im.result <- exportResult{code: 1, err: err}
+			return
+		}
+		im.conns <- conn
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
+		_ = os.RemoveAll(stage)
+		if err := os.MkdirAll(stage, 0o700); err != nil {
+			im.result <- exportResult{code: 1, err: err}
+			return
+		}
+		im.result <- receiveExport(conn, stage)
+	}()
+	return im
+}
+
+// abandon ends an export that will not complete, the provider having
+// failed or the guest gone quiet: it stops the importer, waits until it
+// lets go of the stage, and removes what it wrote, which may be up to
+// the export limit.
+func (im *importer) abandon() {
+	_ = im.l.Close()
+	select {
+	case conn := <-im.conns:
+		_ = conn.Close()
+		<-im.result
+	case <-im.result:
+	}
+	_ = os.RemoveAll(im.stage)
+}
 
 // publishExport makes a complete export the session's branch. Anything
 // else keeps the branch as it was and fails the run.
