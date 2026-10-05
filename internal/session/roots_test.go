@@ -86,12 +86,29 @@ func TestCheckComparesBirthTime(t *testing.T) {
 	if err := other.Check(dir); err == nil || !strings.Contains(err.Error(), "another directory") {
 		t.Fatalf("a directory born at another time passed: %v", err)
 	}
+	if id.FS == 0 {
+		t.Skip("this filesystem gives no ID")
+	}
 	// The same filesystem mounted again has a new device number: the
-	// creation time still tells it is the same directory.
+	// creation time and the filesystem ID still tell it is the same
+	// directory.
 	remounted := id
 	remounted.Dev++
 	if err := remounted.Check(dir); err != nil {
 		t.Fatalf("a remount with the creation time unchanged was refused: %v", err)
+	}
+	// A btrfs snapshot keeps the inode and the creation time, and has a
+	// device and a filesystem ID of its own.
+	snapshot := remounted
+	snapshot.FS++
+	if err := snapshot.Check(dir); err == nil || !strings.Contains(err.Error(), "another filesystem") {
+		t.Fatalf("a snapshot passed: %v", err)
+	}
+	// Where the filesystem gives no ID, a new device is refused.
+	noID := remounted
+	noID.FS = 0
+	if err := noID.Check(dir); err == nil || !strings.Contains(err.Error(), "another filesystem") {
+		t.Fatalf("a new device without a filesystem ID passed: %v", err)
 	}
 }
 

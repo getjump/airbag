@@ -105,19 +105,23 @@ type Meta struct {
 }
 
 // DirID is a directory as a session found it: its path with links
-// resolved, its device and inode, and its creation time where the
-// filesystem records one (0 where it does not). Path and inode tell it
+// resolved, its device and inode, its creation time where the
+// filesystem records one, and the filesystem's ID from statfs where it
+// gives one (0 for either where it does not). Path and inode tell it
 // from a link or another directory at the same path, the creation time
-// from a new directory given a removed one's inode. With a creation
-// time the device may change, as it does when the same filesystem is
-// mounted again (an overlay or FUSE mount, a WSL disk, a btrfs
-// subvolume); without one it may not, so another filesystem mounted
-// there, whose root can share the inode, is refused too.
+// from a new directory given a removed one's inode. The device may
+// change only when the creation time and the filesystem ID both say it
+// is the same directory: the same filesystem mounted again (a WSL disk,
+// a btrfs subvolume, an overlay) gets a new device number but keeps its
+// ID, while another filesystem mounted at the path, whose root can share
+// the inode, or a btrfs snapshot, which keeps the inode and the creation
+// time, has another ID.
 type DirID struct {
 	Real string `json:"real"`
 	Dev  uint64 `json:"dev"`
 	Ino  uint64 `json:"ino"`
 	Born int64  `json:"born,omitempty"`
+	FS   uint64 `json:"fs,omitempty"`
 }
 
 // DirIDOf is the directory p names now.
@@ -134,7 +138,7 @@ func DirIDOf(p string) (DirID, error) {
 	if !ok {
 		return DirID{}, fmt.Errorf("%s: no device and inode", p)
 	}
-	return DirID{Real: real, Dev: u64(st.Dev), Ino: u64(st.Ino), Born: born(real, st)}, nil
+	return DirID{Real: real, Dev: u64(st.Dev), Ino: u64(st.Ino), Born: born(real, st), FS: fsID(real)}, nil
 }
 
 // Check refuses p when it is not the directory id was taken of: it
@@ -148,8 +152,9 @@ func (id DirID) Check(p string) error {
 		return fmt.Errorf("%s leads to %s now, not to %s as when the session began", p, got.Real, id.Real)
 	case got.Ino != id.Ino || id.Born != 0 && got.Born != id.Born:
 		return fmt.Errorf("%s is another directory than when the session began: that one was moved or removed, or the filesystem gives new inode numbers on each mount (FAT, sshfs without use_ino)", p)
-	case id.Born == 0 && got.Dev != id.Dev:
-		return fmt.Errorf("%s is on another filesystem than when the session began: another one is mounted there, or this one, which records no creation time to tell, was mounted again", p)
+	case got.Dev != id.Dev && (id.Born == 0 || id.FS == 0 || got.FS != id.FS):
+		return fmt.Errorf("%s is on another filesystem than when the session began: another one, or a snapshot of this one, is mounted there, "+
+			"or this one was mounted again and records nothing that tells it is the same", p)
 	}
 	return nil
 }
