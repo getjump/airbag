@@ -960,8 +960,9 @@ func replaceIf(path string, data, want []byte, existed bool, keepDir string, unc
 		return 0, err
 	}
 	// What was displaced must be what this attempt read, with the mode
-	// the replacement was given: a host chmod in between is a change too.
-	if got, err := readRegular(tmp); err == nil && bytes.Equal(got, want) {
+	// and extended attributes the replacement was given: a host chmod or
+	// xattr change in between is a change too.
+	if got, err := readRegular(tmp); err == nil && bytes.Equal(got, want) && sameXattrs(tmp, path) {
 		if fi, err := os.Lstat(tmp); err == nil && fi.Mode().Perm() == mode {
 			accepted = true
 			return installed, nil
@@ -1007,6 +1008,24 @@ func copyXattrs(from, to string) error {
 		}
 	}
 	return nil
+}
+
+// sameXattrs reports whether a and b have the same extended attributes
+// with the same values.
+func sameXattrs(a, b string) bool {
+	an, aerr := listXattrs(a)
+	bn, berr := listXattrs(b)
+	if aerr != nil || berr != nil || len(an) != len(bn) {
+		return false
+	}
+	for _, name := range an {
+		av, aerr := getXattr(a, name)
+		bv, berr := getXattr(b, name)
+		if aerr != nil || berr != nil || !bytes.Equal(av, bv) {
+			return false
+		}
+	}
+	return true
 }
 
 func listXattrs(path string) ([]string, error) {

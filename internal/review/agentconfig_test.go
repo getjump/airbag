@@ -1001,3 +1001,26 @@ func TestWriteBackKeepsXattrs(t *testing.T) {
 		t.Fatalf("xattr after write-back = %q (%v), want it kept", v, err)
 	}
 }
+
+// A host xattr change between the check and the swap undoes the swap:
+// the displaced file's attributes must be the ones carried over.
+func TestReplaceIfKeepsARacingXattr(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfg.json")
+	writeCfg(t, p, `{"a":1}`)
+	if err := unix.Setxattr(p, "user.host", []byte("old"), 0); err != nil {
+		t.Skipf("no user xattrs here: %v", err)
+	}
+	set := func() bool {
+		if err := unix.Setxattr(p, "user.host", []byte("new"), 0); err != nil {
+			t.Fatal(err)
+		}
+		return true
+	}
+	if _, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), set); !errors.Is(err, errChanged) {
+		t.Fatalf("err = %v, want errChanged", err)
+	}
+	if v, err := getXattr(p, "user.host"); err != nil || string(v) != "new" || readCfg(t, p)["a"] != float64(1) {
+		t.Fatalf("file xattr %q (%v) content %v, want the host's file and xattr kept", v, err, readCfg(t, p))
+	}
+}
