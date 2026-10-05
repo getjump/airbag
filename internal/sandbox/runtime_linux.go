@@ -72,8 +72,10 @@ func optionalHostReady(backend string) error {
 }
 
 func prepareRuntimeWorkspace(s *session.Session) error {
-	if _, err := os.Stat(s.CloneDir()); err == nil {
-		return nil
+	if _, err := os.Lstat(s.CloneDir()); err == nil {
+		// A resumed session keeps its branch, if it is one: a copy that
+		// did not finish, or an older airbag's, is not resumed.
+		return s.RuntimeBranchError()
 	}
 	if err := os.MkdirAll(s.CloneDir(), 0o700); err != nil {
 		return err
@@ -94,7 +96,8 @@ func prepareRuntimeWorkspace(s *session.Session) error {
 		_ = os.RemoveAll(s.CloneDir())
 		return errors.Join(err, copyErr)
 	}
-	return nil
+	s.RuntimeCopied = true
+	return s.Save()
 }
 
 // providerEnv is all the environment runsc, Firecracker and the tools that

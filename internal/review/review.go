@@ -55,6 +55,9 @@ func (c Change) IsDir() bool { return c.Type == fs.ModeDir }
 // the directory writes all of the agent's version.
 func Scan(s *session.Session) ([]Change, error) {
 	if s.Clone {
+		if err := s.RuntimeBranchError(); err != nil {
+			return nil, err
+		}
 		out, err := ScanTree("ws", s.Workspace, s.CloneDir())
 		if err != nil {
 			return nil, err

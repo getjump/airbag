@@ -96,7 +96,9 @@ background processes are killed before export. When the export is cut short,
 fails in the guest or does not match, the prior branch is retained and the run
 fails; a run that fails
 after the session exists still records it stopped, so it can be reviewed,
-resumed or discarded. Input files are copied, not reflinked in the current workspace copy path; the tar path does not preserve
+resumed or discarded. A session whose copy of the workspace did not finish
+has no branch: review and apply refuse it rather than show every real file
+as deleted, a resume copies the workspace again, and discard works. Input files are copied, not reflinked in the current workspace copy path; the tar path does not preserve
 hardlink identity or directory modes. Fixed microVM limits are 1 vCPU, 2 GiB RAM,
 2 GiB rootfs and 10 GiB workspace disk; export is bounded to 8 GiB/200k entries.
 

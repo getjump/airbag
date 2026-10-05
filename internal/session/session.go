@@ -46,6 +46,9 @@ type Meta struct {
 	Status           string        `json:"status"`
 	ExitCode         int           `json:"exit_code"`
 	Allow            []string      `json:"allow"`
+	// RuntimeCopied: an optional runtime's branch holds the whole
+	// workspace, copied before its first run. Until then it has none.
+	RuntimeCopied bool `json:"runtime_copied,omitempty"`
 	// Paths under $HOME that bypass the branch (agent state, logs).
 	Passthrough []string `json:"passthrough"`
 	// BranchHoles: paths under a Passthrough directory that stay in the
@@ -171,6 +174,24 @@ func (s *Session) EtcWork() string             { return filepath.Join(s.Dir, "et
 func (s *Session) MountDir(name string) string { return filepath.Join(s.Dir, "mnt", name) }
 func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "run") }
 func (s *Session) CloneDir() string            { return filepath.Join(s.Dir, "ws", "clone") }
+
+// RuntimeBranchError says why an optional runtime's session has no branch
+// to review or apply: the copy of the workspace did not finish (or an
+// older airbag made it, possibly empty), or the branch is gone. Compared
+// with the real files, such a branch shows every file it lacks as deleted,
+// and apply would remove them. Discard still works.
+func (s *Session) RuntimeBranchError() error {
+	if s.Backend == "" || s.Backend == "native" {
+		return nil
+	}
+	if !s.RuntimeCopied {
+		return fmt.Errorf("session %s has no complete branch: its copy of the workspace did not finish, or an older airbag made it; nothing to review or apply, discard it", s.ID)
+	}
+	if fi, err := os.Lstat(s.CloneDir()); err != nil || !fi.IsDir() {
+		return fmt.Errorf("session %s has lost its branch %s; nothing to review or apply, discard it", s.ID, s.CloneDir())
+	}
+	return nil
+}
 func (s *Session) ForwardSock(i int) string {
 	return filepath.Join(s.RunDir(), fmt.Sprintf("fwd-%d.sock", i))
 }
