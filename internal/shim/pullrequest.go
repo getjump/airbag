@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/getjump/airbag/internal/operation"
 	"github.com/getjump/airbag/internal/secretfs"
+	"github.com/getjump/airbag/operation"
 )
 
 // capturePullRequest freezes the body and resolves a literal branch inside the

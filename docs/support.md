@@ -56,4 +56,6 @@ These are what the version rules above cover:
 Anything else may change in any release: the text output of `review` and of
 the other commands, which is written for people; the session directory and its
 `effects.db`; the hooks and managed settings that airbag gives agents; what the
-command models predict; and the Go packages, which are all under `internal/`.
+command models predict; and the Go packages: those under `internal/`, and the
+public ones [composition.md](composition.md) lists, which are not a stable API
+yet.

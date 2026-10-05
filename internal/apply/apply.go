@@ -22,11 +22,11 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/getjump/airbag/internal/operation"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/review"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/operation"
+	"github.com/getjump/airbag/outbox"
 )
 
 type Options struct {

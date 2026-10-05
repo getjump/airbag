@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/outbox"
 )
 
 // fakeSession lays out a workspace, a home and their upper layers as

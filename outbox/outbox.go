@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getjump/airbag/internal/operation"
+	"github.com/getjump/airbag/operation"
 
 	_ "modernc.org/sqlite"
 )

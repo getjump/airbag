@@ -6,9 +6,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/getjump/airbag/internal/creds"
-	"github.com/getjump/airbag/internal/proxy"
+	"github.com/getjump/airbag/creds"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/proxy"
 )
 
 // setupCredentials reads each bound credential's value on the host,

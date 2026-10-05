@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/getjump/airbag/internal/taint"
+	pure "github.com/getjump/airbag/policy"
 )
 
 // Gate applies a policy during a session and handles "ask": the action
@@ -33,6 +34,9 @@ func (g *Gate) Mark(label taint.Label, source string) bool { return g.labels.Add
 
 // Taint marks the session as having read a secret.
 func (g *Gate) Taint(source string) { g.labels.Add(taint.Secret, source) }
+
+// MarkUntrusted is the narrow label operation needed by an egress collector.
+func (g *Gate) MarkUntrusted(source string) bool { return g.Mark(taint.Untrusted, source) }
 
 // Tainted returns the first secret the session read, or "".
 func (g *Gate) Tainted() string { return g.labels.Source(taint.Secret) }
@@ -84,17 +88,8 @@ func (g *Gate) Check(in Input) (Decision, string) {
 	return d, a.ID
 }
 
-// Explain is the text an agent sees when it is blocked.
-func Explain(d Decision, askID string) string {
-	msg := fmt.Sprintf("airbag: blocked by policy %q", d.Rule)
-	if d.Message != "" {
-		msg += ": " + d.Message
-	}
-	if d.Verdict == Ask {
-		msg += fmt.Sprintf(". This needs the user's approval: ask them to run `airbag approve %s`, then retry.", askID)
-	}
-	return msg
-}
+// Explain renders the shared decision for the agent.
+func Explain(d Decision, id string) string { return pure.Explain(d, id) }
 
 func ReadAsks(dir string) ([]Request, error) {
 	b, err := os.ReadFile(asksPath(dir))

@@ -22,10 +22,10 @@ import (
 
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/control"
-	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/shim"
+	"github.com/getjump/airbag/proxy"
 )
 
 // Inside the sandbox the egress proxy is reachable only here.
