@@ -11,7 +11,8 @@ mac=; [ "$(uname)" = Darwin ] && mac=1
 AIRBAG=${AIRBAG:-airbag}
 T=$(mktemp -d "$HOME/.airbag-e2e.XXXXXX")
 trap 'rm -rf "$T" "$HOME/.airbag-e2e-rc"' EXIT
-fail() { echo "FAIL: $*"; exit 1; }
+# printf, not echo: macOS sh turns \x1b in output back into the byte.
+fail() { printf 'FAIL: %s\n' "$*"; exit 1; }
 
 git init -q --bare "$T/remote.git"
 mkdir "$T/proj" && cd "$T/proj"
@@ -172,7 +173,7 @@ esc=$(printf '\033')
 for cmd in review diff; do
 	out=$("$AIRBAG" $cmd)
 	case "$out" in *"$esc"*) fail "$cmd printed a raw escape";; esac
-	echo "$out" | grep -qF 'esc\x1b]0;t\x07.txt' || fail "$cmd lacks the escaped name: $out"
+	printf '%s\n' "$out" | grep -qF 'esc\x1b]0;t\x07.txt' || fail "$cmd lacks the escaped name: $out"
 done
 "$AIRBAG" diff | grep -qF 'x\x1b[2Jy' || fail "diff lacks the escaped content"
 "$AIRBAG" discard --yes >/dev/null
