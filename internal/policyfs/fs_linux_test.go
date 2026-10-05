@@ -573,3 +573,38 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// mknod(S_IFREG|0755) makes the same executable file as create, so a rule
+// on fs.exec_bit holds for both.
+func TestMknodExecutableModeChecksExecBit(t *testing.T) {
+	dir := t.TempDir()
+	var observed []runtimepolicy.Request
+	root := testRoot(t, dir, func(r runtimepolicy.Request) error {
+		observed = append(observed, r)
+		if r.Kind == "fs.exec_bit" {
+			return syscall.EACCES
+		}
+		return nil
+	})
+	ctx := context.Background()
+	var entry fuse.EntryOut
+	if _, e := root.Mknod(ctx, "tool", syscall.S_IFREG|0o755, 0, &entry); e != syscall.EACCES {
+		t.Fatal("executable mknod bypassed fs.exec_bit:", e)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "tool")); !os.IsNotExist(err) {
+		t.Fatal("denied mknod created the file:", err)
+	}
+	if len(observed) != 2 || observed[0].Kind != "fs.write" || observed[1].Kind != "fs.exec_bit" || observed[1].Detail != "mknod" || observed[1].Target != filepath.Join(dir, "tool") {
+		t.Fatalf("wrong observed attempts: %+v", observed)
+	}
+	observed = nil
+	if _, e := root.Mknod(ctx, "data", syscall.S_IFREG|0o644, 0, &entry); e != 0 {
+		t.Fatal(e)
+	}
+	if len(observed) != 1 || observed[0].Kind != "fs.write" {
+		t.Fatalf("wrong observed attempts: %+v", observed)
+	}
+	if _, _, _, e := root.Create(ctx, "created", syscall.O_WRONLY, 0o755, &entry); e != syscall.EACCES {
+		t.Fatal("executable create bypassed fs.exec_bit:", e)
+	}
+}

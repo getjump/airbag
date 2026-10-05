@@ -567,7 +567,13 @@ func (n *node) Mknod(ctx context.Context, name string, mode uint32, dev uint32, 
 	default:
 		return nil, syscall.EPERM
 	}
-	if e := n.gate(ctx, n.child(name), "fs.write", "mknod"); e != 0 {
+	rel := n.child(name)
+	requests := []runtimepolicy.Request{n.request(ctx, rel, "fs.write", "mknod")}
+	// mknod(S_IFREG|0755) makes the same executable file as create.
+	if mode&0o111 != 0 {
+		requests = append(requests, n.request(ctx, rel, "fs.exec_bit", "mknod"))
+	}
+	if e := n.gates(requests); e != 0 {
 		return nil, e
 	}
 	fd, err := n.view.dir(n.rel())
