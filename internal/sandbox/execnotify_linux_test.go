@@ -184,3 +184,153 @@ func TestExecNotifyStopsWhileTaskLives(t *testing.T) {
 		t.Fatalf("the execve after stop did not fail: %s", output.String())
 	}
 }
+
+// A caller in a chroot names its executable in its own root. proc stands in
+// for /proc/PID: root, cwd and fd links as the kernel writes them, from
+// PID 1's root.
+func TestExecTargetInCallerRoot(t *testing.T) {
+	top, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jail, outside, proc := filepath.Join(top, "jail"), filepath.Join(top, "outside"), filepath.Join(top, "proc")
+	for _, d := range []string{jail + "/bin", jail + "/sub", outside, proc + "/fd"} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(jail+"/bin/tool", []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for link, target := range map[string]string{
+		jail + "/bin/alias":    "/bin/tool", // absolute, so in the jail's root
+		jail + "/sub/relative": "../bin/tool",
+		proc + "/root":         jail,
+		proc + "/cwd":          jail + "/bin",
+		proc + "/fd/7":         jail + "/sub",
+		proc + "/fd/8":         jail + "/bin/tool",
+		proc + "/fd/9":         outside,
+		proc + "/fd/10":        jail + "x/bin/tool",
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		dirfd int
+		name  string
+	}{
+		{unix.AT_FDCWD, "tool"},
+		{unix.AT_FDCWD, "/bin/tool"},
+		{unix.AT_FDCWD, "/bin/alias"},
+		{unix.AT_FDCWD, "../../../bin/alias"},
+		{7, "relative"},
+		{7, "../bin/alias"},
+		{8, ""},
+	} {
+		if got, err := execTarget(proc, c.dirfd, c.name); err != nil || got != "/bin/tool" {
+			t.Errorf("execTarget(%d, %q) = %q, %v; want /bin/tool", c.dirfd, c.name, got, err)
+		}
+	}
+	// The kernel fails these; they are checked as written, in the jail.
+	if got, err := execTarget(proc, unix.AT_FDCWD, "missing"); err != nil || got != "/bin/missing" {
+		t.Errorf("missing file: %q, %v", got, err)
+	}
+	// A base outside the root has no name in it.
+	for _, c := range []struct {
+		dirfd int
+		name  string
+	}{{9, "tool"}, {9, ""}, {10, ""}} {
+		if got, err := execTarget(proc, c.dirfd, c.name); err == nil {
+			t.Errorf("execTarget(%d, %q) = %q outside the caller's root", c.dirfd, c.name, got)
+		}
+	}
+	if err := os.Remove(proc + "/cwd"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, proc+"/cwd"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := execTarget(proc, unix.AT_FDCWD, "tool"); err == nil {
+		t.Errorf("cwd outside the caller's root: %q", got)
+	}
+	if got, err := execTarget(proc, unix.AT_FDCWD, "/bin/tool"); err != nil || got != "/bin/tool" {
+		t.Errorf("absolute name with cwd outside: %q, %v", got, err)
+	}
+}
+
+// The same in a real chroot under the filter: relative, absolute, and an
+// absolute symlink in the jail all reach the rule on /bin/tool.
+func TestExecNotifyChroot(t *testing.T) {
+	unshare, err := exec.LookPath("unshare")
+	if err != nil {
+		t.Skip("no unshare")
+	}
+	chroot, err := exec.LookPath("chroot")
+	if err != nil {
+		chroot = "/usr/sbin/chroot"
+	}
+	if err := exec.CommandContext(t.Context(), unshare, "-r", chroot, "/", "true").Run(); err != nil { //nolint:gosec // fixed tools found in PATH
+		t.Skipf("no unprivileged chroot here: %v", err)
+	}
+	jail := filepath.Join(t.TempDir(), "jail")
+	if err := os.MkdirAll(jail+"/bin", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jail+"/bin/tool", []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/bin/tool", jail+"/bin/alias"); err != nil {
+		t.Fatal(err)
+	}
+	script := ""
+	for _, name := range []string{"/bin/tool", "bin/tool", "/bin/alias"} {
+		script += fmt.Sprintf("%s -r %s %s %s jail-exec; ", unshare, chroot, jail, name)
+	}
+	cmd, output, listener := startNotifyHelper(t, script)
+	var mu sync.Mutex
+	var events []runtimepolicy.Request
+	stop := serveUntilStopped(t, listener, func(r runtimepolicy.Request) error {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, r)
+		if r.Target == "/bin/tool" {
+			return fmt.Errorf("denied tool")
+		}
+		return nil
+	})
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+		t.Fatal("exec notification hung")
+	}
+	if err := stop(); err != nil {
+		t.Fatalf("serveExec: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) == 1 && events[0].Kind == "proc.exec.invalid" && events[0].Detail == unix.EPERM.Error() && os.Getenv("CI") != "true" {
+		t.Skip("this container blocks process_vm_readv; kernel E2E runs in CI")
+	}
+	var jailed []runtimepolicy.Request
+	for _, r := range events {
+		if len(r.Argv) == 2 && r.Argv[1] == "jail-exec" {
+			jailed = append(jailed, r)
+		}
+	}
+	if len(jailed) != 3 {
+		t.Fatalf("want 3 execs in the jail, got %+v; %s", events, output.String())
+	}
+	for _, r := range jailed {
+		if r.Kind != "proc.exec" || r.Target != "/bin/tool" {
+			t.Errorf("exec of %q in the jail checked as %s %q", r.Argv[0], r.Kind, r.Target)
+		}
+	}
+	if n := strings.Count(output.String(), "Permission denied"); n != 3 {
+		t.Errorf("want 3 denied execs, got %d: %s", n, output.String())
+	}
+}

@@ -326,35 +326,102 @@ func readExec(n execNotification) (runtimepolicy.Request, error) {
 	if err != nil {
 		return r, err
 	}
-	prefix := fmt.Sprintf("/proc/%d", n.PID)
+	if name == "" && flags&unix.AT_EMPTY_PATH == 0 {
+		return r, errors.New("empty executable pathname")
+	}
+	r.Target, err = execTarget(fmt.Sprintf("/proc/%d", n.PID), dirfd, name)
+	return r, err
+}
+
+// execTarget names the executable as the caller at proc (its /proc
+// directory) sees it. The kernel writes /proc links from PID 1's root, so a
+// caller in a chroot would otherwise be checked under PID 1's path to its
+// jail, which a rule on the path in the jail never matches. A base outside
+// the caller's root (a cwd or descriptor kept across chroot) has no such
+// name: the exec is refused as invalid.
+func execTarget(proc string, dirfd int, name string) (string, error) {
+	root, err := openExecRoot(proc + "/root")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = unix.Close(root.fd) }()
 	if name == "" {
-		if flags&unix.AT_EMPTY_PATH == 0 {
-			return r, errors.New("empty executable pathname")
+		link, err := os.Readlink(fmt.Sprintf("%s/fd/%d", proc, dirfd))
+		if err != nil {
+			return "", err
 		}
-		r.Target, err = os.Readlink(fmt.Sprintf("%s/fd/%d", prefix, dirfd))
-		return r, err
+		return root.inside(link)
 	}
 	if !filepath.IsAbs(name) {
-		base := prefix + "/cwd"
+		base := proc + "/cwd"
 		if dirfd != unix.AT_FDCWD {
-			base = fmt.Sprintf("%s/fd/%d", prefix, dirfd)
+			base = fmt.Sprintf("%s/fd/%d", proc, dirfd)
 		}
-		dir, err := os.Readlink(base)
+		link, err := os.Readlink(base)
 		if err != nil {
-			return r, err
+			return "", err
 		}
-		name = filepath.Join(dir, name)
-	}
-	r.Target = filepath.Clean(name)
-	// Resolve normal symlink aliases in the caller's root, including chroots.
-	// Failure is an exec attempt too (ENOENT is decided by the kernel later).
-	if resolved, err := filepath.EvalSymlinks(prefix + "/root" + r.Target); err == nil {
-		root, err := os.Readlink(prefix + "/root")
-		if err == nil {
-			if rel, err := filepath.Rel(root, resolved); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
-				r.Target = "/" + rel
-			}
+		dir, err := root.inside(link)
+		if err != nil {
+			return "", err
 		}
+		name = dir + "/" + name
 	}
-	return r, nil
+	return root.resolve(name)
+}
+
+// execRoot is the caller's root, opened once, and PID 1's path to it.
+type execRoot struct {
+	fd   int
+	path string
+}
+
+func openExecRoot(dir string) (execRoot, error) {
+	fd, err := unix.Open(dir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return execRoot{}, err
+	}
+	path, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
+	if err != nil {
+		_ = unix.Close(fd)
+		return execRoot{}, err
+	}
+	return execRoot{fd: fd, path: path}, nil
+}
+
+// inside turns a path as PID 1 sees it into the caller's path, or refuses
+// one outside the caller's root.
+func (r execRoot) inside(link string) (string, error) {
+	rel, err := filepath.Rel(r.path, link)
+	if err != nil || !filepath.IsAbs(link) || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", fmt.Errorf("exec path %q is outside the caller's root", link)
+	}
+	return filepath.Join("/", rel), nil
+}
+
+// resolve follows symlinks in name inside the caller's root, as the
+// kernel will: an absolute link or ".." never leaves it, which reading
+// /proc/PID/root as a plain path does not ensure. A name that does not
+// resolve is checked as written: the kernel fails a missing file or a
+// symlink loop too. A magic link (/proc/self/exe) is not followed, since
+// PID 1 would follow its own, and is checked as written as well.
+func (r execRoot) resolve(name string) (string, error) {
+	how := unix.OpenHow{Flags: unix.O_PATH | unix.O_CLOEXEC, Resolve: unix.RESOLVE_IN_ROOT | unix.RESOLVE_NO_MAGICLINKS}
+	fd, err := unix.Openat2(r.fd, name, &how)
+	// EAGAIN: a rename or mount raced the lookup; the kernel asks for a retry.
+	for i := 0; i < 8 && errors.Is(err, unix.EAGAIN); i++ {
+		fd, err = unix.Openat2(r.fd, name, &how)
+	}
+	if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
+		return filepath.Clean(name), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	link, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
+	if err != nil {
+		return "", err
+	}
+	return r.inside(link)
 }

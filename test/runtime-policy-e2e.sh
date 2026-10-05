@@ -26,7 +26,12 @@ rules:
   - name: upper-on-resume
     when: effect.source == "fuse" && effect.target.endsWith("upper") && effect.kind == "fs.delete"
     verdict: deny
+  - name: jail-tool
+    when: effect.source == "seccomp" && effect.kind == "proc.exec" && effect.target == "/bin/tool"
+    verdict: deny
 YAML
+mkdir -p jail/bin && printf '#!/bin/sh\n' > jail/bin/tool && chmod 755 jail/bin/tool
+ln -s /bin/tool jail/bin/alias
 printf 'private\n' > unreadable
 cat > runtime.py <<'PY'
 import os, pathlib, subprocess, sqlite3, mmap, fcntl, socket, ctypes
@@ -59,6 +64,17 @@ except (PermissionError, subprocess.CalledProcessError):
     pass
 else:
     raise AssertionError('execve policy bypass')
+# A chrooted caller names its executable in its own root: relative,
+# absolute or through an absolute symlink in the jail, the rule on
+# /bin/tool holds, never PID 1's path to the jail.
+if subprocess.run(['unshare', '-r', 'true']).returncode == 0:
+    for name in ['/bin/tool', 'bin/tool', '/bin/alias']:
+        r = subprocess.run(['unshare', '-r', 'chroot', 'jail', name, 'jail-exec'])
+        assert r.returncode == 126, ('chroot exec policy bypass', name, r.returncode)
+elif os.environ.get('CI') == 'true':
+    raise AssertionError('no user namespaces in the sandbox')
+else:
+    print('SKIP: chroot exec (no user namespaces in the sandbox)')
 # fexecve-style execveat with an already-open executable descriptor.
 pid = os.fork()
 if pid == 0:
@@ -110,6 +126,8 @@ assert any(e.get('source')=='fuse' and e['kind']=='secret.read' and 'python' in 
 assert any(e.get('source')=='seccomp' and e.get('detail')=='execveat' and e['verdict']=='deny' for e in es)
 assert any(e.get('source')=='seccomp' and e['verdict']=='deny' and 'blocked-process' in e.get('argv',[]) for e in es)
 assert all(e.get('pid',0)>0 for e in es if e.get('source'))
+jail=[e for e in es if e.get('source')=='seccomp' and e.get('argv',[])[1:]==['jail-exec']]
+assert len(jail) in (0, 3) and all(e['target']=='/bin/tool' and e['verdict']=='deny' for e in jail), jail
 PY
 # Flags persist across resume; upper-only deletion must still be gated.
 out=$("$AIRBAG" run --session last -- python3 -c 'from pathlib import Path
