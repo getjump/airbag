@@ -64,6 +64,9 @@ func mockPR(t *testing.T, p operation.PullRequest, mode string) (string, string)
 	if mode == "ambiguous" {
 		postAction = "exit 1"
 	}
+	if mode == "bad-gateway" { // the PR may exist although the answer is an error
+		postAction = "printf '%s' " + shellFixtureLiteral("HTTP/2.0 502 Bad Gateway\r\nContent-Type: text/html\r\n\r\n<html>bad gateway</html>\n") + "\nexit 1"
+	}
 	if mode == "refused" { // gh api --include on a 422, then gh's own exit
 		postAction = "printf '%s' " + shellFixtureLiteral("HTTP/2.0 422 Unprocessable Entity\r\nContent-Type: application/json\r\n\r\n"+
 			`{"message":"Validation Failed","errors":[{"message":"A pull request already exists for getjump:work."}]}`+"\n") + "\nexit 1"
@@ -364,5 +367,15 @@ func TestSplitResponse(t *testing.T) {
 		if code, body := splitResponse([]byte(in)); code != want || string(body) != "{}" {
 			t.Errorf("splitResponse(%q) = %d %q, want %d", in, code, body, want)
 		}
+	}
+}
+
+// A server error may come after GitHub created the PR: unknown, not failed.
+func TestServerErrorStaysUnknown(t *testing.T) {
+	s, b, it := prFixture(t)
+	_, _ = mockPR(t, *it.Request.PullRequest, "bad-gateway")
+	_ = runPRFixture(t, s, b, false, "y\n")
+	if status(t, b, it.ID) != outbox.Unknown {
+		t.Fatalf("a 502 is %s, not unknown", status(t, b, it.ID))
 	}
 }
