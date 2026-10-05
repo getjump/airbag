@@ -1,0 +1,96 @@
+name: Compatibility report
+description: How airbag worked with an agent or on a platform, including when it just worked
+labels: [compat, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A report that it worked is as useful as one that it broke. [docs/evaluation.md](https://github.com/getjump/airbag/blob/main/docs/evaluation.md) lists what is worth recording, and [docs/macos.md](https://github.com/getjump/airbag/blob/main/docs/macos.md) what to report from a Mac.
+
+        A way past the sandbox is not a compatibility report: report it privately through [Report a vulnerability](https://github.com/getjump/airbag/security/advisories/new).
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      options:
+        - Claude Code
+        - Codex
+        - Gemini CLI
+        - Aider
+        - OpenCode
+        - Another agent (name it below)
+    validations:
+      required: true
+  - type: input
+    id: agent-version
+    attributes:
+      label: Agent version
+      description: For example `claude --version` or `codex --version`.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: airbag version
+      description: The output of `airbag version`, or the commit if you built it yourself.
+      placeholder: airbag v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - Linux in a VM (OrbStack, Lima, ...)
+        - macOS prototype
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and kernel
+      description: "Linux: the distribution and `uname -srm`. macOS: `sw_vers -productVersion` and `uname -m`."
+      placeholder: macOS 15.6, arm64
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Worked as it was
+        - Worked after a change to the policy or the setup
+        - Started, but a tool, the login or resume broke
+        - Did not start
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `airbag doctor`
+      description: All of it. Check it for paths you would rather not post.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: macprobe
+    attributes:
+      label: "macOS: output of `airbag-macprobe -json`"
+      description: "`go run ./cmd/airbag-macprobe -json` in a checkout. The report replaces the temporary directory, `~` and your user name; read it before you paste it."
+      render: json
+  - type: textarea
+    id: broke
+    attributes:
+      label: What broke, and what you changed
+      description: Tools that fail in the sandbox, Seatbelt denials, login or resume problems, and the change that fixed them.
+  - type: textarea
+    id: review
+    attributes:
+      label: The review
+      description: Lines in `airbag review` that did not matter, false flags, or something you expected to see and did not.
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Time from install to the first session that worked, and the steps it took.

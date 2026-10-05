@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/getjump/airbag/internal/operation"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/review"
 	"github.com/getjump/airbag/internal/session"
@@ -47,9 +48,22 @@ type Conflict struct {
 // Overlay reads the live workspace, so the agent's version was based
 // on the old file; applying it would silently drop the human's edit.
 func Conflicts(s *session.Session, cs []review.Change) []Conflict {
-	since := s.Created
+	base := s.Created
 	if !s.Baseline.IsZero() {
-		since = s.Baseline
+		base = s.Baseline
+	}
+	// since is when p last matched the branch's view: the session's
+	// start, or a later apply that wrote p or a directory above it.
+	since := func(p string) time.Time {
+		t := base
+		for q := p; ; q = filepath.Dir(q) {
+			if at, ok := s.Applied[q]; ok && at.After(t) {
+				t = at
+			}
+			if q == filepath.Dir(q) {
+				return t
+			}
+		}
 	}
 	var replaced []string
 	for _, c := range cs {
@@ -66,8 +80,13 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 		exists := err == nil
 		switch c.Kind {
 		case review.Added:
-			if exists && !(c.IsDir() && st.IsDir()) {
+			switch {
+			case exists && !(c.IsDir() && st.IsDir()):
 				out = append(out, Conflict{c.Path, "created on the host during the session"})
+			case !exists && slices.Contains(s.HostConfigs, c.Path):
+				// An agent config the host removed: the branch copy
+				// reads as new, but applying it would undo the removal.
+				out = append(out, Conflict{c.Path, "deleted on the host during the session"})
 			}
 		default:
 			if !exists {
@@ -80,7 +99,7 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 				if p := changedInside(c.Path, since); p != "" {
 					out = append(out, Conflict{p, "changed on the host during the session, inside a directory the agent removed"})
 				}
-			} else if !st.IsDir() && changedAfter(c.Path, since) {
+			} else if !st.IsDir() && changedAfter(c.Path, since(c.Path)) {
 				out = append(out, Conflict{c.Path, "changed on the host during the session"})
 			}
 		}
@@ -96,13 +115,13 @@ func changedAfter(p string, t time.Time) bool {
 	return ctime(&st).After(t)
 }
 
-func changedInside(dir string, t time.Time) string {
+func changedInside(dir string, since func(string) time.Time) string {
 	found := ""
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || found != "" {
 			return filepath.SkipAll
 		}
-		if !d.IsDir() && changedAfter(p, t) {
+		if !d.IsDir() && changedAfter(p, since(p)) {
 			found = p
 		}
 		return nil
@@ -128,6 +147,33 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		return fmt.Errorf("session %s is still running", s.ID)
 	}
 	in := bufio.NewReader(o.In)
+	// What review folds in $HOME (caches, agent state) is left out: the
+	// fold is why it needs no decision, and a download cache holds code
+	// a host build runs as it is. --only naming it takes it anyway.
+	// Agent state folded under a directory the agent replaced is kept
+	// with it (~/.claude rebuilt): applying the replacement takes the
+	// host's directory away. A cache there is left out all the same; the
+	// host's copy goes to the undo journal with the rest.
+	var replaced []string
+	for _, c := range cs {
+		if c.Kind == review.Replaced && c.IsDir() && !review.Dropped(c) {
+			replaced = append(replaced, c.Path+string(filepath.Separator))
+		}
+	}
+	var kept []review.Change
+	dropped := 0
+	for _, c := range cs {
+		under := review.DroppedState(c) && slices.ContainsFunc(replaced, func(r string) bool { return strings.HasPrefix(c.Path, r) })
+		if review.Dropped(c) && !under && !homeMatches(c, o.Only, s.Home) {
+			dropped++
+			continue
+		}
+		kept = append(kept, c)
+	}
+	cs = kept
+	if dropped > 0 {
+		fmt.Fprintf(o.Out, "Leaving out %d cache and agent state files in $HOME (name one with --only to take it)\n", dropped)
+	}
 	chosen, err := choose(Units(cs), in, o)
 	if err != nil {
 		return err
@@ -139,9 +185,9 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if cf := Conflicts(s, picked); len(cf) > 0 && !o.Force {
 		fmt.Fprintf(o.Out, "Conflicts: %d files changed on the host while the agent worked:\n", len(cf))
 		for _, c := range cf {
-			fmt.Fprintf(o.Out, "  %s: %s\n", c.Path, c.Reason)
+			fmt.Fprintf(o.Out, "  %s: %s\n", review.OneLine(c.Path), c.Reason)
 		}
-		return fmt.Errorf("nothing applied; rerun with --force to overwrite, or discard the session")
+		return fmt.Errorf("nothing applied; leave these out with apply -i or --only, rerun with --force to overwrite them, or discard the session")
 	}
 	if len(picked) > 0 {
 		gen, err := beginGeneration(s)
@@ -157,6 +203,22 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		if err := gen.finish(); err != nil {
 			return err
 		}
+		// What apply wrote matches the branch from now on: a later run's
+		// change to it conflicts only with a host edit after this.
+		// A file is recorded with its own change time, which a host edit
+		// after it exceeds even on a coarse clock; the rest with now.
+		now := time.Now()
+		if s.Applied == nil {
+			s.Applied = map[string]time.Time{}
+		}
+		for _, c := range picked {
+			at := now
+			var st unix.Stat_t
+			if unix.Lstat(c.Path, &st) == nil && st.Mode&unix.S_IFMT != unix.S_IFDIR {
+				at = ctime(&st)
+			}
+			s.Applied[c.Path] = at
+		}
 	}
 	if !s.Clone {
 		forget(picked) // a clone matches the real files once they are applied
@@ -164,6 +226,17 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if gitTouched(picked) {
 		s.GitTouched = true
 	}
+	// A config this apply removed from the real $HOME, itself or with a
+	// directory above it, is not one the host removed: a later run may
+	// create it anew.
+	s.HostConfigs = slices.DeleteFunc(s.HostConfigs, func(p string) bool {
+		return slices.ContainsFunc(picked, func(c review.Change) bool {
+			// A file or link in place of a directory removes it too,
+			// though Scan calls that Modified.
+			removed := c.Kind == review.Deleted || c.Kind == review.Replaced || c.Kind == review.Modified && !c.IsDir()
+			return c.Kind == review.Deleted && c.Path == p || removed && strings.HasPrefix(p, c.Path+string(filepath.Separator))
+		})
+	})
 	if len(picked) > 0 {
 		fmt.Fprintf(o.Out, "Applied %d changes.\n", len(picked))
 	}
@@ -172,10 +245,12 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if err != nil {
 		return err
 	}
-	if len(rest) == 0 {
+	// What apply leaves out does not keep the session open.
+	left := slices.DeleteFunc(slices.Clone(rest), review.Dropped)
+	if len(left) == 0 {
 		s.Status = session.StatusApplied
 	} else {
-		fmt.Fprintf(o.Out, "%d changes stay in session %s: airbag apply -i, or airbag discard.\n", len(rest), s.ID)
+		fmt.Fprintf(o.Out, "%d changes stay in session %s: airbag apply -i, or airbag discard.\n", len(left), s.ID)
 	}
 	if err := s.Save(); err != nil {
 		return err
@@ -277,12 +352,25 @@ func gitTouched(cs []review.Change) bool {
 }
 
 func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reader, o Options) error {
+	lock, err := box.LockExecution()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }()
 	intents, err := box.List()
 	if err != nil {
 		return err
 	}
-	failed := "" // after a failure the rest wait: a PR without its push means nothing
+	// After a failure the rest wait (a PR without its push means
+	// nothing), in this run; after an unknown outcome they wait until the
+	// user records what happened with `airbag outbox resolve`. An intent
+	// left pending (--yes, --branch, --trust-git) holds nothing back.
+	failed, unknown := "", ""
 	for _, it := range intents {
+		if it.Status == outbox.Unknown {
+			unknown = it.ID
+			continue
+		}
 		if it.Status == outbox.Running {
 			// A run was recorded but not its end: airbag stopped mid-push.
 			it.Status = outbox.Unknown
@@ -295,9 +383,16 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 				return fmt.Errorf("intent %s: %w", it.ID, err)
 			}
 			fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
+			unknown = it.ID
 			continue
 		}
-		if it.Status != outbox.Pending {
+		if it.Status != outbox.Pending && !(it.Request != nil && it.Status == string(operation.Approved)) {
+			continue
+		}
+		if unknown != "" {
+			fmt.Fprintf(o.Out, "intent %s left pending: the outcome of %s is unknown; check what it did, then record it with "+
+				"`airbag outbox resolve %s done|failed %s`, and `airbag apply %s` runs the rest\n",
+				it.ID, unknown, unknown, s.ID, s.ID)
 			continue
 		}
 		if failed != "" {
@@ -311,14 +406,19 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 			status, err = runPush(s, box, it, risky, in, o)
 		case outbox.KindCmd:
 			status, err = runCmd(s, box, it, risky, in, o)
+		case outbox.KindPullRequest:
+			status, err = runPullRequest(s, box, it, in, o)
 		default:
 			status, err = reject(box, it, "unknown kind "+it.Kind, o)
 		}
 		if err != nil {
 			return err
 		}
-		if status == outbox.Failed {
+		switch status {
+		case outbox.Failed:
 			failed = it.ID
+		case outbox.Unknown:
+			unknown = it.ID
 		}
 	}
 	return nil
@@ -424,7 +524,14 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, i
 	if err != nil {
 		return reject(box, it, fmt.Sprintf("%s: not found on this machine", it.Argv[0]), o)
 	}
-	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, s.Workspace) {
+	// The program's path has its links resolved, so the workspace's is
+	// compared with its links resolved too (a workspace under ~/code ->
+	// /mnt/data/code, or /tmp -> /private/tmp on macOS).
+	ws := s.Workspace
+	if r, err := filepath.EvalSymlinks(ws); err == nil {
+		ws = r
+	}
+	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, ws) || within(abs, s.Workspace) {
 		return reject(box, it, fmt.Sprintf("%s resolves to %s, inside the workspace; deferred commands run only programs from outside it", it.Argv[0], prog), o)
 	}
 	rels := make([]string, 0, len(it.Files))

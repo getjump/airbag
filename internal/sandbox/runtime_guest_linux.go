@@ -170,7 +170,9 @@ func guestExec(c guestConfig) int {
 	if len(c.Argv) == 0 {
 		return 125
 	}
-	if err := restrictAgent(); err != nil {
+	// --strict adds the strict filter, as for native. Unlike native's
+	// default, a filter that cannot be installed always stops the run.
+	if err := restrictAgent(c.Strict); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 125
 	}

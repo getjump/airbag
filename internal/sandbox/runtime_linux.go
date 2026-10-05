@@ -27,6 +27,7 @@ const guestConfigPath = "/run/airbag/config.json"
 
 type guestConfig struct {
 	Backend              string   `json:"backend"`
+	Strict               bool     `json:"strict,omitempty"`
 	GeneratedRecoveryDir bool     `json:"generated_recovery_dir,omitempty"`
 	Argv                 []string `json:"argv"`
 	Env                  []string `json:"env"`
@@ -170,7 +171,7 @@ func runOptional(s *session.Session) (int, error) {
 	if rel, err := filepath.Rel(s.Workspace, s.Cwd); err == nil && pathWithin(s.Cwd, s.Workspace) {
 		cwd = filepath.Join(cwd, rel)
 	}
-	cfg := guestConfig{Backend: s.Backend, Argv: s.Argv, Env: agentEnvFor(s, ProxyAddr, "/run/airbag/bin", "/tmp", extra), Cwd: cwd, Workspace: s.CloneDir(), UID: uid, GID: gid}
+	cfg := guestConfig{Backend: s.Backend, Strict: s.Strict, Argv: s.Argv, Env: agentEnvFor(s, ProxyAddr, "/run/airbag/bin", "/tmp", extra), Cwd: cwd, Workspace: s.CloneDir(), UID: uid, GID: gid}
 	if s.Backend == "microvm" {
 		_, err := os.Lstat(filepath.Join(s.CloneDir(), "lost+found"))
 		cfg.GeneratedRecoveryDir = os.IsNotExist(err)

@@ -18,6 +18,8 @@ import (
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
+	"github.com/getjump/airbag/internal/netcap"
+	"github.com/getjump/airbag/internal/operation"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/secretfs"
@@ -54,13 +56,30 @@ func (s *Server) Serve(l net.Listener) error {
 	mux.HandleFunc("POST /hook/{agent}/{event}", s.hook)
 	mux.HandleFunc("POST /exec", s.exec)
 	mux.HandleFunc("POST /taint", s.taint)
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	return srv.Serve(l)
+	// The agent can open connections here, and each one held is a
+	// goroutine and a file descriptor on the host side: at most
+	// MaxConns are open at once, a request must arrive whole within a
+	// minute (its header within 10 s) and its answer be taken within
+	// one, and a connection waiting for its next request is closed after
+	// two.
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: time.Minute,
+		WriteTimeout: time.Minute, IdleTimeout: 2 * time.Minute}
+	return srv.Serve(netcap.Limit(l, MaxConns))
 }
+
+// MaxConns caps the connections to the control socket open at once.
+// Each shim, hook and secret read holds one while it asks; past the cap
+// one more is closed, and the shim goes on as it does when the host
+// does not answer.
+const MaxConns = 128
+
+// maxBody bounds a request's body: an intent, a deferred command or a
+// hook's payload.
+const maxBody = 4 << 20
 
 func (s *Server) intent(w http.ResponseWriter, r *http.Request) {
 	var in outbox.Intent
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -92,9 +111,10 @@ func writeJSON(w http.ResponseWriter, v any) {
 // names: the call was queued, it should run here (no entry matches),
 // or it was refused.
 type DeferReply struct {
-	Queued  *outbox.Intent `json:"queued,omitempty"`
-	Run     bool           `json:"run,omitempty"`
-	Refused string         `json:"refused,omitempty"`
+	Queued  *outbox.Intent    `json:"queued,omitempty"`
+	Run     bool              `json:"run,omitempty"`
+	Refused string            `json:"refused,omitempty"`
+	Result  *operation.Result `json:"result,omitempty"`
 }
 
 // deferCmd queues a call that a `defer:` entry matches. in.Files holds
@@ -103,7 +123,7 @@ type DeferReply struct {
 // stops the command later: it runs only on content that matches.
 func (s *Server) deferCmd(w http.ResponseWriter, r *http.Request) {
 	var in outbox.Intent
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&in); err != nil || len(in.Argv) == 0 {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil || len(in.Argv) == 0 {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -146,13 +166,67 @@ func (s *Server) deferCmd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Kind, in.Files = outbox.KindCmd, files
+	if args, matched, err := operation.ParsePullRequest(in.Argv); matched {
+		if err != nil {
+			refuse(err.Error())
+			return
+		}
+		if in.CaptureError != "" {
+			refuse(in.CaptureError)
+			return
+		}
+		if in.Request == nil {
+			refuse("typed PR capture is missing; update the sandbox shim")
+			return
+		}
+		if err := in.Request.Validate(); err != nil {
+			refuse(err.Error())
+			return
+		}
+		p := in.Request.PullRequest
+		want := args.PullRequest
+		want.HeadCommit = p.HeadCommit
+		if args.BodyFile != "" {
+			path := args.BodyFile
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(in.Cwd, path)
+			}
+			rel, ok := inside(s.Root, path)
+			if !ok || files[rel] != strings.TrimPrefix(operation.Hash([]byte(p.Body)), "sha256:") {
+				refuse("captured PR body does not match its workspace file digest")
+				return
+			}
+			want.Body = p.Body
+		}
+		if want != *p {
+			refuse("typed PR payload does not match the deferred arguments")
+			return
+		}
+		in.Kind = outbox.KindPullRequest
+		digest, err := in.Request.Digest()
+		if err != nil {
+			refuse(err.Error())
+			return
+		}
+		// Lowercase, as GitHub names repositories: a rule on "org/repo"
+		// holds for every spelling the agent may choose.
+		d, id := s.Gate.Check(policy.Input{Effect: models.Effect{Kind: in.Kind, Target: strings.ToLower(p.Repository), Detail: digest}, Argv: in.Argv})
+		if d.Verdict != policy.Allow {
+			refuse(policy.Explain(d, id))
+			return
+		}
+	} else if in.Request != nil || in.RequestDigest != "" || in.CaptureError != "" {
+		refuse("typed request does not describe this deferred command")
+		return
+	}
 	in, err := s.Box.Push(in)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.Log.Add(effects.Effect{Kind: models.DeferCmd, Target: clip(line, 200), Verdict: "defer", Reason: in.ID})
-	reply(DeferReply{Queued: &in})
+	result := &operation.Result{Outcome: operation.Queued, Ticket: in.ID, RequestDigest: in.RequestDigest}
+	reply(DeferReply{Queued: &in, Result: result})
 }
 
 // namesSecret returns the first argument, as a word or an
@@ -198,7 +272,7 @@ func inside(root, p string) (string, bool) {
 // call changed which files.
 func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 	var p agents.HookPayload
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&p); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&p); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -251,7 +325,12 @@ func (s *Server) taint(w http.ResponseWriter, r *http.Request) {
 	if s.Gate != nil {
 		s.Gate.Taint(t.File)
 	}
-	s.Log.Add(effects.Effect{Kind: "secret.read", Target: t.File, Verdict: "taint", Reason: t.Exe})
+	// A resumed session reads the label back from this entry
+	// (restoreLabels): the read goes on only once it is written.
+	if err := s.Log.AddAll([]effects.Effect{{Kind: "secret.read", Target: t.File, Verdict: "taint", Reason: t.Exe}}); err != nil {
+		http.Error(w, "the read could not be logged: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	_, _ = w.Write([]byte("{}"))
 }
 
@@ -283,7 +362,7 @@ type Exec struct {
 
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	var e Exec
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&e); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&e); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -378,13 +457,21 @@ func post(timeout time.Duration, url string, body io.Reader) (*http.Response, er
 	return client(timeout).Do(req)
 }
 
+// transport is shared by every call. A Transport of its own per call
+// would keep that call's connection open and idle, with two goroutines
+// on this side and one on the host's, for as long as the process runs:
+// the sandbox's init reports each secret read through here.
+var transport = &http.Transport{
+	DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", socketPath())
+	},
+	MaxIdleConns:    2,
+	IdleConnTimeout: 30 * time.Second,
+}
+
 func client(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout, Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socketPath())
-		},
-	}}
+	return &http.Client{Timeout: timeout, Transport: transport}
 }
 
 // Defer asks whether a call waits in the outbox; from inside the
