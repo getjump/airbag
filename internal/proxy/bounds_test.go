@@ -804,3 +804,66 @@ func TestForwardStoppedFlowEndsTheConnection(t *testing.T) {
 		})
 	}
 }
+
+// deadlineWriter counts the read deadlines set on it through a
+// ResponseController.
+type deadlineWriter struct {
+	http.ResponseWriter
+	set int
+}
+
+func (d *deadlineWriter) SetReadDeadline(time.Time) error { d.set++; return nil }
+
+// readStop fires only while live, and says whether it fired.
+func TestReadStop(t *testing.T) {
+	w := &deadlineWriter{ResponseWriter: httptest.NewRecorder()}
+	s := &readStop{rc: http.NewResponseController(w), live: true}
+	_ = s.Close()
+	if w.set != 1 || !s.end() {
+		t.Fatalf("live: %d deadlines, fired %v", w.set, s.fired)
+	}
+	w.set = 0
+	s = &readStop{rc: http.NewResponseController(w), live: true}
+	if s.end() {
+		t.Fatal("reported fired before it was")
+	}
+	_ = s.Close()
+	if w.set != 0 {
+		t.Fatalf("set a deadline after end: %d", w.set)
+	}
+}
+
+// A response whose headers the socket cannot take while the client does
+// not read is still bounded: it is flushed while the flow can stop it,
+// so the connection does not stay pinned after the handler.
+func TestForwardUnreadHeadersAreBounded(t *testing.T) {
+	big := strings.Repeat("x", 8<<20) // more than the socket buffers hold
+	target := listenTCP(t, func(c net.Conn) {
+		defer c.Close()
+		if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nX-Big: %s\r\nContent-Length: 0\r\n\r\n", big)
+	})
+	lim := testLimits
+	lim.Idle = 300 * time.Millisecond
+	_, pa, _ := boundedProxy(t, lim)
+	g0, fd0 := usage()
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", pa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetReadBuffer(4096)
+	}
+	_, _ = fmt.Fprintf(c, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	// The proxy takes the request and writes to a client that never
+	// reads. Wait until its side of the connection is busy, then for it
+	// to let go: what stays is this test's own end of the connection.
+	deadline := time.Now().Add(2 * time.Second)
+	for g, _ := usage(); g <= g0 && time.Now().Before(deadline); g, _ = usage() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	settle(t, g0, fd0, 0, 1, 5*time.Second)
+}

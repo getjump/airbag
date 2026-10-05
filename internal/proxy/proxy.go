@@ -196,6 +196,9 @@ func (p *Proxy) Serve(l net.Listener) error {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// The previous response on this connection may have left a write
+	// deadline (forward); this request starts without one.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	host := r.URL.Hostname()
 	if r.Method == http.MethodConnect {
 		host, _, _ = net.SplitHostPort(r.Host)
@@ -422,9 +425,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	// runs. That deadline also fails net/http's own read of the
 	// connection, which cancels the context of the connection's next
 	// requests, so once it has fired the connection serves no more: an
-	// error answer says so (stopped, below), and a response already
-	// under way is aborted.
-	wrote := false
+	// answer to a stopped flow says so (stopped, below), and one that
+	// did not, the flow stopping later, is aborted.
+	closing := false
 	if r.Body != nil && r.Body != http.NoBody {
 		body := &readStop{rc: http.NewResponseController(w), live: true}
 		if !f.hold(body) {
@@ -433,7 +436,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 		}
 		defer func() {
 			f.release(body)
-			if body.end() && wrote {
+			if body.end() && !closing {
 				panic(http.ErrAbortHandler)
 			}
 		}()
@@ -442,6 +445,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	stopped := func() {
 		if f.isStopped() {
 			w.Header().Set("Connection", "close")
+			closing = true
 		}
 	}
 	out := r.Clone(ctx)
@@ -451,6 +455,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	}
 	pu, err := p.Upstream(out.URL)
 	if err != nil {
+		stopped()
 		http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -473,16 +478,23 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	}
 	// A client that stops reading blocks the copy in a write to it,
 	// which closing the upstream does not end: stopping the flow ends
-	// it with a write deadline in the past. Only while the body is
-	// copied: the response is still flushed after this returns.
-	stall := &closer{func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Now()) }}
+	// it with a write deadline in the past. That covers the copy and the
+	// flush of what is buffered (headers too large for the socket, say);
+	// the few bytes net/http writes after the handler returns (the end
+	// of a chunked body) get a deadline of Limits.Idle, which the next
+	// request on the connection clears (ServeHTTP).
+	rc := http.NewResponseController(w)
+	stall := &closer{func() { _ = rc.SetWriteDeadline(time.Now()) }}
 	if !f.hold(stall) {
 		panic(http.ErrAbortHandler)
 	}
 	stopped()
 	w.WriteHeader(resp.StatusCode)
-	wrote = true
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	_, err = io.Copy(w, resp.Body)
+	if err == nil {
+		err = rc.Flush()
+	}
+	if err != nil {
 		// The body broke off (the upstream failed, or was closed as
 		// idle or cut), or the client stopped reading: the client must
 		// see a broken response, not a complete one, which a chunked
@@ -490,6 +502,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 		panic(http.ErrAbortHandler)
 	}
 	f.release(stall)
+	if p.Limits.Idle > 0 {
+		_ = rc.SetWriteDeadline(time.Now().Add(p.Limits.Idle))
+	}
 }
 
 func closeWrite(c net.Conn) {
