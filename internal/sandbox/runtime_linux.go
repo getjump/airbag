@@ -97,6 +97,16 @@ func prepareRuntimeWorkspace(s *session.Session) error {
 	return nil
 }
 
+// providerEnv is all the environment runsc, Firecracker and the tools that
+// stage their images get: none of airbag's own, credentials included.
+func providerEnv() []string {
+	path := os.Getenv("PATH")
+	if path == "" {
+		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	}
+	return []string{"PATH=" + path}
+}
+
 func runOptional(s *session.Session) (int, error) {
 	dir := filepath.Join(s.Dir, "runtime")
 	// Nothing agent-writable is used as provider configuration or executable.
@@ -106,11 +116,13 @@ func runOptional(s *session.Session) (int, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return 1, err
 	}
+
 	root := filepath.Join(dir, "rootfs")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return 1, err
 	}
 	cmd := exec.CommandContext(context.Background(), "/bin/cp", "-a", "--reflink=auto", "--", s.Runtime.RootFS+"/.", root) //nolint:gosec // operator-supplied trusted rootfs, separate from workspace
+	cmd.Env = providerEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return 1, fmt.Errorf("stage rootfs: %w: %s", err, out)
 	}
@@ -254,6 +266,7 @@ func runGVisor(s *session.Session, dir, root string) (int, error) {
 	common := []string{"--root=" + filepath.Join(dir, "state"), "--rootless=" + strconv.FormatBool(os.Getuid() != 0)}
 	defer func() {
 		cmd := exec.CommandContext(context.Background(), s.Runtime.Binary, append(common, "delete", "--force", s.ID)...) //nolint:gosec // trusted runsc, fixed runtime operation
+		cmd.Env = providerEnv()
 		_ = cmd.Run()
 		// Run as root, runsc leaves --network=none's namespace mounted in
 		// its state directory, which resume and discard then cannot remove.
@@ -265,6 +278,7 @@ func runGVisor(s *session.Session, dir, root string) (int, error) {
 
 func executeProvider(binary string, args []string) (int, error) {
 	cmd := exec.CommandContext(context.Background(), binary, args...) //nolint:gosec // explicitly selected trusted runtime, not a guest-supplied executable
+	cmd.Env = providerEnv()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	sigs := make(chan os.Signal, 8)
@@ -307,6 +321,7 @@ func ext4Image(source, path string, size int64) error {
 		return closeErr
 	}
 	cmd := exec.CommandContext(context.Background(), "mkfs.ext4", "-q", "-F", "-d", source, path) //nolint:gosec // image creation from host-owned session data; no untrusted image parsing
+	cmd.Env = providerEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("make guest image: %w: %s", err, out)
 	}
