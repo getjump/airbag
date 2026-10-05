@@ -38,6 +38,12 @@ type Change struct {
 	Type  fs.FileMode // fs.ModeDir, fs.ModeSymlink or 0 for files
 	Mode  fs.FileMode
 	Flags []string
+	// cfg: the agent config a change is through a link, and home the
+	// $HOME it is in (classify).
+	cfg  *jsonConfig
+	home string
+	// benign: an agent config change of benign keys only (classify).
+	benign bool
 }
 
 func (c Change) IsDir() bool { return c.Type == fs.ModeDir }
@@ -181,6 +187,20 @@ var buildDirs = []string{"bin/", "build/", "dist/", "target/", "out/", "node_mod
 
 func classify(s *session.Session, cs []Change) {
 	secrets := knownSecrets(s.Workspace)
+	var aliases []homeAlias
+	if s.OverHome {
+		aliases = homeAliases(s.Home, []string{s.Home, s.Workspace})
+	}
+	// Git's own files take names only from watched paths whose real
+	// place is inside .git, not from a link to the workspace or a
+	// directory above it (the workspace table flags hooks and config).
+	gitDir := filepath.Join(s.Workspace, ".git")
+	var gitAliases []homeAlias
+	for _, a := range aliases {
+		if a.target == gitDir || strings.HasPrefix(a.target, gitDir+string(filepath.Separator)) {
+			gitAliases = append(gitAliases, a)
+		}
+	}
 	for i := range cs {
 		c := &cs[i]
 		rel := filepath.ToSlash(c.Rel)
@@ -192,16 +212,92 @@ func classify(s *session.Session, cs []Change) {
 			table = persistHomeTable
 			c.Flags = append(c.Flags, "outside workspace")
 		}
-		if (persistReason(rel, table) != "" || slices.Contains(persistNames, path.Base(rel))) && !strings.HasSuffix(rel, ".sample") {
+		// The $HOME paths the change stands for: its own in $HOME, and
+		// in either layer the watched paths whose link leads to it (a
+		// dotfiles repository as the workspace, say; homeAliases).
+		var names []string
+		if c.Layer == "home" {
+			names = append(names, rel)
+		}
+		lookup := aliases
+		if c.Layer == "ws" && strings.HasPrefix(rel, ".git/") {
+			lookup = gitAliases
+		}
+		for _, a := range aliasRels(lookup, c.Path) {
+			if c.IsDir() {
+				a += "/"
+			}
+			names = append(names, a)
+			if cf := configFor(strings.TrimSuffix(a, "/")); cf != nil {
+				c.cfg, c.home = cf, s.Home
+			}
+		}
+		// A deletion, a replacement, or a file or link put above where a
+		// watched path really is (~/dotfiles, for ~/.bashrc ->
+		// ~/dotfiles/bashrc) takes that path with it or points it
+		// elsewhere: it changes the path as a whole. Only a directory
+		// there, new or changed, leaves the path where it is.
+		if c.Kind == Deleted || c.Kind == Replaced || !c.IsDir() {
+			if above := aliasesAbove(lookup, c.Path); len(above) > 0 {
+				c.Flags = append(c.Flags, "persist", "holds where "+listHome(above)+" really is")
+				if slices.ContainsFunc(above, func(n string) bool { return agentMemory(n) || agentMemory(n+"/memory") }) {
+					c.Flags = append(c.Flags, "agent instructions")
+				}
+			}
+		}
+		persists := func(n string, t []persistence) bool {
+			return (persistReason(n, t) != "" || slices.Contains(persistNames, path.Base(n))) && !strings.HasSuffix(n, ".sample")
+		}
+		if (persists(rel, table) || slices.ContainsFunc(names, func(n string) bool { return persists(n, persistHomeTable) })) && !slices.Contains(c.Flags, "persist") {
 			c.Flags = append(c.Flags, "persist")
 		}
-		if c.Kind != Deleted && c.Type == 0 && c.Mode&0o111 != 0 && !hasPrefix(rel, buildDirs) && !strings.HasPrefix(rel, ".git/") {
+		if len(names) > 0 {
+			// A config file (~/.claude.json) is shown by its changed
+			// keys, by class: "persist" only when one of them runs code
+			// or changes trust, unknown keys listed plainly, and benign
+			// counters with no flag, so they need no decision.
+			if notes, ok := configNotes(*c); ok {
+				flags := withoutBenign(notes)
+				c.Flags = append(c.Flags, flags...)
+				// A mode change can open a config that holds the login
+				// (oauthAccount, primaryApiKey) to other users' reads.
+				c.benign = len(flags) == 0 && sameMode(*c)
+			}
+			// A file or link in place of a directory takes what was in it
+			// away, as a replacement does, though Scan says Modified.
+			kind := c.Kind
+			if kind == Modified && !c.IsDir() {
+				kind = Replaced
+			}
+			if slices.ContainsFunc(names, func(n string) bool { return touchesHostShellState(s.Home, n, kind) }) {
+				c.Flags = append(c.Flags, "persist", shellStateFlag)
+			}
+			// Project memory is loaded into later sessions; a link where a
+			// directory above it is points it at whatever the link names.
+			if slices.ContainsFunc(names, func(n string) bool {
+				return agentMemory(n) || (kind == Deleted || kind == Replaced) && holdsMemory(c.Path, n) ||
+					c.Type == fs.ModeSymlink && aboveMemory(n)
+			}) {
+				c.Flags = append(c.Flags, "agent instructions")
+			}
+		}
+		if c.Kind != Deleted && c.Type == 0 && c.Mode&0o111 != 0 && !hasPrefix(rel, buildDirs) && (c.Layer != "ws" || !strings.HasPrefix(rel, ".git/")) {
 			c.Flags = append(c.Flags, "executable")
 		}
 		if c.Kind != Deleted && c.Type == 0 && len(secrets) > 0 && containsSecret(c.Upper, secrets) {
 			c.Flags = append(c.Flags, "secret in diff")
 		}
 	}
+}
+
+// sameMode reports whether a change keeps the mode of the file it
+// changes, or makes a new one only its owner can read.
+func sameMode(c Change) bool {
+	fi, err := os.Lstat(c.Path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return c.Mode.Perm()&0o077 == 0
+	}
+	return err == nil && fi.Mode().Perm() == c.Mode.Perm()
 }
 
 func hasPrefix(rel string, patterns []string) bool {
@@ -276,14 +372,17 @@ func containsSecret(path string, secrets []string) bool {
 func Attention(cs []Change) []Change {
 	var out []Change
 	for _, c := range cs {
-		if c.IsDir() && c.Kind == Added {
-			continue // the files inside carry the flags
+		if c.IsDir() && c.Kind == Added || Dropped(c) {
+			continue // the files inside carry the flags; apply leaves it out
 		}
-		for _, f := range c.Flags {
-			if f != "outside workspace" {
-				out = append(out, c)
-				break
-			}
+		// In $HOME, where an agent has no work of its own, what is not
+		// known to be harmless needs a look too: what review folds
+		// (caches, agent state, git internals) and agent config changes
+		// of benign keys only are known. Matching is by where a write
+		// really landed, so one made through a link (~/.bashrc into
+		// ~/dotfiles) is under a name no table knows, and shows here.
+		if flagged(c) || c.Layer == "home" && folded(c) == "" && !c.benign {
+			out = append(out, c)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })

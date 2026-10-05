@@ -1,0 +1,49 @@
+name: Feature request
+description: Something airbag should do that it does not
+labels: [enhancement, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read [docs/roadmap.md](https://github.com/getjump/airbag/blob/main/docs/roadmap.md) first. Its Deferred table says why each item waits and what would bring it back.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you were doing, and where airbag got in the way or fell short.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What airbag should do
+    validations:
+      required: true
+  - type: dropdown
+    id: roadmap
+    attributes:
+      label: Is it in docs/roadmap.md under Deferred?
+      options:
+        - "No"
+        - Yes, and below is what the roadmap says would bring it back
+        - "Yes"
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Does it widen what the agent can reach?
+      description: What the agent can read, write or reach without review, such as paths, hosts, syscalls, secrets or commands that run on the host.
+      options:
+        - "No"
+        - It narrows it
+        - Yes, it widens it (say why below)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: Other ways to get there, and what you do today.

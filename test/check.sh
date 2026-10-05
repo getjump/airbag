@@ -120,7 +120,7 @@ check_vuln() {
 check_shell() {
 	sc=$(shellcheck_path)
 	echo "== shellcheck"
-	"$sc" test/*.sh install.sh demo/*.sh
+	"$sc" test/*.sh install.sh demo/*.sh .github/scripts/*.sh
 }
 
 check_actions() {

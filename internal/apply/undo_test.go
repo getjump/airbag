@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -1029,5 +1030,446 @@ func TestRollbackKeepsTempNamedFileAfterFinishedApply(t *testing.T) {
 	}
 	if _, prev := keptVersion(t, s, d); prev != "user file\n" {
 		t.Fatalf("version of %s from before the apply = %q", d, prev)
+	}
+}
+
+// An agent config that was in the real $HOME when a run began and that
+// the host removed since reads as a new file in the branch; apply
+// reports the removal instead of bringing the old settings back. A
+// config that was never there is an ordinary new file.
+func TestConflictConfigRemovedOnHost(t *testing.T) {
+	for _, existed := range []bool{true, false} {
+		t.Setenv("AIRBAG_HOME", t.TempDir())
+		home := t.TempDir()
+		s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		real := filepath.Join(home, ".claude.json")
+		if existed {
+			if err := os.WriteFile(real, []byte(`{"mcpServers":{"x":{}}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		review.NoteHostConfigs(s)
+		branch := filepath.Join(s.HomeUpper(), ".claude.json")
+		if err := os.MkdirAll(filepath.Dir(branch), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(branch, []byte(`{"mcpServers":{"x":{}},"numStartups":1}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if existed {
+			if err := os.Remove(real); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var found bool
+		for _, c := range Conflicts(s, mustScan(t, s)) {
+			found = found || c.Path == real && c.Reason == "deleted on the host during the session"
+		}
+		if found != existed {
+			t.Errorf("existed at the run's start=%v: conflict=%v", existed, found)
+		}
+	}
+}
+
+// A config deletion airbag itself applied is not a host removal: when a
+// later run of the session creates the config anew, apply takes it.
+func TestAppliedConfigDeletionIsNotAHostRemoval(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	real := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(real, []byte(`{"numStartups":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	review.NoteHostConfigs(s)
+	branch := filepath.Join(s.HomeUpper(), ".claude.json")
+	if err := os.MkdirAll(filepath.Dir(branch), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mknod(branch, syscall.S_IFCHR, 0); err != nil {
+		t.Skipf("cannot create a whiteout here: %v", err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Lstat(real); !os.IsNotExist(err) {
+		t.Fatalf("apply did not remove the config: %v", err)
+	}
+	// The next run: the host has no config, and the agent writes one.
+	review.NoteHostConfigs(s)
+	if err := os.WriteFile(branch, []byte(`{"numStartups":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cf := Conflicts(s, mustScan(t, s)); len(cf) != 0 {
+		t.Fatalf("conflicts for a config the agent created after an applied deletion: %v", cf)
+	}
+}
+
+// A config removed with the directory above it, by an applied deletion
+// of ~/.claude, is not one the host removed either.
+func TestAppliedDirDeletionClearsHostConfig(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	legacy := filepath.Join(home, ".claude/.config.json")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte(`{"numStartups":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	review.NoteHostConfigs(s)
+	if !slices.Contains(s.HostConfigs, legacy) {
+		t.Fatalf("not noted: %v", s.HostConfigs)
+	}
+	dir := filepath.Join(s.HomeUpper(), ".claude")
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mknod(dir, syscall.S_IFCHR, 0); err != nil {
+		t.Skipf("cannot create a whiteout here: %v", err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if slices.Contains(s.HostConfigs, legacy) {
+		t.Errorf("still noted after the applied deletion: %v", s.HostConfigs)
+	}
+	review.NoteHostConfigs(s)
+	branch := filepath.Join(s.HomeUpper(), ".claude/.config.json")
+	if err := os.MkdirAll(filepath.Dir(branch), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(branch, []byte(`{"numStartups":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cf := Conflicts(s, mustScan(t, s)); len(cf) != 0 {
+		t.Fatalf("conflicts for a config the agent created after an applied deletion: %v", cf)
+	}
+}
+
+// So is one removed by a link put in place of the directory above it,
+// which Scan calls Modified.
+func TestAppliedLinkOverDirClearsHostConfig(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	legacy := filepath.Join(home, ".claude/.config.json")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte(`{"numStartups":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	review.NoteHostConfigs(s)
+	if err := os.MkdirAll(s.HomeUpper(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "elsewhere"), filepath.Join(s.HomeUpper(), ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if slices.Contains(s.HostConfigs, legacy) {
+		t.Errorf("still noted after a link replaced ~/.claude: %v", s.HostConfigs)
+	}
+}
+
+// What review folds in $HOME (a cache, agent state) is left out by
+// apply, a cache whatever it holds; flagged agent state (memory) is
+// applied; --only takes a folded path only when written as a $HOME one.
+// What is left out does not keep the session open.
+func TestApplyLeavesFoldsOut(t *testing.T) {
+	for _, only := range [][]string{nil, {"~/.cache/tool/x"}, {".cache/tool/x"}} {
+		t.Setenv("AIRBAG_HOME", t.TempDir())
+		home := t.TempDir()
+		s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Status = session.StatusStopped
+		for f, mode := range map[string]os.FileMode{".cache/tool/x": 0o600, ".cache/tool/bin/run": 0o755,
+			"notes.txt": 0o600, ".claude/projects/p/memory/MEMORY.md": 0o600} {
+			p := filepath.Join(s.HomeUpper(), f)
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("x"), mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		box, err := outbox.Open(s.EffectsPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = box.Close() })
+		var out bytes.Buffer
+		err = Apply(s, mustScan(t, s), box, Options{Yes: true, Only: only, Out: &out})
+		exists := func(f string) bool { _, err := os.Stat(filepath.Join(home, f)); return err == nil }
+		switch {
+		case only == nil:
+			if err != nil {
+				t.Fatal(err, out.String())
+			}
+			if exists(".cache/tool/x") || exists(".cache/tool/bin/run") || !exists("notes.txt") || !exists(".claude/projects/p/memory/MEMORY.md") {
+				t.Errorf("default apply: cache %v, executable %v, notes %v, memory %v\n%s", exists(".cache/tool/x"),
+					exists(".cache/tool/bin/run"), exists("notes.txt"), exists(".claude/projects/p/memory/MEMORY.md"), out.String())
+			}
+			if s.Status != session.StatusApplied {
+				t.Errorf("status %s after an apply that left only folds out:\n%s", s.Status, out.String())
+			}
+		case only[0] == "~/.cache/tool/x":
+			if err != nil || !exists(".cache/tool/x") {
+				t.Errorf("--only ~/... did not take the cache file: %v\n%s", err, out.String())
+			}
+		default:
+			if err == nil || exists(".cache/tool/x") {
+				t.Errorf("--only in workspace form took the $HOME cache file: %v\n%s", err, out.String())
+			}
+		}
+	}
+}
+
+// A folded change under a directory the agent replaced goes with the
+// replacement: applying it takes the host's directory away.
+func TestApplyKeepsFoldsUnderReplacedDir(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude/todos"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude/todos/old.json"), []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	up := filepath.Join(s.HomeUpper(), ".claude")
+	if err := os.MkdirAll(filepath.Join(up, "todos"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Setxattr(up, "user.overlay.opaque", []byte("y"), 0); err != nil {
+		t.Skipf("cannot mark a directory opaque here: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(up, "todos/new.json"), []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude/todos/new.json")); err != nil {
+		t.Errorf("the replaced ~/.claude lost its folded todos: %v\n%s", err, out.String())
+	}
+}
+
+// A cache under a directory the agent replaced (rm -rf ~/.m2, then a
+// build) is still left out: the agent's jars do not reach the host.
+func TestApplyDropsCacheUnderReplacedDir(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	jar := ".m2/repository/g/a/1/a-1.jar"
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(home, jar)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, jar), []byte("host"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	up := filepath.Join(s.HomeUpper(), ".m2")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(s.HomeUpper(), jar)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Setxattr(up, "user.overlay.opaque", []byte("y"), 0); err != nil {
+		t.Skipf("cannot mark a directory opaque here: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.HomeUpper(), jar), []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(up, "wrapper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(up, "wrapper/w.properties"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if b, err := os.ReadFile(filepath.Join(home, jar)); err == nil && string(b) == "agent" {
+		t.Errorf("the agent's jar reached the host under a replaced ~/.m2\n%s", out.String())
+	}
+	// What was applied stays on a second apply, and the session is done.
+	if s.Status != session.StatusApplied {
+		t.Errorf("status %s with only a left-out cache in the session\n%s", s.Status, out.String())
+	}
+	out.Reset()
+	s.Status = session.StatusStopped
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".m2/wrapper/w.properties")); err != nil {
+		t.Errorf("a second apply took away what the first wrote: %v\n%s", err, out.String())
+	}
+}
+
+// A config that is a link into $HOME: the agent's write lands on the
+// link's target, and if the host removes that target during the session,
+// apply reports it rather than bringing it back.
+func TestConflictLinkedConfigRemovedOnHost(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	target := filepath.Join(home, "dotfiles", "claude.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("dotfiles/claude.json", filepath.Join(home, ".claude.json")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review.NoteHostConfigs(s)
+	branch := filepath.Join(s.HomeUpper(), "dotfiles", "claude.json")
+	if err := os.MkdirAll(filepath.Dir(branch), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(branch, []byte(`{"mcpServers":{"x":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, c := range Conflicts(s, mustScan(t, s)) {
+		found = found || c.Path == target && c.Reason == "deleted on the host during the session"
+	}
+	if !found {
+		t.Fatal("no conflict for a linked config's target the host removed")
+	}
+}
+
+// A config linked into the workspace (a dotfiles repository the agent
+// works in): the target the host removes during the session is a
+// conflict too.
+func TestConflictConfigLinkedIntoWorkspace(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	target := filepath.Join(ws, "claude.json")
+	if err := os.WriteFile(target, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(home, ".claude.json")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review.NoteHostConfigs(s)
+	if err := os.MkdirAll(s.WSUpper(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.WSUpper(), "claude.json"), []byte(`{"mcpServers":{"x":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, c := range Conflicts(s, mustScan(t, s)) {
+		found = found || c.Path == target && c.Reason == "deleted on the host during the session"
+	}
+	if !found {
+		t.Fatal("no conflict for a config's workspace target the host removed")
+	}
+}
+
+// A file an earlier, partial apply wrote, which a later run changes
+// again in the branch, does not conflict: that write was airbag's, not
+// the host's. A host edit after it still does.
+func TestPartialApplyThenRunAgain(t *testing.T) {
+	s, box := undoSession(t)
+	time.Sleep(20 * time.Millisecond)
+	s.Baseline = time.Now() // the real files were there before the run
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Only: []string{"mod.txt"}, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	real := filepath.Join(s.Workspace, "mod.txt")
+	if got := read(t, real); got != "agent\n" {
+		t.Fatalf("mod.txt = %q", got)
+	}
+	// The next run changes it again.
+	if err := os.WriteFile(filepath.Join(s.WSUpper(), "mod.txt"), []byte("agent again\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cf := Conflicts(s, mustScan(t, s)); len(cf) != 0 {
+		t.Fatalf("conflicts after the apply's own write: %v", cf)
+	}
+	time.Sleep(20 * time.Millisecond) // past the clock's tick
+	if err := os.WriteFile(real, []byte("host edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cf := Conflicts(s, mustScan(t, s))
+	if len(cf) != 1 || cf[0].Path != real {
+		t.Fatalf("a host edit after the apply: conflicts %v", cf)
 	}
 }
