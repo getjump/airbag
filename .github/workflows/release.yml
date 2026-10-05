@@ -16,12 +16,25 @@ jobs:
     # tag (Settings > Environments): themselves as required reviewer, and
     # deployment tags limited to v*. A job that names an environment that
     # does not exist yet creates it with no protection at all.
+    # Immutable releases are a setting of their own (Settings > General >
+    # Releases), which this job's token cannot read: once it is on, the
+    # owner sets the repository variable RELEASES_IMMUTABLE to true.
     environment: release
     permissions:
       contents: write # create the draft release, upload its assets, publish it
       id-token: write # Sigstore keyless signing, by cosign and actions/attest
       attestations: write # store the build provenance
     steps:
+      # Publishing the draft does not make it immutable; the setting does.
+      # Without it nothing is built, so no mutable release goes out.
+      - name: immutable releases are on
+        env:
+          RELEASES_IMMUTABLE: ${{ vars.RELEASES_IMMUTABLE }}
+        run: |
+          [ "$RELEASES_IMMUTABLE" = true ] || {
+            echo "::error::turn on immutable releases (Settings > General > Releases), then set the repository variable RELEASES_IMMUTABLE to true and run the release again (re-run this workflow, or delete the tag and push it again)"
+            exit 1
+          }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # All of history and origin/main: the tag must be on main, and
