@@ -2,7 +2,7 @@
 
 The niche is crowded: agents ship their own sandboxes, and nono, AgentFS,
 Docker Sandboxes with Code Airlock, and agentsh cover parts of what airbag
-does (see the comparison in the README). Whether airbag earns a place is a
+does (see the [comparison](comparison.md)). Whether airbag earns a place is a
 question for measurement on real work, before more features. This page is the
 plan; results go below it.
 
