@@ -5,7 +5,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -56,21 +55,28 @@ func homeAliases(home string, roots []string) []homeAlias {
 	}
 	var out []homeAlias
 	seen := map[string]bool{}
-	add := func(rel string) {
+	// add records where rel really is, unless that is inside within (the
+	// watched tree it was found in, whose own names classify it already).
+	add := func(rel, within string) {
 		if rel == "" || seen[rel] {
 			return
 		}
 		seen[rel] = true
 		t, ok := resolveIn(home, rel, roots)
-		// A watched name linked to a whole tree, or to a directory
-		// above itself, would stand for every change in it: skip it.
-		if !ok || slices.Contains(roots, t) || strings.HasPrefix(filepath.Join(home, rel), t+string(filepath.Separator)) {
+		// A watched name linked to a directory above itself ($HOME, say)
+		// would stand for every change there: skip it. One linked to the
+		// workspace root is kept: working on a config's own repository,
+		// every change there is that config.
+		if !ok || strings.HasPrefix(filepath.Join(home, rel), t+string(filepath.Separator)) {
+			return
+		}
+		if within != "" && strings.HasPrefix(t, within+string(filepath.Separator)) {
 			return
 		}
 		out = append(out, homeAlias{rel, t})
 	}
 	for _, w := range watched {
-		add(w)
+		add(w, "")
 		if w == ".claude/projects" || strings.Count(w, "/") == 2 && strings.HasPrefix(w, ".claude/projects/") {
 			continue // the transcripts are not watched
 		}
@@ -89,7 +95,8 @@ func homeAliases(home string, roots []string) []homeAlias {
 			}
 			if p != root && d.Type()&fs.ModeSymlink != 0 {
 				if sub, err := filepath.Rel(root, p); err == nil {
-					add(w + "/" + filepath.ToSlash(sub))
+					within, _ := under(root, roots)
+					add(w+"/"+filepath.ToSlash(sub), within)
 				}
 			}
 			return nil
@@ -139,7 +146,11 @@ func resolveIn(home, rel string, roots []string) (string, bool) {
 				return "", false
 			}
 			if !filepath.IsAbs(t) {
-				t = filepath.Join(filepath.Dir(p), t)
+				dir := filepath.Dir(p)
+				if r, err := filepath.EvalSymlinks(dir); err == nil {
+					dir = r // the link's own directory, as it really is
+				}
+				t = filepath.Join(dir, t)
 			}
 			p, rest = filepath.Join(t, rest), ""
 			hops++
@@ -154,20 +165,22 @@ func resolveIn(home, rel string, roots []string) (string, bool) {
 	return "", false
 }
 
-// under maps a real path to the root it is inside, as the root is
-// written.
+// under maps a real path to the most specific root it is inside (the
+// workspace inside $HOME, say), as that root is written, so the result
+// is spelled as the change it is found as.
 func under(real string, roots []string) (string, bool) {
+	best, bestLen := "", -1
 	for _, root := range roots {
 		rr, err := filepath.EvalSymlinks(root)
 		if err != nil {
 			continue
 		}
 		in, err := filepath.Rel(rr, real)
-		if err == nil && in != ".." && !strings.HasPrefix(in, ".."+string(filepath.Separator)) {
-			return filepath.Join(root, in), true
+		if err == nil && in != ".." && !strings.HasPrefix(in, ".."+string(filepath.Separator)) && len(rr) > bestLen {
+			best, bestLen = filepath.Join(root, in), len(rr)
 		}
 	}
-	return "", false
+	return best, bestLen >= 0
 }
 
 // aliasRels returns the watched names a change at real path p stands

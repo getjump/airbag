@@ -176,3 +176,70 @@ func TestLinkedPathsBelowAndDangling(t *testing.T) {
 		}
 	}
 }
+
+// Working on a config's own repository: ~/.config/nvim links to the
+// workspace root, so every change there is that config.
+func TestWatchedDirLinkedToWorkspaceRoot(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	ws := filepath.Join(home, "nvimcfg")
+	writeCfg(t, filepath.Join(ws, "init.lua"), "-- x\n")
+	symlink(t, "../nvimcfg", filepath.Join(home, ".config/nvim"))
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCfg(t, filepath.Join(s.WSUpper(), "init.lua"), "-- changed\n")
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == "init.lua" && !slices.Contains(c.Flags, "persist") {
+			t.Errorf("init.lua: flags %v", c.Flags)
+		}
+	}
+}
+
+// A path inside both roots is spelled under the most specific one, as
+// the change there is found.
+func TestUnderMostSpecificRoot(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real-home")
+	if err := os.MkdirAll(filepath.Join(real, "ws"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home") // $HOME through a link
+	symlink(t, "real-home", home)
+	ws := filepath.Join(real, "ws") // the workspace's physical path
+	got, ok := under(filepath.Join(real, "ws", "bashrc"), []string{home, ws})
+	if !ok || got != filepath.Join(ws, "bashrc") {
+		t.Errorf("under = %q %v, want the workspace's spelling", got, ok)
+	}
+}
+
+// A relative dangling link below a linked directory is read from the
+// directory the link really is in.
+func TestDanglingLinkBelowLinkedDir(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	h := s.Home
+	if err := os.MkdirAll(filepath.Join(h, "dotfiles/config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, "dotfiles/config", filepath.Join(h, ".config"))
+	symlink(t, "../fish-src", filepath.Join(h, "dotfiles/config/fish")) // nothing there yet
+	writeCfg(t, filepath.Join(s.HomeUpper(), "dotfiles/fish-src/config.fish"), "set -x PATH /tmp $PATH\n")
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == "dotfiles/fish-src/config.fish" {
+			if !slices.Contains(c.Flags, "persist") {
+				t.Errorf("flags %v", c.Flags)
+			}
+			return
+		}
+	}
+	t.Fatalf("no change in %+v", cs)
+}
