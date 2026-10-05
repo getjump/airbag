@@ -46,6 +46,16 @@ func Init(dir string, tty bool) {
 	if err != nil {
 		fatal("load session", err)
 	}
+	// PID 1 is the supervisor: it holds the raw proxy, control and
+	// forward sockets and the FUSE backing fds. The agent cannot ptrace
+	// it or read /proc/1/mem mainly because the agent's own user
+	// namespace has no CAP_SYS_PTRACE over PID 1, which lives in the
+	// parent namespace. Setting PR_SET_DUMPABLE=0 is defense in depth:
+	// it also blocks the same access where the agent shares the user
+	// namespace, and keeps /proc/1 owned by root so hidepid can hide it.
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		fatal("protect supervisor", err)
+	}
 	if err := buildWorld(s); err != nil {
 		fatal("build sandbox", err)
 	}
@@ -141,6 +151,16 @@ func buildWorld(s *session.Session) error {
 			return fmt.Errorf("hide %s: %w", p, err)
 		}
 	}
+	// Device nodes that are a read into the kernel the filter does not
+	// cover: /dev/kmsg is the kernel log (syslog() is refused, but the
+	// log is also a readable device), and /dev/userfaultfd opens a
+	// userfaultfd without the userfaultfd() syscall. hide() is a no-op
+	// when the node is absent.
+	for _, p := range []string{"/dev/kmsg", "/dev/userfaultfd"} {
+		if err := hide(p); err != nil {
+			return fmt.Errorf("hide %s: %w", p, err)
+		}
+	}
 
 	if err := agentConfig(s); err != nil {
 		fmt.Fprintf(os.Stderr, "airbag: warning: agent hooks not installed: %v\n", err)
@@ -177,8 +197,21 @@ func buildWorld(s *session.Session) error {
 			return fmt.Errorf("hide session root: %w", err)
 		}
 	}
-	if err := unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
-		fmt.Fprintf(os.Stderr, "airbag: warning: private /proc unavailable (%v); host processes stay visible\n", err)
+	// hidepid=2 hides from the agent every process it cannot access,
+	// PID 1 (the supervisor, in the parent user namespace) included, so
+	// /proc/1 and other processes' /proc entries are invisible. The
+	// agent still sees /proc/self and its own descendants. subset=pid is
+	// deliberately NOT set: it would also hide /proc/cpuinfo,
+	// /proc/meminfo, /proc/stat and /proc/sys, which node, go and build
+	// tools read. Older kernels reject the option, so fall back to a
+	// plain mount.
+	flags := uintptr(unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC)
+	if err := unix.Mount("proc", "/proc", "proc", flags, "hidepid=2"); err != nil {
+		if err2 := unix.Mount("proc", "/proc", "proc", flags, ""); err2 != nil {
+			fmt.Fprintf(os.Stderr, "airbag: warning: private /proc unavailable (%v); host processes stay visible\n", err2)
+		} else {
+			fmt.Fprintf(os.Stderr, "airbag: warning: /proc without hidepid (%v); other processes stay visible to the agent\n", err)
+		}
 	}
 	return nil
 }
@@ -300,6 +333,29 @@ func privateRun(s *session.Session) error {
 		}
 	}
 	return os.MkdirAll(fmt.Sprintf(runtimeDirFormat, s.UID), 0o700)
+}
+
+// closeInheritedFDs marks every open descriptor above stdio
+// close-on-exec, so none survives into the agent across its exec. The
+// supervisor keeps the descriptors open for itself; it does not exec
+// again. CLOSE_RANGE_CLOEXEC (kernel 5.11+) does the whole range at
+// once; a kernel without it falls back to walking /proc/self/fd.
+func closeInheritedFDs() {
+	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err == nil {
+		return
+	}
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "airbag: warning: could not list open fds to close before exec: %v\n", err)
+		return
+	}
+	for _, e := range ents {
+		fd, err := strconv.Atoi(e.Name())
+		if err != nil || fd < 3 {
+			continue
+		}
+		_, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC)
+	}
 }
 
 func bind(src, dst string, rec bool) error {
@@ -462,8 +518,10 @@ func startForwards(s *session.Session) error {
 // pseudo-terminal, so Ctrl-C and Ctrl-Z reach it and not PID 1.
 func runAgent(s *session.Session, ctl *os.File) int {
 	if s.Strict {
+		// The limit is what --strict asks for, so failing to set it stops
+		// the run, as a failed filter install does below.
 		if err := os.WriteFile("/proc/sys/user/max_user_namespaces", []byte("1"), 0); err != nil {
-			fmt.Fprintf(os.Stderr, "airbag: warning: the agent can create user namespaces: %v\n", err)
+			fatal("limit user namespaces", err)
 		}
 	}
 	env := agentEnv(s)
@@ -492,7 +550,47 @@ func runAgent(s *session.Session, ctl *os.File) int {
 		cmd.SysProcAttr.Foreground = true
 		cmd.SysProcAttr.Ctty = 0
 	}
-	if err := restrictAgent(); err != nil {
+	// Core dumps are capped at 1 byte: a dump could hold secrets the agent
+	// had in memory. The limit (soft and hard) is set to 1, not 0,
+	// because 0 does not stop a core_pattern that pipes to a handler
+	// (systemd-coredump, apport), which the kernel runs regardless of
+	// RLIMIT_CORE; dumpable=0 does not carry over either, since exec
+	// resets it for the agent. A limit of exactly 1 stops both file dumps
+	// and pipe handlers: fs/coredump.c coredump_pipe() aborts a pipe dump
+	// when cprm->limit == 1 ("RLIMIT_CORE is set to 1, aborting core"),
+	// and the file path is skipped because 1 < binfmt->min_coredump (a
+	// page). (Linux v6.18.) The limit is inherited across fork and exec.
+	// It does not hold everywhere: any process may lower its own soft
+	// limit, and at 0 the pipe handler runs again (under --strict the
+	// seccomp filter skips that change, so the limit stays 1); a socket
+	// core_pattern ("@" or "@@", Linux 6.16+) ignores the limit and is not
+	// covered. airbag doctor reports the host's core_pattern.
+	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 1, Max: 1}); err != nil {
+		// Started with a hard limit of 0, which an unprivileged process
+		// cannot raise, the limit stays 0, and a pipe core_pattern runs
+		// at 0: --strict, which also skips the agent's own changes to the
+		// limit, stops the run rather than keep it there.
+		if s.Strict {
+			fatal("limit core dumps", err)
+		}
+		fmt.Fprintf(os.Stderr, "airbag: warning: could not limit core dumps: %v\n", err)
+	}
+	// Close every inherited fd above stdio before the agent starts, so
+	// a descriptor leaked from airbag's caller cannot reach it (the runc
+	// CVE-2024-21626 class). CLOSE_RANGE_CLOEXEC marks them close-on-exec
+	// rather than closing them here: the supervisor keeps its own
+	// sockets and the FUSE fd (it never exec()s again), while the agent,
+	// which does exec, loses all of them. The ones airbag passes on
+	// purpose are stdio (0,1,2) and, under tty, the control fd, which is
+	// already close-on-exec; the agent inherits none of them.
+	closeInheritedFDs()
+	if err := restrictAgent(s.Strict); err != nil {
+		// In --strict mode the filter is part of what the user asked for,
+		// so a failure to install it stops the run rather than silently
+		// leaving the surface open; by default it is best effort.
+		if s.Strict {
+			fatal("install seccomp filter", err)
+		}
 		fmt.Fprintf(os.Stderr, "airbag: warning: %v\n", err)
 	}
 	if err := cmd.Start(); err != nil {

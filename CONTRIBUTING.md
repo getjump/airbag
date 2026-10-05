@@ -78,8 +78,8 @@ what the workspace's lock files pin. `internal/mirror/pins.go` reads
 bubblewrap 0.9 (no overlay), worth measuring as a hybrid once 0.11+ is common.
 Its `--disable-userns` idea is in airbag as `--strict`.
 
-Deferred on purpose, each with its reason in the roadmap: syscall-level control
-(seccomp user notification, eBPF), data flow labels per value, placeholders in
+Deferred on purpose, each with its reason in the roadmap: active syscall control
+(seccomp user notification, eBPF; the static denylist is in), data flow labels per value, placeholders in
 `.env` files, TLS termination for model APIs, more command models in
 `internal/models`.
 
