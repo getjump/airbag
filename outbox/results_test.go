@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/getjump/airbag/internal/operation"
+	"github.com/getjump/airbag/operation"
 )
 
 func TestResultCannotConfuseQueuedRequestWithRemoteSuccess(t *testing.T) {

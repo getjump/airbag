@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/getjump/airbag/internal/creds"
+	"github.com/getjump/airbag/creds"
 )
 
 // The proxy runs in the host's network namespace, so an allowed name

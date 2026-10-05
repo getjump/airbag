@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/steps"
+	"github.com/getjump/airbag/outbox"
 )
 
 // Noise in $HOME: caches and agent state, folded into one line per

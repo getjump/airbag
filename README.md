@@ -1,5 +1,9 @@
 # airbag
 
+Embedding a component in an existing agent runtime? The operation contracts,
+policy evaluator, outbox and credential proxy are available as
+[public Go packages](docs/composition.md); the CLI uses the same implementations.
+
 **Approve outcomes, not commands.** Start a long agent task without permission
 prompts and do something else. The agent works in a copy-on-write branch of your
 workspace and `$HOME`, `git push` and the commands you name wait in an outbox, and

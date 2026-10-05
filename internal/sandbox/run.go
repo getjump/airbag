@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,84 +22,17 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/getjump/airbag/internal/control"
-	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/mirror"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
-	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/session"
-	"github.com/getjump/airbag/internal/steps"
-	"github.com/getjump/airbag/internal/taint"
+	"github.com/getjump/airbag/proxy"
 )
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
-	gate := policy.NewGate(pol, s.Dir)
-	restoreLabels(gate, s)
-	log, err := effects.Open(s.EffectsPath())
+	host, err := startHostServices(s, allow, pol, hostEndpoints{ProxyNetwork: "unix", ProxyAddress: s.ProxySock(), ControlRoot: s.Workspace, Forwards: true})
 	if err != nil {
 		return 1, err
 	}
-	defer func() { _ = log.Close() }()
-
-	pl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ProxySock())
-	if err != nil {
-		return 1, err
-	}
-	defer pl.Close()
-	px := proxy.New(allow, log)
-	px.Gate = gate
-	if px.Creds, px.CA, err = setupCredentials(s, pol.Credentials); err != nil {
-		return 1, err
-	}
-	mr := mirror.New(filepath.Join(session.Root(), "mirror"), log)
-	mr.Tainted = gate.Tainted
-	mr.Pinned = mirror.FindPins(s.Workspace) // read from the real workspace, before the agent starts
-	px.Mirror = mr
-	// tcp:// forwards: one unix socket each, bridged inside the sandbox
-	// to 127.0.0.1:PORT (startForwards).
-	var fws []*forwarder
-	var fls []net.Listener // each serves until the session ends
-	defer func() {
-		for _, l := range fls {
-			_ = l.Close()
-		}
-	}()
-	for i, f := range s.Forwards {
-		_ = os.Remove(s.ForwardSock(i))
-		fl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ForwardSock(i))
-		if err != nil {
-			return 1, err
-		}
-		fls = append(fls, fl)
-		fw := newForwarder(f, gate, log)
-		fws = append(fws, fw)
-		go fw.serve(fl)
-	}
-	// Once the session reads a secret, connections it opened earlier to
-	// hosts outside the core set close before the read returns.
-	gate.Labels().OnAdd(func(l taint.Label, _ string) {
-		if l == taint.Secret {
-			px.Cut(proxy.DefaultAllow, "secret-taint")
-			for _, fw := range fws {
-				fw.cut()
-			}
-		}
-	})
-	go func() { _ = px.Serve(pl) }()
-
-	cl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ControlSock())
-	if err != nil {
-		return 1, err
-	}
-	defer cl.Close()
-	box, err := outbox.Open(s.EffectsPath())
-	if err != nil {
-		return 1, err
-	}
-	defer func() { _ = box.Close() }()
-	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate, Root: s.Workspace}
-	go func() { _ = ctl.Serve(cl) }()
+	defer func() { _ = host.Close() }()
 
 	// Pass-through dirs must exist on the host, or the agent would
 	// create them inside the branch and lose them on discard.

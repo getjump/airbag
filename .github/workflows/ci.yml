@@ -19,6 +19,27 @@ concurrency:
 # The static checks run through test/check.sh, which pins the tools'
 # versions; `sh test/check.sh` runs the same checks locally.
 jobs:
+  sdk:
+    if: github.event_name != 'schedule'
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: external Go module consumer
+        run: sh test/sdk-client-e2e.sh
+      - name: host lifecycle and public components
+        run: go test -race ./policy ./operation ./outbox ./creds ./proxy ./githubpr ./internal/sandbox
+
   test:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04

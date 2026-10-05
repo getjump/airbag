@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/getjump/airbag/internal/operation"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/operation"
+	"github.com/getjump/airbag/outbox"
 )
 
 func commitForPR(t *testing.T, ws string, args ...string) string {

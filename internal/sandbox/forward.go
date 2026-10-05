@@ -1,5 +1,3 @@
-//go:build linux
-
 package sandbox
 
 import (
@@ -27,12 +25,17 @@ type forwarder struct {
 	gate *policy.Gate
 	log  *effects.Log
 
-	mu   sync.Mutex
-	open map[net.Conn]bool
+	mu      sync.Mutex
+	open    map[net.Conn]bool
+	stopped bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 func newForwarder(f session.Forward, gate *policy.Gate, log *effects.Log) *forwarder {
-	return &forwarder{f: f, gate: gate, log: log, open: map[net.Conn]bool{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &forwarder{f: f, gate: gate, log: log, open: map[net.Conn]bool{}, ctx: ctx, cancel: cancel}
 }
 
 func (fw *forwarder) target() string { return net.JoinHostPort(fw.f.Host, strconv.Itoa(fw.f.Port)) }
@@ -51,12 +54,28 @@ func (fw *forwarder) serve(l net.Listener) {
 		if err != nil {
 			return
 		}
-		go fw.handle(c)
+		fw.mu.Lock()
+		if fw.stopped {
+			fw.mu.Unlock()
+			c.Close()
+			continue
+		}
+		fw.wg.Add(1)
+		fw.mu.Unlock()
+		go func() { defer fw.wg.Done(); fw.handle(c) }()
 	}
 }
 
 func (fw *forwarder) handle(c net.Conn) {
 	defer c.Close()
+	fw.mu.Lock()
+	if fw.stopped {
+		fw.mu.Unlock()
+		return
+	}
+	fw.open[c] = true
+	fw.mu.Unlock()
+	defer func() { fw.mu.Lock(); delete(fw.open, c); fw.mu.Unlock() }()
 	deny := func(reason string) {
 		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "deny", Reason: reason})
 	}
@@ -68,21 +87,13 @@ func (fw *forwarder) handle(c net.Conn) {
 		deny(d.Rule)
 		return
 	}
-	up, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(context.Background(), "tcp", fw.target())
+	up, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(fw.ctx, "tcp", fw.target())
 	if err != nil {
 		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "allow", Reason: "unreachable: " + err.Error()})
 		return
 	}
 	defer up.Close()
 	fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "allow"})
-	fw.mu.Lock()
-	fw.open[c] = true
-	fw.mu.Unlock()
-	defer func() {
-		fw.mu.Lock()
-		delete(fw.open, c)
-		fw.mu.Unlock()
-	}()
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(up, c); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
@@ -100,4 +111,15 @@ func (fw *forwarder) cut() {
 		_ = c.Close()
 		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "cut", Reason: "secret-taint"})
 	}
+}
+
+func (fw *forwarder) close() {
+	fw.mu.Lock()
+	fw.stopped = true
+	fw.cancel()
+	for c := range fw.open {
+		c.Close()
+	}
+	fw.mu.Unlock()
+	fw.wg.Wait()
 }

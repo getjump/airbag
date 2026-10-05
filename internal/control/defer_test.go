@@ -12,8 +12,8 @@ import (
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
+	"github.com/getjump/airbag/outbox"
 )
 
 func deferServer(t *testing.T, yaml string) *Server {

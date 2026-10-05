@@ -18,11 +18,11 @@ import (
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
-	"github.com/getjump/airbag/internal/operation"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/steps"
+	"github.com/getjump/airbag/operation"
+	"github.com/getjump/airbag/outbox"
 )
 
 // SocketInSandbox is where the control socket is mounted for the agent
@@ -48,7 +48,7 @@ type Server struct {
 	Root string
 }
 
-func (s *Server) Serve(l net.Listener) error {
+func (s *Server) HTTPServer() *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /intent", s.intent)
 	mux.HandleFunc("POST /defer", s.deferCmd)
@@ -56,7 +56,7 @@ func (s *Server) Serve(l net.Listener) error {
 	mux.HandleFunc("POST /exec", s.exec)
 	mux.HandleFunc("POST /taint", s.taint)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	return srv.Serve(l)
+	return srv
 }
 
 func (s *Server) intent(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +82,8 @@ func (s *Server) intent(w http.ResponseWriter, r *http.Request) {
 	s.Log.Add(effects.Effect{Kind: "intent." + in.Kind, Target: fmt.Sprint(in.Argv), Verdict: "defer", Reason: in.ID})
 	writeJSON(w, in)
 }
+
+func (s *Server) Serve(l net.Listener) error { return s.HTTPServer().Serve(l) }
 
 // writeJSON answers with v. Once the status is out, a failed write is
 // the client's to see, as a short body.

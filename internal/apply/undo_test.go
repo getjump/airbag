@@ -13,9 +13,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/review"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/outbox"
 )
 
 // undoSession lays out a workspace and its upper layer as overlayfs

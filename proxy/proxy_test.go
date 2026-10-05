@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/policy"
@@ -140,6 +141,20 @@ func TestConnectTunnel(t *testing.T) {
 	line, _ := br.ReadString('\n')
 	if line != "ping\n" {
 		t.Fatalf("echo = %q", line)
+	}
+	p.Close()
+	p.Close()
+	if err := c.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := br.ReadByte(); err == nil {
+		t.Fatal("Close left the hijacked CONNECT tunnel open")
+	}
+	stopped := false
+	done := p.track("late.example", "late.example:443", func() { stopped = true })
+	done()
+	if !stopped {
+		t.Fatal("a late flow survived proxy shutdown")
 	}
 }
 

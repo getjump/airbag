@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/getjump/airbag/internal/operation"
+	"github.com/getjump/airbag/operation"
 )
 
 // WritePreview interprets a frozen request without touching credentials or the

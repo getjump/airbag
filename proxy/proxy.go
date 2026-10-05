@@ -21,11 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/getjump/airbag/internal/creds"
-	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/models"
-	"github.com/getjump/airbag/internal/policy"
-	"github.com/getjump/airbag/internal/taint"
+	"github.com/getjump/airbag/audit"
+	"github.com/getjump/airbag/creds"
+	"github.com/getjump/airbag/policy"
 )
 
 // DefaultAllow covers model APIs.
@@ -62,11 +60,20 @@ func (a Allowlist) Allows(host string) bool {
 	return false
 }
 
+// Gate is the policy/label authority consulted by the proxy. Implementations
+// own approvals and persistence; the proxy does not own their session state.
+type Gate interface {
+	Check(policy.Input) (policy.Decision, string)
+	AllowsHost(string) bool
+	Tainted() string
+	MarkUntrusted(string) bool
+}
+
 type Proxy struct {
 	Allow Allowlist
-	Log   *effects.Log
+	Log   audit.Recorder
 	// Gate applies policy rules on top of the allowlist (optional).
-	Gate *policy.Gate
+	Gate Gate
 	// Mirror serves http://airbag.mirror/ (optional).
 	Mirror http.Handler
 	// Upstream returns the host's own proxy for a target, if any, so
@@ -80,8 +87,9 @@ type Proxy struct {
 	// means this machine's roots (SSL_CERT_FILE is honoured).
 	UpstreamRoots *x509.CertPool
 
-	mu    sync.Mutex
-	flows map[*flow]bool // open tunnels and forwarded requests
+	closed bool
+	mu     sync.Mutex
+	flows  map[*flow]bool // open tunnels and forwarded requests
 	// forbid vets the address a connection is about to use (guard.go).
 	forbid func(netip.Addr) string
 }
@@ -95,6 +103,11 @@ type flow struct {
 func (p *Proxy) track(host, target string, stop func()) (done func()) {
 	f := &flow{host: host, target: target, stop: stop}
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		stop()
+		return func() {}
+	}
 	if p.flows == nil {
 		p.flows = map[*flow]bool{}
 	}
@@ -104,6 +117,19 @@ func (p *Proxy) track(host, target string, stop func()) (done func()) {
 		p.mu.Lock()
 		delete(p.flows, f)
 		p.mu.Unlock()
+	}
+}
+
+// Close stops active flows and prevents late registrations. The owner must
+// also close its HTTP server/listener to stop accepting new requests.
+func (p *Proxy) Close() {
+	p.mu.Lock()
+	p.closed = true
+	flows := p.flows
+	p.flows = nil
+	p.mu.Unlock()
+	for f := range flows {
+		f.stop()
 	}
 }
 
@@ -122,11 +148,11 @@ func (p *Proxy) Cut(keep Allowlist, reason string) {
 	p.mu.Unlock()
 	for _, f := range cut {
 		f.stop()
-		p.Log.Add(effects.Effect{Kind: "net.egress", Target: f.target, Verdict: "cut", Reason: reason})
+		p.Log.Add(audit.Event{Kind: "net.egress", Target: f.target, Verdict: "cut", Reason: reason})
 	}
 }
 
-func New(allow Allowlist, log *effects.Log) *Proxy {
+func New(allow Allowlist, log audit.Recorder) *Proxy {
 	return &Proxy{Allow: allow, Log: log, forbid: forbidden, Upstream: func(u *url.URL) (*url.URL, error) {
 		return http.ProxyFromEnvironment(&http.Request{URL: u})
 	}}
@@ -202,7 +228,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if why != "" {
-		p.Log.Add(effects.Effect{Kind: "net.egress", Target: clipTarget(r.Host), Verdict: "deny", Reason: why})
+		p.Log.Add(audit.Event{Kind: "net.egress", Target: clipTarget(r.Host), Verdict: "deny", Reason: why})
 		http.Error(w, "airbag: "+clipTarget(r.Host)+": "+why, http.StatusBadRequest)
 		return
 	}
@@ -225,11 +251,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !p.Allow.Allows(host) && (p.Gate == nil || !p.Gate.AllowsHost(host)) {
 		if Registries.Allows(host) {
-			p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "registry: use the mirror"})
+			p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "registry: use the mirror"})
 			http.Error(w, "airbag: "+host+" is reached through http://airbag.mirror; point the package manager at the mirror (airbag sets GOPROXY, npm_config_registry, PIP_INDEX_URL)", http.StatusForbidden)
 			return
 		}
-		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "host not in allowlist"})
+		p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "host not in allowlist"})
 		http.Error(w, "airbag: egress to "+host+" denied by policy (host not in allowlist)", http.StatusForbidden)
 		return
 	}
@@ -237,30 +263,30 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		port = "80"
 	}
 	if !slices.Contains(webPorts, port) && !p.Allow.AllowsPort(host, port) {
-		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "port not allowed"})
+		p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "port not allowed"})
 		http.Error(w, "airbag: port "+port+" on "+host+" denied by policy (only 80 and 443 unless the allowlist names the port: --allow "+host+":"+port+")", http.StatusForbidden)
 		return
 	}
 	if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
-		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "secret-taint"})
+		p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "secret-taint"})
 		http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted()+
 			"; only model APIs and cached packages stay reachable", http.StatusForbidden)
 		return
 	}
 	if p.Gate != nil {
-		if d, id := p.Gate.Check(policy.Input{Effect: models.Effect{Kind: "net.connect", Target: host, Detail: port}}); d.Verdict != policy.Allow {
-			p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: d.Verdict, Reason: d.Rule})
+		if d, id := p.Gate.Check(policy.Input{Effect: policy.Effect{Kind: "net.connect", Target: host, Detail: port}}); d.Verdict != policy.Allow {
+			p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: d.Verdict, Reason: d.Rule})
 			http.Error(w, policy.Explain(d, id), http.StatusForbidden)
 			return
 		}
 	}
-	p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "allow"})
+	p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "allow"})
 	// Talking to a host that is neither a model API nor a registry
 	// brings outside data into the session: label it untrusted, so a
 	// rule can keep that data from driving an irreversible effect.
 	if p.Gate != nil && !Allowlist(DefaultAllow).Allows(host) && !Registries.Allows(host) {
-		if p.Gate.Mark(taint.Untrusted, host) {
-			p.Log.Add(effects.Effect{Kind: "label", Target: host, Verdict: "untrusted"})
+		if p.Gate.MarkUntrusted(host) {
+			p.Log.Add(audit.Event{Kind: "label", Target: host, Verdict: "untrusted"})
 		}
 	}
 	if r.Method == http.MethodConnect {
@@ -280,7 +306,7 @@ func (p *Proxy) refuse(w http.ResponseWriter, target, host string, err error) bo
 	if !errors.As(err, &b) {
 		return false
 	}
-	p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "address: " + b.why})
+	p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "address: " + b.why})
 	http.Error(w, "airbag: "+host+" "+b.Error(), http.StatusForbidden)
 	return true
 }
