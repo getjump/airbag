@@ -80,6 +80,7 @@ jobs:
           path: |
             /var/lib/airbag-runtime-options/tools/versions.txt
             /var/lib/airbag-runtime-options/results/results.json
+            /var/lib/airbag-runtime-options/results/negative-controls.json
             /var/lib/airbag-runtime-options/results/*/*.log
             /var/lib/airbag-runtime-options/results/*/review.json
           if-no-files-found: error

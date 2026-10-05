@@ -98,6 +98,9 @@ regular CI continues native end-to-end, race, lint and Darwin cross-build checks
 Measured adapter commit: `e8cf0bb667f65b844dee18632e35f85a1f1c4db4`.
 [CI run 37261063714](https://github.com/getjump/airbag/actions/runs/37261063714),
 [raw artifact 11325136010](https://github.com/getjump/airbag/actions/runs/37261063714/artifacts/11325136010).
+A subsequent harness adds host negative controls for the exact direct-egress
+address, host-file readability/writeability and user namespace availability.
+These controls must succeed outside the sandbox before a guest denial counts.
 Both providers pass all nine guest checks, host-observed credential use (two
 requests each), unchanged source before apply, resume and explicit file apply.
 The result is one trial per backend on one runner:

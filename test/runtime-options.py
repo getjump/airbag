@@ -46,7 +46,7 @@ def main():
         def log_message(self, *_):
             pass
 
-    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    server = http.server.ThreadingHTTPServer(('0.0.0.0', 0), Handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert, key)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
@@ -56,6 +56,18 @@ def main():
         host_ip = route.getsockname()[0]
     canary = lab / 'host-canary'
     canary.write_text('benign host-only content\n')
+    # A negative control must prove the canary is reachable on the exact
+    # address used by the guest. A loopback-only listener would make this
+    # denial test pass even without a sandbox.
+    with socket.create_connection((host_ip, server.server_port), timeout=5):
+        pass
+    assert canary.read_text() == 'benign host-only content\n'
+    namespace_control = subprocess.run(['unshare', '--user', 'true'], capture_output=True, text=True)
+    if namespace_control.returncode:
+        raise RuntimeError('host negative control cannot create a user namespace: ' + namespace_control.stderr)
+    (lab / 'negative-controls.json').write_text(json.dumps({
+        'host_canary_readable': True, 'exact_direct_address_reachable': True,
+        'uncontained_user_namespace_available': True}) + '\n')
     rows = []
     try:
         for backend in ['gvisor', 'microvm']:
@@ -65,6 +77,8 @@ def main():
             (home / '.config/airbag').mkdir(parents=True)
             (work / 'seed.txt').write_text('original\n')
             (work / 'removed.txt').write_text('original\n')
+            (work / 'uncontained-write').write_text('host can write the original\n')
+            (work / 'uncontained-write').unlink()
             (work / 'airbag.yaml').write_text('defer:\n  - publisher send\n')
             port = server.server_port
             (home / '.config/airbag/airbag.yaml').write_text(f'''credentials:
