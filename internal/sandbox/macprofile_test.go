@@ -162,3 +162,43 @@ func TestMacProfileDeniesLinkedMemory(t *testing.T) {
 		}
 	}
 }
+
+// A ~/.claude/projects that is a link elsewhere in ~/.claude gets the
+// patterns where it really is, so a project made during the run cannot
+// have a memory/ either.
+func TestMacProfileDeniesLinkedProjectsRoot(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude/store/projects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("store/projects", filepath.Join(home, ".claude/projects")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := filepath.EvalSymlinks(home)
+	real := filepath.Join(h, ".claude/store/projects")
+	match := func(path string) bool {
+		for _, re := range p.NoWriteRegex {
+			if regexp.MustCompile(re).MatchString(path) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, path := range []string{real + "/new-slug/memory/MEMORY.md", real + "/new-slug", real, filepath.Join(h, ".claude/store")} {
+		if !match(path) {
+			t.Errorf("%s may be written: %v", path, p.NoWriteRegex)
+		}
+	}
+	if match(real + "/new-slug/transcript.jsonl") {
+		t.Errorf("a transcript is denied")
+	}
+}

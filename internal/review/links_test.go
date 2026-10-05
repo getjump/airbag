@@ -453,7 +453,7 @@ func TestShadowingConfigLinkedIntoWorkspace(t *testing.T) {
 
 // A change above where a watched path really is moves it: replacing
 // ~/dotfiles/project with a link points the project's memory elsewhere,
-// and deleting ~/dotfiles takes ~/.bashrc's target with it.
+// replacing it with a file or deleting ~/dotfiles takes it away.
 func TestChangeAboveAliasTarget(t *testing.T) {
 	for _, tc := range []struct {
 		name, at string
@@ -461,6 +461,7 @@ func TestChangeAboveAliasTarget(t *testing.T) {
 		want     []string
 	}{
 		{"link", "dotfiles/project", func(t *testing.T, p string) { symlink(t, "/tmp/elsewhere", p) }, []string{"persist", "agent instructions"}},
+		{"file", "dotfiles/project", func(t *testing.T, p string) { writeCfg(t, p, "not a directory\n") }, []string{"persist", "agent instructions"}},
 		{"deleted", "dotfiles", func(t *testing.T, p string) {
 			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 				t.Fatal(err)

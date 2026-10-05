@@ -143,8 +143,8 @@ ancestors, `~/.claude`, `~/.codex`, `~/.claude/projects` and each project
 directory cannot be created, removed or renamed either; airbag makes this
 workspace's project directory before the run. Seatbelt checks the path a write
 resolves to, so a `memory/` that is a link, or lies under a linked project
-directory, is denied where it really is too, with the directories above that
-place. What it cannot:
+directory or a linked `~/.claude/projects`, is denied where it really is too,
+with the directories above that place. What it cannot:
 `~/.claude.json` stays writable, so a change to it — including MCP servers,
 permissions and per-project trust — persists in full without review, and the
 rest of `~/.claude` and `~/.codex` persists as before. The fix is a branch of

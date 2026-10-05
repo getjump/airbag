@@ -99,6 +99,15 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 	// Seatbelt checks the path a write resolves to: a memory/ that is,
 	// or lies under, a link elsewhere is denied where it really is, with
 	// the directories above it as above.
+	// So may ~/.claude/projects itself: the patterns above apply where it
+	// really is too, for projects made later.
+	if r := follow(filepath.Join(s.Home, ".claude/projects")); r != filepath.Join(home, ".claude/projects") {
+		q := regexp.QuoteMeta(r)
+		p.NoWriteRegex = append(p.NoWriteRegex, "^"+q+`/[^/]+/memory(/|$)`, "^"+q+`(/[^/]+)?$`)
+		for d := filepath.Dir(r); d != home && d != filepath.Dir(d); d = filepath.Dir(d) {
+			p.NoWriteRegex = append(p.NoWriteRegex, "^"+regexp.QuoteMeta(d)+"$")
+		}
+	}
 	for _, m := range realMemory(s.Home) {
 		p.NoWrite = append(p.NoWrite, m)
 		for d := filepath.Dir(m); d != home && d != filepath.Dir(d); d = filepath.Dir(d) {

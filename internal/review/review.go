@@ -219,11 +219,12 @@ func classify(s *session.Session, cs []Change) {
 				c.cfg, c.home = cf, s.Home
 			}
 		}
-		// A deletion, a replacement or a link above where a watched path
-		// really is (~/dotfiles, for ~/.bashrc -> ~/dotfiles/bashrc) takes
-		// that path with it or points it elsewhere: it changes the path
-		// as a whole.
-		if c.Kind == Deleted || c.Kind == Replaced || c.Type == fs.ModeSymlink {
+		// A deletion, a replacement, or a file or link put above where a
+		// watched path really is (~/dotfiles, for ~/.bashrc ->
+		// ~/dotfiles/bashrc) takes that path with it or points it
+		// elsewhere: it changes the path as a whole. Only a directory
+		// there, new or changed, leaves the path where it is.
+		if c.Kind == Deleted || c.Kind == Replaced || !c.IsDir() {
 			if above := aliasesAbove(aliases, c.Path); len(above) > 0 && !(c.Layer == "ws" && strings.HasPrefix(rel, ".git/")) {
 				c.Flags = append(c.Flags, "persist", "holds where "+listHome(above)+" really is")
 				if slices.ContainsFunc(above, func(n string) bool { return agentMemory(n) || agentMemory(n+"/memory") }) {
