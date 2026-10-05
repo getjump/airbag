@@ -1,4 +1,9 @@
-# airbag
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo-light.svg" alt="airbag" width="240">
+  </picture>
+</h1>
 
 **Approve outcomes, not commands.** Start a long agent task without permission
 prompts and do something else. The agent works in a copy-on-write branch of your
@@ -6,13 +11,32 @@ workspace and `$HOME`, `git push` and the commands you name wait in an outbox, a
 every host it reaches is logged. When you come back, one review shows what changed and what is waiting:
 apply it, take it onto a git branch, or throw it away.
 
+[![ci](https://github.com/getjump/airbag/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/getjump/airbag/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/getjump/airbag)](LICENSE)
+[![Go version from go.mod](https://img.shields.io/github/go-mod/go-version/getjump/airbag)](go.mod)
+
+[Install](#install) · [What you get](#what-you-get) · [How it compares](#how-it-compares) ·
+[Threat model](#threat-model) · [FAQ](#faq) · [Docs](#docs)
+
+> [!NOTE]
+> Early v0, Linux first; macOS is a prototype. airbag is not a VM: the kernel is
+> shared, and whatever the agent reads is still sent to the model API. It guards
+> against accidents and casual exfiltration by an agent you let run without
+> prompts; for code that may try to break out, use a VM. See the
+> [threat model](#threat-model).
+
 ```console
+$ curl -fsSL https://raw.githubusercontent.com/getjump/airbag/main/install.sh | sh
+$ airbag doctor       # can this machine run airbag?
+$ cd your-project
 $ airbag run -- claude --dangerously-skip-permissions
 $ airbag run -- codex --dangerously-bypass-approvals-and-sandbox   # or Codex
 $ airbag review
 $ airbag apply        # or: apply -i, apply --branch NAME, or: airbag discard
 $ airbag rollback     # undo the last apply
 ```
+
+Requirements, `go install` and Nix: [Install](#install).
 
 ![demo: the agent deletes src, reads .env, tries to send it out, plants a line in ~/.bashrc and pushes; airbag review shows all of it; discard, and nothing happened](demo/demo.gif)
 
