@@ -28,6 +28,8 @@ exact boundary. Unknown names, unavailable backends and unmet requirements
 fail closed; installing runsc or Firecracker does not silently activate them.
 Resume checks saved requirements before modifying the branch or run state.
 Legacy sessions without these fields remain native sessions.
+`test/isolation-e2e.sh` checks both refusals, the egress a session records
+and `capabilities --json` through the installed CLI.
 
 ## Responsibilities across future backends
 
