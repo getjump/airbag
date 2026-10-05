@@ -57,7 +57,7 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 	// tcp:// forwards to this machine: on macOS the agent reaches them
 	// directly, the profile only has to let it.
 	for _, f := range s.Forwards {
-		if f.Host == "localhost" || f.Host == "127.0.0.1" || f.Host == "::1" {
+		if macForward(f) {
 			p.Ports = append(p.Ports, f.Port)
 		}
 	}
