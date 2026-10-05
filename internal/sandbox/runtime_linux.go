@@ -77,6 +77,14 @@ func prepareRuntimeWorkspace(s *session.Session) error {
 		// did not finish, or an older airbag's, is not resumed.
 		return s.RuntimeBranchError()
 	}
+	// A branch copied again (resume after it was lost) is not complete
+	// until this copy is.
+	if s.RuntimeCopied {
+		s.RuntimeCopied = false
+		if err := s.Save(); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(s.CloneDir(), 0o700); err != nil {
 		return err
 	}
@@ -330,7 +338,11 @@ func ext4Image(mkfs, source, path string, size int64) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	cmd := exec.CommandContext(context.Background(), mkfs, "-q", "-F", "-d", source, path) //nolint:gosec // hostTool's mkfs.ext4, on host-owned session data; no untrusted image parsing
+	// hostTool resolved the link, and mke2fs picks the filesystem by the
+	// name it is run as: called by its own, it makes ext2. Name ext4
+	// both ways.
+	cmd := exec.CommandContext(context.Background(), mkfs, "-q", "-F", "-t", "ext4", "-d", source, path) //nolint:gosec // hostTool's mkfs.ext4, on host-owned session data; no untrusted image parsing
+	cmd.Args[0] = "mkfs.ext4"
 	cmd.Env = providerEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("make guest image: %w: %s", err, out)
