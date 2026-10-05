@@ -166,7 +166,7 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		return fmt.Errorf("session %s is still running", s.ID)
 	}
 	// Before conflicts are read from what may be another tree.
-	if err := s.CheckRoots(); err != nil {
+	if err := rootsOf(s).all(); err != nil {
 		return fmt.Errorf("nothing applied: %w; put the directory back or discard the session", err)
 	}
 	in := bufio.NewReader(o.In)
@@ -903,7 +903,9 @@ func rootsOf(s *session.Session) roots {
 	if s.WorkspaceID.Real != "" {
 		r["ws"] = root{s.Workspace, s.WorkspaceID}
 	}
-	if s.HomeID.Real != "" {
+	// Only a branched $HOME has changes to apply; one that is not is
+	// left as it is, whatever it is now.
+	if s.HomeID.Real != "" && s.OverHome {
 		r["home"] = root{s.Home, s.HomeID}
 	}
 	return r
@@ -927,6 +929,25 @@ func (r roots) all() error {
 		if err := r.check(layer); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// under checks the roots p lies below, every root when it lies below
+// none: a directory the apply made in the workspace does not wait on a
+// $HOME that moved.
+func (r roots) under(p string) error {
+	below := false
+	for _, layer := range []string{"ws", "home"} {
+		if ro, ok := r[layer]; ok && within(p, ro.path) {
+			below = true
+			if err := ro.id.Check(ro.path); err != nil {
+				return err
+			}
+		}
+	}
+	if !below {
+		return r.all()
 	}
 	return nil
 }

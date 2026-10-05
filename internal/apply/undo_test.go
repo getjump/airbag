@@ -2300,3 +2300,198 @@ func TestBranchApplyRefusesAnUnfinishedApply(t *testing.T) {
 		t.Fatalf("apply --branch ran after an unfinished apply: %v", err)
 	}
 }
+
+// A rollback cut short between removing the agent's version and putting
+// the user's back (a crash, Ctrl-C) leaves the entry a step that did
+// not finish, so the next rollback restores the user's version rather
+// than leave the path as one changed after the apply.
+func TestRollbackCutShortBeforeRestoreRestoresLater(t *testing.T) {
+	s, box, ws := modifiedApplied(t)
+	afterRemove = func(string) {
+		afterRemove = nil
+		panic("cut short") // nothing after the removal runs, as in a crash
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	var out bytes.Buffer
+	func() {
+		defer func() { _ = recover() }()
+		_ = Rollback(s, nil, &out)
+		t.Fatal("the rollback was not cut short")
+	}()
+	if _, err := os.Lstat(filepath.Join(ws, "m.txt")); !os.IsNotExist(err) {
+		t.Fatalf("not cut short between the removal and the restore: %v", err)
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "stopped part way") {
+		t.Fatalf("apply ran after a rollback cut short: %v", err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" || strings.Contains(out.String(), "changed after the apply") {
+		t.Fatalf("the user's version is not restored: %q\n%s", got, out.String())
+	}
+	if g, err := lastGeneration(s); err != nil || g != nil {
+		t.Fatalf("the finished rollback left its journal: %+v %v", g, err)
+	}
+}
+
+// A finished rollback's directory is renamed out of the numbered ones
+// before it is removed: a removal cut short, with the journal gone and
+// the rest not, leaves no numbered directory without a journal, which
+// would refuse every later apply. The next apply clears what is left.
+func TestRollbackRemovalCutShortLeavesNoLostJournal(t *testing.T) {
+	s, box, ws := modifiedApplied(t)
+	removeTree = func(dir string) error {
+		removeTree = os.RemoveAll
+		if err := os.Remove(filepath.Join(dir, "journal.json")); err != nil {
+			t.Error(err)
+		}
+		return errors.New("cut short")
+	}
+	t.Cleanup(func() { removeTree = os.RemoveAll })
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err == nil {
+		t.Fatal("the removal was not cut short")
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
+		t.Fatalf("not rolled back: %q", got)
+	}
+	if g, err := lastGeneration(s); err != nil || g != nil {
+		t.Fatalf("a removal cut short reads as a lost journal: %+v %v", g, err)
+	}
+	if held, err := HeldVersions(s); err != nil || len(held) != 0 {
+		t.Fatalf("discard is refused after a removal cut short: %v %v", held, err)
+	}
+	upper := filepath.Join(t.TempDir(), "n.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "n.txt", Path: filepath.Join(ws, "n.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatalf("apply after a removal cut short: %v", err)
+	}
+	es, err := os.ReadDir(generationsDir(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range es {
+		if strings.HasSuffix(e.Name(), ".gone") {
+			t.Errorf("the next apply left %s", e.Name())
+		}
+	}
+}
+
+// The rollback of an apply that did not finish needs no mark: apply
+// refuses such a generation and discard keeps it as it is. Without one
+// it needs no space to write first, as when the step failed for want
+// of space.
+func TestUnfinishedApplyRollsBackWithoutAJournalWrite(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "n.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := beginGeneration(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "n.txt", Path: filepath.Join(ws, "n.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	if err := g.apply(c); err != nil {
+		t.Fatal(err)
+	}
+	// No journal can be written from here on.
+	if err := os.Mkdir(filepath.Join(g.dir, "journal.json.tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if _, err := g.rollback(&out); err != nil {
+		t.Fatalf("the rollback of an unfinished apply needs a journal write: %v", err)
+	}
+	if _, err := os.Lstat(c.Path); !os.IsNotExist(err) {
+		t.Fatalf("the added file is still there: %v", err)
+	}
+}
+
+// replaceDir puts a new directory where dir was.
+func replaceDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Rename(dir, dir+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A $HOME that is not branched has no changes to apply, so apply and
+// rollback leave it as it is, whatever it is now: recorded for a run's
+// agent state (macOS), it does not hold up the workspace.
+func TestApplyPassesAnUnbranchedHomeThatMoved(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	if s.HomeID.Real == "" || s.OverHome {
+		t.Fatalf("not an unbranched, recorded $HOME: %+v", s.Meta)
+	}
+	replaceDir(t, s.Home)
+	upper := filepath.Join(t.TempDir(), "n.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "n.txt", Path: filepath.Join(ws, "n.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatalf("an unbranched $HOME that moved holds up apply: %v", err)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("an unbranched $HOME that moved holds up rollback: %v", err)
+	}
+	if _, err := os.Lstat(c.Path); !os.IsNotExist(err) {
+		t.Fatalf("not rolled back: %v", err)
+	}
+}
+
+// The directories an apply made are removed once the root they are in
+// is checked, not every root: a branched $HOME that moved does not stop
+// the rollback of what the apply put in the workspace.
+func TestRollbackDirectoriesWaitOnlyOnTheirRoot(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	s.OverHome = true
+	upper := filepath.Join(t.TempDir(), "n.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "d/n.txt", Path: filepath.Join(ws, "d", "n.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	replaceDir(t, s.Home)
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("a $HOME that moved stops the rollback of the workspace: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "d")); !os.IsNotExist(err) {
+		t.Fatalf("the directory the apply made is left: %v", err)
+	}
+}

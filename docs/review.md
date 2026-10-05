@@ -44,12 +44,14 @@ its version from before the apply stays in the session: `airbag discard` refuses
 to delete it until a later rollback restores it, or you pass `--force`. A push that
 already ran is not undone.
 
-A session records the directories its workspace and `$HOME` were when it began.
-If one is another directory now (moved away, with a link or a new directory at its
-path), run, apply, rollback, resume and the outbox change nothing there and say so;
-put the directory back first. A `$HOME` that is not there when the session begins,
-and is not branched (`HOME=/nonexistent` with `--no-home`), has nothing to record:
-run makes nothing in it, and on macOS the agent's state there stays read-only. A rollback that finds it so part way stops there and keeps
+A session records the directories its workspace and a branched `$HOME` were when it
+began; on macOS, which never branches `$HOME`, it records the `$HOME` it keeps the
+agent's state in. If one is another directory now (moved away, with a link or a new
+directory at its path), run, apply, rollback, resume and the outbox change nothing
+there and say so; put the directory back first. Apply and rollback leave a `$HOME`
+that is not branched alone; on Linux nothing writes in it at all. On macOS one that
+could not be recorded (not there, `HOME=/nonexistent`, say) keeps the agent's state
+read-only. A rollback that finds it so part way stops there and keeps
 what is left in its journal; until `airbag rollback` is run again to finish it, apply
 refuses. A directory is told by its path, inode, device and, where
 the filesystem keeps them, its creation time, inode generation and filesystem ID.

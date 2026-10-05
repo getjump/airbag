@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -212,10 +211,11 @@ func (s *Session) CheckRoots() error {
 }
 
 // HomeUnrecorded reports a $HOME the session records nothing for: one
-// that was not there, and not branched, when it began. Nothing tells
-// what is there now from what was, so run makes and opens nothing there.
-// A session from before roots were recorded has no workspace recorded
-// either, and keeps what it did then.
+// not branched, and not there (or not readable) when it began, or on
+// Linux, where nothing writes in it. Nothing tells what is there now
+// from what was, so run makes and opens nothing there. A session from
+// before roots were recorded has no workspace recorded either, and
+// keeps what it did then.
 func (s *Session) HomeUnrecorded() bool {
 	return s.Home != "" && s.HomeID.Real == "" && s.WorkspaceID.Real != ""
 }
@@ -260,14 +260,14 @@ func Create(m Meta) (*Session, error) {
 			return nil, fmt.Errorf("session root %s is inside %s; set AIRBAG_HOME elsewhere", root, p)
 		}
 	}
-	// Where the workspace and $HOME lead now; apply and resume refuse
-	// them once they are other directories. A root that cannot be
-	// recorded refuses the session. $HOME is recorded branched or not:
-	// run writes there when it is branched (passthrough and branch-hole
-	// directories) and on macOS, which never branches it (agent state).
-	// Only a $HOME that is not there and is not branched
-	// (HOME=/nonexistent with --no-home) has nothing to tell apart, and
-	// records nothing; run then makes nothing there (HomeUnrecorded).
+	// Where the workspace and $HOME lead now; apply, run and resume
+	// refuse them once they are other directories. The workspace, and a
+	// $HOME that is branched, must be recorded, or the session is
+	// refused. A $HOME that is not branched is written only on macOS
+	// (Clone), for agent state: it is recorded where it can be, and one
+	// that is not (not there, HOME=/nonexistent, say) gets nothing made or
+	// written there (HomeUnrecorded). On Linux nothing writes in it, so
+	// nothing is recorded or checked.
 	for _, r := range []struct {
 		path string
 		id   *DirID
@@ -275,8 +275,12 @@ func Create(m Meta) (*Session, error) {
 		if r.path == "" || r.id.Real != "" {
 			continue
 		}
+		unbranched := r.id == &m.HomeID && !m.OverHome
+		if unbranched && !m.Clone {
+			continue
+		}
 		id, err := RecordDirID(r.path)
-		if errors.Is(err, fs.ErrNotExist) && r.id == &m.HomeID && !m.OverHome {
+		if err != nil && unbranched {
 			continue
 		}
 		if err != nil {

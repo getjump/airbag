@@ -46,12 +46,12 @@ func TestCreateRecordsRootsAndResumeChecksThem(t *testing.T) {
 	}
 }
 
-// A root that cannot be recorded refuses the session. $HOME is recorded
-// branched or not, since run writes there either way, and a session
-// does not resume once it is another directory; only a $HOME that is
-// not there and not branched (HOME=/nonexistent, --no-home) records
-// nothing.
-func TestCreateRecordsEveryRootItCan(t *testing.T) {
+// The workspace and a branched $HOME must be recorded, or the session
+// is refused. A $HOME that is not branched is recorded only where a run
+// writes in it (macOS, Clone), and only where it can be: one that is
+// not there is no reason to refuse. On Linux nothing writes in it, so
+// it is neither recorded nor checked.
+func TestCreateRecordsTheRootsARunWrites(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	missing := filepath.Join(t.TempDir(), "missing")
 	if _, err := Create(Meta{Workspace: missing, Home: t.TempDir()}); err == nil {
@@ -60,30 +60,45 @@ func TestCreateRecordsEveryRootItCan(t *testing.T) {
 	if _, err := Create(Meta{Workspace: t.TempDir(), Home: missing, OverHome: true}); err == nil {
 		t.Fatal("a session branched a $HOME that is not there")
 	}
-	s, err := Create(Meta{Workspace: t.TempDir(), Home: missing})
-	if err != nil || s.HomeID.Real != "" {
-		t.Fatalf("an unbranched $HOME that is not there: %+v %v", s, err)
-	}
-	ws, home := t.TempDir(), filepath.Join(t.TempDir(), "home")
-	if err := os.Mkdir(home, 0o755); err != nil {
+	// Nor one that cannot be recorded for another reason.
+	loop := filepath.Join(t.TempDir(), "loop")
+	if err := os.Symlink(loop, loop); err != nil {
 		t.Fatal(err)
 	}
-	s, err = Create(Meta{Workspace: ws, Home: home})
-	if err != nil || s.WorkspaceID.Real == "" || s.HomeID.Real == "" {
-		t.Fatalf("without a $HOME branch: %+v %v", s, err)
+	for _, home := range []string{missing, loop} {
+		for _, clone := range []bool{false, true} {
+			s, err := Create(Meta{Workspace: t.TempDir(), Home: home, Clone: clone})
+			if err != nil || s.HomeID.Real != "" || !s.HomeUnrecorded() {
+				t.Fatalf("an unbranched $HOME that cannot be recorded (%s, clone %t): %+v %v", home, clone, s, err)
+			}
+		}
 	}
-	s.Status = StatusStopped
-	if err := s.Save(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(home, home+".old"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(home, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Resume(s.ID, ws); err == nil || !strings.Contains(err.Error(), "another directory") {
-		t.Fatalf("resumed with an unbranched $HOME that is another directory: %v", err)
+	for _, clone := range []bool{false, true} {
+		ws, home := t.TempDir(), filepath.Join(t.TempDir(), "home")
+		if err := os.Mkdir(home, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		s, err := Create(Meta{Workspace: ws, Home: home, Clone: clone})
+		if err != nil || s.WorkspaceID.Real == "" || (s.HomeID.Real != "") != clone {
+			t.Fatalf("without a $HOME branch (clone %t): %+v %v", clone, s, err)
+		}
+		s.Status = StatusStopped
+		if err := s.Save(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(home, home+".old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(home, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, err = Resume(s.ID, ws)
+		switch {
+		case clone && (err == nil || !strings.Contains(err.Error(), "another directory")):
+			t.Fatalf("resumed with the $HOME it writes agent state in another directory: %v", err)
+		case !clone && err != nil:
+			t.Fatalf("a $HOME nothing writes in refused resume: %v", err)
+		}
 	}
 }
 

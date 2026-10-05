@@ -83,6 +83,17 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	if err != nil {
 		return nil, err
 	}
+	// What a rollback's removal cut short left holds nothing needed: all
+	// of it was rolled back.
+	if es, err := os.ReadDir(root); err == nil {
+		for _, e := range es {
+			if strings.HasSuffix(e.Name(), ".gone") {
+				if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
 	n := 1
 	if len(gs) > 0 {
 		n = gs[len(gs)-1].n + 1
@@ -227,6 +238,9 @@ func (g *generation) finish() error {
 	return g.save()
 }
 
+// removeTree removes a rolled-back generation's directory; a test hook.
+var removeTree = os.RemoveAll
+
 // afterRemove is a test hook, called once a rollback entry has removed
 // the agent's version and before it restores the previous one; nil
 // outside tests.
@@ -247,8 +261,10 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	}
 	// Marked before the first write, so a run that ends any other way (an
 	// error, a crash, Ctrl-C) leaves a stopped rollback too: discard keeps
-	// the versions in saved/, apply refuses. The final save clears it.
-	if !g.Stopped {
+	// the versions in saved/, apply refuses. The final save clears it. An
+	// apply that did not finish is refused and kept as it is, so its own
+	// rollback needs no mark, nor the space to write one.
+	if !g.Stopped && g.Complete {
 		g.Stopped = true
 		if err := g.save(); err != nil {
 			return len(g.Entries), fmt.Errorf("nothing rolled back: mark the journal: %w", err)
@@ -386,6 +402,17 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			if err := giveBack(e, g.Clone); err != nil {
 				return stop(i, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err))
 			}
+			// Journal first, as apply does: from the removal below to the
+			// restore the path holds neither version. Saved as a step that
+			// did not finish, a crash in between leaves the next rollback
+			// to restore the previous version, not to take the path for
+			// one changed after the apply.
+			if moved {
+				g.Entries[i].After = ""
+				if err := g.save(); err != nil {
+					return stop(i, fmt.Errorf("%s: write the journal: %w", e.Path, err))
+				}
+			}
 		}
 		// A directory with nothing before it, added or replacing what was
 		// gone by the time of the apply, is one the apply made: it goes
@@ -406,15 +433,12 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			afterRemove(e.Path)
 		}
 		if moved {
+			// Stopped here, the entry is already a step that did not
+			// finish (above): the next rollback restores what saved/ holds.
 			if err := held(); err != nil {
-				// The agent's version is out and back in the session:
-				// to the next rollback this is a step that did not
-				// finish, whose previous version saved/ holds.
-				g.Entries[i].After = ""
 				return stop(i, err)
 			}
 			if err := move(e.Saved, e.Path); err != nil {
-				g.Entries[i].After = "" // as above: the agent's version is out
 				return stop(i, fmt.Errorf("%s: restore: %w", e.Path, err))
 			}
 		}
@@ -422,7 +446,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
 	var still []string
 	for _, d := range dirs {
-		if err := g.roots.all(); err != nil {
+		if err := g.roots.under(d); err != nil {
 			return stop(-1, err)
 		}
 		if inWhole(d) == "" {
@@ -435,7 +459,16 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	if len(kept) == 0 {
 		// Nothing else is left, so what keeps those directories there
 		// is the user's, and there is no later rollback to try again.
-		return left, os.RemoveAll(g.dir)
+		// Renamed first to a name the listings pass by: a removal cut
+		// short leaves no numbered directory without its journal.
+		gone := g.dir + ".gone"
+		if err := os.RemoveAll(gone); err != nil {
+			return left, err
+		}
+		if err := os.Rename(g.dir, gone); err != nil {
+			return left, err
+		}
+		return left, removeTree(gone)
 	}
 	// Keep what was left, with its previous versions, so nothing from
 	// before the apply is lost and a later rollback can try again.
