@@ -3,11 +3,13 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -63,6 +65,51 @@ func TestForwarderTaint(t *testing.T) {
 	}
 	if try(session.Forward{Host: "db.example.test", Port: port}) {
 		t.Error("a forward off this machine relayed after the secret read")
+	}
+}
+
+// A secret read while a connection to another machine is dialled: the
+// cut the read runs does not see it yet, and the check after the dial
+// refuses it.
+func TestForwarderTaintWhileDialling(t *testing.T) {
+	_, port := serveTCP(t, func(c net.Conn) {
+		_, _ = io.Copy(struct{ io.Writer }{c}, struct{ io.Reader }{c})
+		c.Close()
+	})
+	gate, log, path := forwardTest(t)
+	fw := newForwarder(session.Forward{Host: "db.example.test", Port: port}, gate, log)
+	gate.Labels().OnAdd(func(l taint.Label, _ string) { // as the session does
+		if l == taint.Secret {
+			fw.cut()
+		}
+	})
+	dial := fw.dial
+	fw.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		gate.Mark(taint.Secret, ".env")
+		return dial(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(port))) // stands in for db.example.test
+	}
+	a, b := net.Pipe()
+	done := make(chan struct{})
+	go func() { fw.handle(b); close(done) }()
+	_, _ = a.Write([]byte("x"))
+	n, _ := a.Read(make([]byte, 1))
+	a.Close()
+	<-done
+	if n != 0 {
+		t.Fatal("a forward off this machine relayed after a secret read during its dial")
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	effs, _ := effects.Read(path)
+	var got []string
+	for _, e := range effs {
+		if e.Kind == "net.tcp" {
+			got = append(got, e.Verdict+" "+e.Reason)
+		}
+	}
+	if len(got) != 1 || got[0] != "deny secret-taint" {
+		t.Fatalf("net.tcp effects = %q, want one deny for secret-taint", got)
 	}
 }
 

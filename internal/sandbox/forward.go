@@ -32,6 +32,9 @@ type forwarder struct {
 	f    session.Forward
 	gate *policy.Gate
 	log  *effects.Log
+	// dial connects to the target; a test replaces it to act while a
+	// connection is dialled.
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
 
 	idle, drain time.Duration
 	max         int
@@ -46,7 +49,8 @@ type forwarder struct {
 const maxForwardConns = 256
 
 func newForwarder(f session.Forward, gate *policy.Gate, log *effects.Log) *forwarder {
-	return &forwarder{f: f, gate: gate, log: log, idle: proxy.ForwardIdle, drain: proxy.Drain, max: maxForwardConns, open: map[net.Conn]bool{}}
+	return &forwarder{f: f, gate: gate, log: log, dial: (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		idle: proxy.ForwardIdle, drain: proxy.Drain, max: maxForwardConns, open: map[net.Conn]bool{}}
 }
 
 func (fw *forwarder) target() string { return net.JoinHostPort(fw.f.Host, strconv.Itoa(fw.f.Port)) }
@@ -95,7 +99,7 @@ func (fw *forwarder) handle(c net.Conn) {
 		fw.n--
 		fw.mu.Unlock()
 	}()
-	up, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(context.Background(), "tcp", fw.target())
+	up, err := fw.dial(context.Background(), "tcp", fw.target())
 	if err != nil {
 		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "allow", Reason: "unreachable: " + err.Error()})
 		return
