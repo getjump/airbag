@@ -212,7 +212,9 @@ func (s *Server) deferCmd(w http.ResponseWriter, r *http.Request) {
 			refuse(err.Error())
 			return
 		}
-		d, id := s.Gate.Check(policy.Input{Effect: models.Effect{Kind: in.Kind, Target: p.Repository, Detail: digest}, Argv: in.Argv})
+		// Lowercase, as GitHub names repositories: a rule on "org/repo"
+		// holds for every spelling the agent may choose.
+		d, id := s.Gate.Check(policy.Input{Effect: models.Effect{Kind: in.Kind, Target: strings.ToLower(p.Repository), Detail: digest}, Argv: in.Argv})
 		if d.Verdict != policy.Allow {
 			refuse(policy.Explain(d, id))
 			return

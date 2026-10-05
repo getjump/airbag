@@ -5,6 +5,7 @@ package githubpr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 // Call is a trusted GitHub API transport, bound to api.github.com. It must
 // honor cancellation, bound responses and perform no implicit POST retries.
+// Return an HTTPError only for an observed GitHub HTTP error response.
 // Paths and payloads come from the validated operation, never captured argv.
 type Call func(context.Context, string, string, []byte) ([]byte, error)
 
@@ -68,8 +70,8 @@ func (h Handler) Prepare(ctx context.Context, request operation.Request) (*Prepa
 
 // Publish must run only after a durable claim of Digest. One Prepared value
 // invokes the POST at most once and returns the same result on repeated calls.
-// Across processes/restarts the outbox remains the admission gate. A failed
-// call or mismatching response has an unknown outcome, never a retry.
+// Across processes/restarts the outbox remains the admission gate. An observed
+// 4xx refusal fails; other errors/mismatching responses are unknown. Neither retries.
 func (p *Prepared) Publish(ctx context.Context) operation.Result {
 	if p == nil || p.call == nil {
 		return operation.Result{Outcome: operation.Denied, Value: "request was not prepared"}
@@ -77,7 +79,10 @@ func (p *Prepared) Publish(ctx context.Context) operation.Result {
 	p.once.Do(func() {
 		p.result = operation.Result{Outcome: operation.Uncertain, RequestDigest: p.digest}
 		data, err := p.call(ctx, "POST", "repos/"+p.request.PullRequest.Repository+"/pulls", p.payload)
-		if err != nil {
+		var responseError *HTTPError
+		if errors.As(err, &responseError) && responseError != nil && responseError.StatusCode >= 400 && responseError.StatusCode < 500 {
+			p.result.Outcome, p.result.Value = operation.Failure, responseError.Error()
+		} else if err != nil {
 			p.result.Value = "publication may have reached GitHub; inspect the remote before making another request"
 		} else if value, valid := MatchResponse(data, *p.request.PullRequest); valid {
 			p.result.Outcome, p.result.Value = operation.Succeeded, value

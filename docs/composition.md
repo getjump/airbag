@@ -30,7 +30,8 @@ daemons to install and no new runtime/plugin protocol.
   without publishing. A prepared value copies the request and POST payload;
   repeated publication calls reuse its result rather than repeat the POST.
   The returned PR must match the exact destination, branches, commit, title,
-  body and draft state. A failed POST or mismatching response is `unknown`.
+  body and draft state. An observed GitHub 4xx refusal fails; transport errors,
+  5xx responses or a mismatching response are `unknown`. Neither retries.
 - `creds`: host-side credential resolution, placeholders and masking. Binding
   sources and destinations must come from the trusted operator, not the agent.
 - `proxy`: the existing HTTP/CONNECT allowlist and credential mediation, with a
@@ -88,13 +89,17 @@ rule; the GitHub interpreter does not know its workspace/import semantics.
 
 Only after `Claim(id, prepared.Digest())` commits may the executor call
 `prepared.Publish(ctx)`. Bind the returned result to the ticket, map its outcome
-to `done` or `unknown`, and save it with `Update`. A running ticket found after a
-crash becomes unknown while holding the execution lock; it must not be retried
+to `done`, `failed` or `unknown`, and save it with `Update`. A running ticket
+found after a crash becomes unknown while holding the execution lock; it must not be retried
 automatically. Inspect earlier incomplete/unknown operations before executing
-anything that depends on them. The public store does not schedule dependencies.
+anything that depends on them. After inspecting the remote, the trusted human
+can settle an unknown ticket with `Box.Resolve`; resolution does not publish
+or authorize another attempt. The public store does not schedule dependencies.
 
 The API callback belongs to the trusted host: bind it to GitHub, limit response
 sizes and time, honor cancellation, and disable implicit mutation retries.
+Return `githubpr.HTTPError` only for a directly observed GitHub error response;
+a timeout or CLI diagnostic cannot establish an HTTP refusal.
 The existing CLI adapter continues using a trusted host `gh`, sanitized routing
 environment and fixed GitHub API endpoints. No callback or credential is
 accepted from an operation request. A prepared value's single-use guard is
@@ -104,7 +109,8 @@ or atomic freezing of a mutable remote branch.
 
 `test/sdk-client/client_test.go` contains a runnable independent host example.
 It queues and previews a PR, rejects a changed approval digest, reopens storage,
-claims once, publishes to a host-only fake API, and records success or uncertainty.
+claims once, publishes to a host-only fake API, and records success, refusal
+or uncertainty.
 It creates no real PRs and runs without Airbag's sandbox, session metadata or CLI.
 
 ## An independent egress host

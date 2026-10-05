@@ -17,6 +17,9 @@ const Schema = "airbag.operation/v1"
 const CreatePullRequest = "github.pull_request.create"
 const MaxBody = 256 << 10
 
+// MaxBodyChars is the longest pull request body GitHub accepts.
+const MaxBodyChars = 65536
+
 // Request is a closed, versioned sum of supported operations. Unknown variants
 // are rejected. New variants need validation and an explicit trusted handler.
 type Request struct {
@@ -72,6 +75,9 @@ func (r Request) Validate() error {
 	}
 	if len(p.Body) > MaxBody || !utf8.ValidString(p.Body) || strings.ContainsRune(p.Body, '\x00') {
 		return fmt.Errorf("body must be UTF-8, at most %d bytes, without NUL", MaxBody)
+	}
+	if utf8.RuneCountInString(p.Body) > MaxBodyChars {
+		return fmt.Errorf("body must be at most %d characters, as GitHub accepts", MaxBodyChars)
 	}
 	return nil
 }

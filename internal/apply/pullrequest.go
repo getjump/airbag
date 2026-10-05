@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,7 +50,11 @@ func runPullRequest(s *session.Session, box *outbox.Box, it outbox.Intent, in *b
 		return pendingPR(it, o, err)
 	}
 	handler := githubpr.Handler{Call: func(ctx context.Context, method, endpoint string, payload []byte) ([]byte, error) {
-		return githubAPI(ctx, s, gh, method, endpoint, payload)
+		body, code, err := githubAPI(ctx, s, gh, method, endpoint, payload)
+		if err != nil && code >= 400 && code < 500 {
+			return body, &githubpr.HTTPError{StatusCode: code, Body: body}
+		}
+		return body, err
 	}}
 	prepared, err := handler.Prepare(context.Background(), *it.Request)
 	if err != nil {
@@ -72,8 +77,11 @@ func runPullRequest(s *session.Session, box *outbox.Box, it outbox.Intent, in *b
 	result := prepared.Publish(context.Background())
 	result.Ticket = it.ID
 	it.Status = outbox.Unknown
-	if result.Outcome == operation.Succeeded {
+	switch result.Outcome {
+	case operation.Succeeded:
 		it.Status = outbox.Done
+	case operation.Failure:
+		it.Status = outbox.Failed
 	}
 	encoded, encodeErr := json.Marshal(result)
 	if encodeErr != nil {
@@ -166,10 +174,12 @@ func (w *boundedOutput) Write(data []byte) (int, error) {
 	return n, nil
 }
 
-func githubAPI(ctx context.Context, s *session.Session, prog, method, endpoint string, payload []byte) ([]byte, error) {
+// githubAPI returns the response body and its HTTP status: 0 when gh
+// printed no status line, as when it failed before GitHub answered.
+func githubAPI(ctx context.Context, s *session.Session, prog, method, endpoint string, payload []byte) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	args := []string{"api", "--hostname", "github.com", "--method", method, "https://api.github.com/" + endpoint}
+	args := []string{"api", "--hostname", "github.com", "--method", method, "https://api.github.com/" + endpoint, "--include"}
 	if payload != nil {
 		args = append(args, "--input", "-")
 	}
@@ -179,13 +189,41 @@ func githubAPI(ctx context.Context, s *session.Session, prog, method, endpoint s
 	cmd.Stdin = bytes.NewReader(payload)
 	out := &boundedOutput{limit: 2 << 20}
 	cmd.Stdout, cmd.Stderr = out, io.Discard
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("GitHub API %s failed: %w", method, err)
+	runErr := cmd.Run()
+	code, body := splitResponse(out.Bytes())
+	if runErr != nil {
+		return body, code, fmt.Errorf("GitHub API %s failed: %w", method, runErr)
 	}
 	if out.overflow {
-		return nil, fmt.Errorf("GitHub API response exceeded the size limit")
+		return nil, code, fmt.Errorf("GitHub API response exceeded the size limit")
 	}
-	return out.Bytes(), nil
+	return body, code, nil
+}
+
+// splitResponse separates what gh api --include prints: a status line
+// and headers, a blank line, the body. Output without a status line is
+// all body, with status 0.
+func splitResponse(out []byte) (int, []byte) {
+	if !bytes.HasPrefix(out, []byte("HTTP/")) {
+		return 0, out
+	}
+	head, body, ok := bytes.Cut(out, []byte("\r\n\r\n"))
+	if !ok {
+		head, body, ok = bytes.Cut(out, []byte("\n\n"))
+	}
+	if !ok {
+		return 0, nil
+	}
+	line, _, _ := bytes.Cut(head, []byte("\n"))
+	f := strings.Fields(string(line))
+	if len(f) < 2 {
+		return 0, body
+	}
+	code, err := strconv.Atoi(f[1])
+	if err != nil {
+		return 0, body
+	}
+	return code, body
 }
 
 func exactPR(data []byte, p operation.PullRequest) (string, bool) {

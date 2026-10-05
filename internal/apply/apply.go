@@ -361,10 +361,14 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	if err != nil {
 		return err
 	}
-	failed := "" // after a failure the rest wait: a PR without its push means nothing
+	// After a failure the rest wait (a PR without its push means
+	// nothing), in this run; after an unknown outcome they wait until the
+	// user records what happened with `airbag outbox resolve`. An intent
+	// left pending (--yes, --branch, --trust-git) holds nothing back.
+	failed, unknown := "", ""
 	for _, it := range intents {
 		if it.Status == outbox.Unknown {
-			failed = it.ID
+			unknown = it.ID
 			continue
 		}
 		if it.Status == outbox.Running {
@@ -379,14 +383,20 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 				return fmt.Errorf("intent %s: %w", it.ID, err)
 			}
 			fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
-			failed = it.ID
+			unknown = it.ID
 			continue
 		}
 		if it.Status != outbox.Pending && !(it.Request != nil && it.Status == string(operation.Approved)) {
 			continue
 		}
+		if unknown != "" {
+			fmt.Fprintf(o.Out, "intent %s left pending: the outcome of %s is unknown; check what it did, then record it with "+
+				"`airbag outbox resolve %s done|failed %s`, and `airbag apply %s` runs the rest\n",
+				it.ID, unknown, unknown, s.ID, s.ID)
+			continue
+		}
 		if failed != "" {
-			fmt.Fprintf(o.Out, "intent %s left pending: %s did not complete before it; inspect its outcome before publishing anything dependent on it (session %s)\n",
+			fmt.Fprintf(o.Out, "intent %s left pending: %s failed before it; once that is sorted out, `airbag apply %s` runs the rest\n",
 				it.ID, failed, s.ID)
 			continue
 		}
@@ -404,8 +414,11 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 		if err != nil {
 			return err
 		}
-		if status != outbox.Done {
+		switch status {
+		case outbox.Failed:
 			failed = it.ID
+		case outbox.Unknown:
+			unknown = it.ID
 		}
 	}
 	return nil

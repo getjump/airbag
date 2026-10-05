@@ -75,4 +75,9 @@ rules:
 	if d := ask(t, s, in); !strings.Contains(d.Refused, "only-our-repo") {
 		t.Fatalf("destination deny ignored: %+v", d)
 	}
+	// Rules see the repository as GitHub names it, whatever the spelling.
+	in.Request.PullRequest.Repository, in.Argv[4] = "GetJump/Airbag", "GetJump/Airbag"
+	if d := ask(t, s, in); strings.Contains(d.Refused, "only-our-repo") || !strings.Contains(d.Refused, "review-publication") {
+		t.Fatalf("spelling changed the rule's verdict: %+v", d)
+	}
 }

@@ -21,6 +21,9 @@ type outboxPreview struct {
 }
 
 func cmdOutbox(args []string) error {
+	if len(args) > 0 && args[0] == "resolve" {
+		return cmdOutboxResolve(args[1:])
+	}
 	fs := flag.NewFlagSet("outbox", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "print frozen requests as JSON, without executing them")
 	if err := fs.Parse(reorder(args)); err != nil {
@@ -77,4 +80,29 @@ func previewOutbox(intents []outbox.Intent) ([]outboxPreview, error) {
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// cmdOutboxResolve records, once the user has checked, what an intent
+// whose outcome is unknown did: outbox resolve INTENT done|failed [ID].
+func cmdOutboxResolve(args []string) error {
+	if len(args) < 2 || args[1] != "done" && args[1] != "failed" {
+		return fmt.Errorf("usage: airbag outbox resolve INTENT done|failed [ID]")
+	}
+	return withSession(args[2:], func(s *session.Session) error {
+		box, err := outbox.Open(s.EffectsPath())
+		if err != nil {
+			return err
+		}
+		defer func() { _ = box.Close() }()
+		lock, err := box.LockExecution() // not while an apply is running it
+		if err != nil {
+			return err
+		}
+		defer func() { _ = lock.Close() }()
+		if err := box.Resolve(args[0], args[1] == "done"); err != nil {
+			return err
+		}
+		fmt.Printf("intent %s recorded as %s; nothing was run. `airbag apply %s` runs the intents after it\n", args[0], args[1], s.ID)
+		return nil
+	})
 }

@@ -64,6 +64,10 @@ func mockPR(t *testing.T, p operation.PullRequest, mode string) (string, string)
 	if mode == "ambiguous" {
 		postAction = "exit 1"
 	}
+	if mode == "refused" { // gh api --include on a 422, then gh's own exit
+		postAction = "printf '%s' " + shellFixtureLiteral("HTTP/2.0 422 Unprocessable Entity\r\nContent-Type: application/json\r\n\r\n"+
+			`{"message":"Validation Failed","errors":[{"message":"A pull request already exists for getjump:work."}]}`+"\n") + "\nexit 1"
+	}
 	script := "#!/bin/sh\necho \"$*\" >> " + shellFixtureLiteral(log) + "\n" +
 		"if [ \"$5\" = GET ]; then printf '%s\\n' " + shellFixtureLiteral(`{"object":{"sha":"`+sha+`"}}`) + "; else\n" +
 		"cat > " + shellFixtureLiteral(log+".payload") + "\n" + postAction + "\nfi\n"
@@ -278,5 +282,87 @@ func TestPartialApplyDoesNotSelectAnEntireCommitForPublication(t *testing.T) {
 	_ = runPRFixture(t, s, b, false, "y\n")
 	if status(t, b, it.ID) != outbox.Pending || ran(log) != "" {
 		t.Fatal("partial file selection authorized the full commit")
+	}
+}
+
+// A request GitHub answered and refused created nothing: it fails, is
+// not sent again, and holds nothing back in later runs.
+func TestRefusedPublicationFails(t *testing.T) {
+	s, b, it := prFixture(t)
+	log, _ := mockPR(t, *it.Request.PullRequest, "refused")
+	out := runPRFixture(t, s, b, false, "y\n")
+	if status(t, b, it.ID) != outbox.Failed || !strings.Contains(out, "HTTP 422") || !strings.Contains(out, "already exists") {
+		t.Fatalf("refusal not recorded as failed: %s %q", status(t, b, it.ID), out)
+	}
+	all, err := b.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := all[0].TypedResult(); r == nil || r.Outcome != operation.Failure {
+		t.Fatalf("result: %+v", r)
+	}
+	_ = runPRFixture(t, s, b, false, "y\n")
+	if strings.Count(ran(log), "--method POST") != 1 {
+		t.Fatal("sent a refused request again")
+	}
+}
+
+// A push held because the session's work is on a branch does not hold a
+// typed PR back: the PR checks for itself that the remote has the commit.
+func TestHeldPushDoesNotHoldTypedPR(t *testing.T) {
+	s, b, it := prFixture(t)
+	push, err := b.Push(outbox.Intent{Kind: outbox.KindPush, Argv: []string{"git", "push", "origin", "work"}, Cwd: s.Workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := b.Push(outbox.Intent{Kind: outbox.KindPullRequest, Cwd: s.Workspace, Argv: it.Argv, Request: it.Request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the second request is under test: settle the first.
+	if err := b.Update(outbox.Intent{ID: it.ID, Status: outbox.Rejected, RequestDigest: it.RequestDigest}); err != nil {
+		t.Fatal(err)
+	}
+	s.Branch = "work"
+	log, _ := mockPR(t, *it.Request.PullRequest, "ok")
+	out := runPRFixture(t, s, b, false, "y\n")
+	if status(t, b, push.ID) != outbox.Pending || status(t, b, pr.ID) != outbox.Done || !strings.Contains(ran(log), "--method POST") {
+		t.Fatalf("push %s, PR %s: %q", status(t, b, push.ID), status(t, b, pr.ID), out)
+	}
+}
+
+func TestPublishedPRMustMatchTitleBodyAndBase(t *testing.T) {
+	p := operation.PullRequest{Repository: "getjump/airbag", Base: "main", Head: "work", HeadCommit: strings.Repeat("a", 40), Title: "Fix", Body: "body"}
+	for _, change := range []func(m map[string]any){
+		func(map[string]any) {},
+		func(m map[string]any) { m["title"] = "Other" },
+		func(m map[string]any) { m["body"] = "other" },
+		func(m map[string]any) { m["base"].(map[string]any)["ref"] = "release" },
+	} {
+		m := map[string]any{"number": 7, "html_url": "https://github.com/getjump/airbag/pull/7", "title": p.Title, "body": p.Body, "draft": false,
+			"head": map[string]any{"ref": p.Head, "sha": p.HeadCommit, "repo": map[string]string{"full_name": p.Repository}},
+			"base": map[string]any{"ref": p.Base, "repo": map[string]string{"full_name": p.Repository}}}
+		change(m)
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, valid := exactPR(data, p)
+		if want := m["title"] == p.Title && m["body"] == p.Body && m["base"].(map[string]any)["ref"] == p.Base; valid != want {
+			t.Fatalf("attested %v, want %v: %s", valid, want, data)
+		}
+	}
+}
+
+func TestSplitResponse(t *testing.T) {
+	for in, want := range map[string]int{
+		"HTTP/2.0 201 Created\r\nX: y\r\n\r\n{}":  201,
+		"HTTP/1.1 422 Unprocessable Entity\n\n{}": 422,
+		"{}":                         0,
+		"HTTP/2.0 garbage\r\n\r\n{}": 0,
+	} {
+		if code, body := splitResponse([]byte(in)); code != want || string(body) != "{}" {
+			t.Errorf("splitResponse(%q) = %d %q, want %d", in, code, body, want)
+		}
 	}
 }

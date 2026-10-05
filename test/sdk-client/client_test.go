@@ -31,8 +31,8 @@ func request() operation.Request {
 }
 
 func TestIndependentOutboxPublication(t *testing.T) {
-	for _, uncertain := range []bool{false, true} {
-		t.Run(fmt.Sprint(uncertain), func(t *testing.T) {
+	for _, mode := range []string{"ok", "raced", "refused", "server-error"} {
+		t.Run(mode, func(t *testing.T) {
 			r := request()
 			preview, err := r.Preview()
 			if err != nil {
@@ -62,8 +62,17 @@ func TestIndependentOutboxPublication(t *testing.T) {
 				if err := d.Decode(&payload); err != nil || payload.Title != "Reviewed fix" || payload.Body != "Frozen body\n" || payload.Head != "work" || payload.Base != "main" || !payload.Draft || payload.Maintainer {
 					t.Errorf("POST differs from frozen request: %+v, %v", payload, err)
 				}
+				if mode == "refused" || mode == "server-error" {
+					code := http.StatusUnprocessableEntity
+					if mode == "server-error" {
+						code = http.StatusServiceUnavailable
+					}
+					w.WriteHeader(code)
+					_, _ = io.WriteString(w, `{"message":"fixture refusal"}`)
+					return
+				}
 				sha := r.PullRequest.HeadCommit
-				if uncertain {
+				if mode == "raced" {
 					sha = strings.Repeat("b", 40) // remote head raced the POST
 				}
 				_, _ = fmt.Fprintf(w, `{"number":7,"html_url":"https://github.com/example/repo/pull/7","title":"Reviewed fix","body":"Frozen body\n","draft":true,"head":{"sha":%q,"ref":"work","repo":{"full_name":"example/repo"}},"base":{"ref":"main","repo":{"full_name":"example/repo"}}}`, sha)
@@ -79,7 +88,11 @@ func TestIndependentOutboxPublication(t *testing.T) {
 					return nil, err
 				}
 				defer resp.Body.Close()
-				return io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+				data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+				if err == nil && resp.StatusCode >= 400 {
+					err = &githubpr.HTTPError{StatusCode: resp.StatusCode, Body: data}
+				}
+				return data, err
 			}}
 			path := filepath.Join(t.TempDir(), "outbox.db")
 			box, err := outbox.Open(path)
@@ -126,9 +139,12 @@ func TestIndependentOutboxPublication(t *testing.T) {
 				t.Fatal("prepared interpreter repeated an external effect")
 			}
 			result.Ticket = it.ID
-			it.Status = outbox.Done
-			if uncertain {
-				it.Status = outbox.Unknown
+			it.Status = outbox.Unknown
+			switch result.Outcome {
+			case operation.Succeeded:
+				it.Status = outbox.Done
+			case operation.Failure:
+				it.Status = outbox.Failed
 			}
 			encoded, err := json.Marshal(result)
 			if err != nil {
@@ -146,8 +162,10 @@ func TestIndependentOutboxPublication(t *testing.T) {
 				t.Fatal(rows, err)
 			}
 			want := operation.Succeeded
-			if uncertain {
+			if mode == "raced" || mode == "server-error" {
 				want = operation.Uncertain
+			} else if mode == "refused" {
+				want = operation.Failure
 			}
 			if got := rows[0].TypedResult(); got == nil || got.Outcome != want || got.RequestDigest != preview.RequestDigest {
 				t.Fatal("result not bound to the queued operation", got)

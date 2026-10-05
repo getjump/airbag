@@ -49,8 +49,9 @@ airbag apply SESSION               # approve the exact PR, one by one
 ```
 
 The push destination is your responsibility: use the repository named in the
-request. A queued legacy push stays pending after `apply --branch` and blocks
-later intents; this workflow queues only the typed PR and pushes explicitly.
+request. A queued legacy push stays pending after `apply --branch`; it does not
+hold the typed PR back, which checks for itself that the remote branch has the
+commit.
 Alternatively, a normal `airbag apply SESSION` can first execute a reviewed
 queued push, then publish the typed PR. `--yes` never authorizes typed PR
 publication. Repeating apply on an already applied session processes its
@@ -93,8 +94,22 @@ branch can race the check or move after creation; preflight plus response
 validation cannot make that API atomic or freeze the PR's future content.
 A timeout, CLI error, malformed/oversized response or mismatching response is
 `unknown`, may already have created a PR, and is never automatically retried.
-Later intents wait behind incomplete predecessors. Reconcile an unknown result
-on GitHub manually; this version has no automatic reconciliation/retry command.
+An answer in which GitHub refused the request (HTTP 4xx: a PR already open for
+the branch, no commits between the branches, no permission) created nothing and
+is `failed`, with GitHub's message. A body longer than GitHub's 65 536
+characters is refused when the call is queued.
+
+The intents queued after an `unknown` one wait, in every later apply, until you
+have checked what it did on GitHub and recorded it: `airbag outbox resolve
+INTENT done|failed [SESSION]`. That runs nothing; it records your finding, and
+the next apply runs the rest. After a failure the rest wait in that apply only,
+as for other intents; an intent left pending (by `--yes`, `--branch` or
+`--trust-git`) holds nothing back.
+
+The preview marks every line of the frozen body with `| ` and gives its byte and
+line counts, so text in the body cannot pass for the end of it. Rules see the
+repository lowercased, as GitHub names repositories, so a rule on `org/repo`
+holds for any spelling.
 
 A session execution lock prevents two live executors from recovering or
 publishing each other's work. After a crash, `running` becomes terminal
