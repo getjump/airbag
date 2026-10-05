@@ -27,6 +27,9 @@ unknown, or rejection before execution. Approval binds the full request digest.
 An immediate SQLite transaction durably consumes that grant before execution;
 two competing handlers cannot both claim it. Completed, failed, rejected and
 unknown are terminal. A queued ticket does not mean a remote action succeeded.
+No handler runs an unknown request again; after checking the remote, the user
+records what it did (`airbag outbox resolve`), which appends done or failed
+without running anything.
 SQLite WAL with synchronous=FULL persists approval and claim barriers. Reopen
 tests verify the stored history; they do not simulate power failure.
 

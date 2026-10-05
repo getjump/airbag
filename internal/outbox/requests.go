@@ -101,3 +101,42 @@ func (b *Box) transition(id, digest string, expected, next operation.State, outp
 	}
 	return tx.Commit()
 }
+
+// Resolve records what the user found an intent whose outcome is unknown
+// did, after checking the remote: done or failed. It runs nothing.
+// Execution never resumes from unknown; this is the one way out of it,
+// so that the intents queued after it can run.
+func (b *Box) Resolve(id string, done bool) error {
+	tx, err := b.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var current, digest string
+	if err := tx.QueryRowContext(context.Background(), `SELECT s.status, coalesce(r.digest, '')
+		FROM intents i
+		JOIN intent_status s ON s.seq = (SELECT max(seq) FROM intent_status WHERE intent = i.id)
+		LEFT JOIN intent_requests r ON r.intent = i.id
+		WHERE i.id = ?`, id).Scan(&current, &digest); err != nil {
+		return fmt.Errorf("intent %s: %w", id, err)
+	}
+	if current != Unknown {
+		return fmt.Errorf("intent %s is %s; only an unknown outcome is recorded by hand", id, current)
+	}
+	status, outcome, output := Failed, operation.Failure, "recorded by the user: it did not take effect"
+	if done {
+		status, outcome, output = Done, operation.Succeeded, "recorded by the user: it took effect"
+	}
+	if digest != "" {
+		r, err := json.Marshal(operation.Result{Outcome: outcome, Ticket: id, RequestDigest: digest, Value: output})
+		if err != nil {
+			return err
+		}
+		output = string(r)
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO intent_status (intent, t, status, output) VALUES (?, ?, ?, ?)`,
+		id, time.Now().UTC().Format(time.RFC3339Nano), status, output); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

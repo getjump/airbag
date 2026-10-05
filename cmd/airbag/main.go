@@ -42,6 +42,9 @@ const usage = `airbag — approve outcomes, not commands
                               tools, --attention for only what needs a decision
   airbag diff [ID] [PATH...]  unified diff of changed files
   airbag outbox [ID] [--json] exact frozen external requests; no execution
+  airbag outbox resolve INTENT done|failed [ID]
+                              record what an intent with an unknown outcome did,
+                              after checking; nothing runs
   airbag apply [ID] [-i] [--only PATH]... [--yes] [--force] [--trust-git]
                               write the branch (or part of it) to the real files,
                               then run the outbox

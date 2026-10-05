@@ -395,7 +395,9 @@ commit the result first and supply explicit `--repo`, `--base`, `--head`,
 frozen; incomplete/unsupported calls are refused. `airbag outbox [ID] [--json]`
 shows the exact proposed PR without a network call. Execution rebuilds a fixed
 GitHub API request after separate approval, checks the selected and remote
-commits, and verifies the returned PR. An uncertain result is never retried.
+commits, and verifies the returned PR. An uncertain result is never retried:
+the intents after it wait until you check GitHub and record what happened with
+`airbag outbox resolve INTENT done|failed`.
 It can run after branch import when that branch matches the captured commit
 and the intended remote head has already been pushed. Other deferred commands
 and old sessions use the generic behavior below.

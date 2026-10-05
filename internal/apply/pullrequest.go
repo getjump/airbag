@@ -51,7 +51,7 @@ func runPullRequest(s *session.Session, box *outbox.Box, it outbox.Intent, in *b
 	}
 	p := it.Request.PullRequest
 	endpoint := "repos/" + p.Repository
-	data, err := githubAPI(s, gh, "GET", endpoint+"/git/ref/heads/"+url.PathEscape(p.Head), nil)
+	data, _, err := githubAPI(s, gh, "GET", endpoint+"/git/ref/heads/"+url.PathEscape(p.Head), nil)
 	if err != nil {
 		return pendingPR(it, o, fmt.Errorf("cannot verify GitHub head: %w", err))
 	}
@@ -86,16 +86,22 @@ func runPullRequest(s *session.Session, box *outbox.Box, it outbox.Intent, in *b
 	if err := box.Claim(it.ID, it.RequestDigest); err != nil {
 		return "", err
 	}
-	data, err = githubAPI(s, gh, "POST", endpoint+"/pulls", payload)
+	data, code, err := githubAPI(s, gh, "POST", endpoint+"/pulls", payload)
 	result := operation.Result{Outcome: operation.Uncertain, Ticket: it.ID, RequestDigest: it.RequestDigest}
 	it.Status = outbox.Unknown
-	if err == nil {
+	switch {
+	case err != nil && code >= 400 && code < 500:
+		// GitHub answered and refused (a PR already open, no commits
+		// between the branches, no permission): nothing was created.
+		it.Status, result.Outcome = outbox.Failed, operation.Failure
+		result.Value = fmt.Sprintf("GitHub refused the request (HTTP %d): %s", code, apiMessage(data))
+	case err == nil:
 		if prURL, valid := exactPR(data, *p); valid {
 			it.Status, result.Outcome, result.Value = outbox.Done, operation.Succeeded, prURL
 		} else {
 			result.Value = "GitHub response did not attest the exact request; reconcile the remote PR manually"
 		}
-	} else {
+	default:
 		// CLI failure/timeout does not establish whether GitHub accepted POST.
 		result.Value = "publication may have reached GitHub; inspect the remote before making another request"
 	}
@@ -190,10 +196,12 @@ func (w *boundedOutput) Write(data []byte) (int, error) {
 	return n, nil
 }
 
-func githubAPI(s *session.Session, prog, method, endpoint string, payload []byte) ([]byte, error) {
+// githubAPI returns the response body and its HTTP status: 0 when gh
+// printed no status line, as when it failed before GitHub answered.
+func githubAPI(s *session.Session, prog, method, endpoint string, payload []byte) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	args := []string{"api", "--hostname", "github.com", "--method", method, "https://api.github.com/" + endpoint}
+	args := []string{"api", "--hostname", "github.com", "--method", method, "https://api.github.com/" + endpoint, "--include"}
 	if payload != nil {
 		args = append(args, "--input", "-")
 	}
@@ -203,13 +211,64 @@ func githubAPI(s *session.Session, prog, method, endpoint string, payload []byte
 	cmd.Stdin = bytes.NewReader(payload)
 	out := &boundedOutput{limit: 2 << 20}
 	cmd.Stdout, cmd.Stderr = out, io.Discard
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("GitHub API %s failed: %w", method, err)
+	runErr := cmd.Run()
+	code, body := splitResponse(out.Bytes())
+	if runErr != nil {
+		return body, code, fmt.Errorf("GitHub API %s failed: %w", method, runErr)
 	}
 	if out.overflow {
-		return nil, fmt.Errorf("GitHub API response exceeded the size limit")
+		return nil, code, fmt.Errorf("GitHub API response exceeded the size limit")
 	}
-	return out.Bytes(), nil
+	return body, code, nil
+}
+
+// splitResponse separates what gh api --include prints: a status line
+// and headers, a blank line, the body. Output without a status line is
+// all body, with status 0.
+func splitResponse(out []byte) (int, []byte) {
+	if !bytes.HasPrefix(out, []byte("HTTP/")) {
+		return 0, out
+	}
+	head, body, ok := bytes.Cut(out, []byte("\r\n\r\n"))
+	if !ok {
+		head, body, ok = bytes.Cut(out, []byte("\n\n"))
+	}
+	if !ok {
+		return 0, nil
+	}
+	line, _, _ := bytes.Cut(head, []byte("\n"))
+	f := strings.Fields(string(line))
+	if len(f) < 2 {
+		return 0, body
+	}
+	code, err := strconv.Atoi(f[1])
+	if err != nil {
+		return 0, body
+	}
+	return code, body
+}
+
+// apiMessage is the message of a GitHub error response, shortened.
+func apiMessage(body []byte) string {
+	var e struct {
+		Message string `json:"message"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(body, &e) != nil || e.Message == "" {
+		return "no message"
+	}
+	m := e.Message
+	for _, d := range e.Errors {
+		if d.Message != "" {
+			m += ": " + d.Message
+		}
+	}
+	if len(m) > 300 {
+		m = m[:300] + "…"
+	}
+	return m
 }
 
 func exactPR(data []byte, p operation.PullRequest) (string, bool) {

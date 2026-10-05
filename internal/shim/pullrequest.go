@@ -40,8 +40,10 @@ func capturePullRequest(argv []string, cwd string) (*operation.Request, error) {
 			return nil, fmt.Errorf("PR body names a secret file")
 		}
 		// The file itself, not a link: through a link the name checked
-		// above could stand for a secret file somewhere else.
-		f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+		// above could stand for a secret file somewhere else. Opened
+		// without blocking, so a FIFO is refused below instead of waiting
+		// for a writer.
+		f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 		if err != nil {
 			return nil, fmt.Errorf("PR body must be a regular workspace file, not a link: %w", err)
 		}
