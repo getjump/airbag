@@ -142,6 +142,48 @@ func TestExecNotifyKernel(t *testing.T) {
 	}
 }
 
+// An exec the client refuses as too large for one frame never reached the
+// log; it is logged as an invalid attempt instead, without its argv.
+func TestExecNotifyLogsOversizedAttempt(t *testing.T) {
+	sentinel := filepath.Join(t.TempDir(), "should-not-exist")
+	cmd, output, listener := startNotifyHelper(t, "exec /usr/bin/touch "+sentinel)
+	var mu sync.Mutex
+	var events []runtimepolicy.Request
+	stop := serveUntilStopped(t, listener, func(r runtimepolicy.Request) error {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, r)
+		if filepath.Base(r.Target) == "touch" {
+			return fmt.Errorf("%w: test", runtimepolicy.ErrFrameTooLarge)
+		}
+		return nil
+	})
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+		t.Fatal("exec notification hung")
+	}
+	if err := stop(); err != nil {
+		t.Fatalf("serveExec: %v", err)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatal("refused executable ran")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) == 1 && events[0].Kind == "proc.exec.invalid" && events[0].Detail == unix.EPERM.Error() && os.Getenv("CI") != "true" {
+		t.Skip("this container blocks process_vm_readv; kernel E2E runs in CI")
+	}
+	last := events[len(events)-1]
+	if len(events) != 3 || last.Kind != "proc.exec.invalid" || last.Argv != nil || !strings.Contains(last.Detail, runtimepolicy.ErrFrameTooLarge.Error()) {
+		t.Fatalf("oversized exec not logged as invalid: %+v; %s", events, output.String())
+	}
+}
+
 // The server stops on its pipe while a task is still under the filter
 // and idle, where a blocked NOTIF_RECV would never return; an execve
 // after that gets ENOSYS, not an unchecked run.

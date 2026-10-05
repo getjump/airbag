@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -310,5 +311,39 @@ func TestSecretTaintVisibleToLaterCheckInCommitGroup(t *testing.T) {
 	events, err := effects.Read(path)
 	if err != nil || len(events) != 2 || events[1].Verdict != policy.Deny {
 		t.Fatalf("missing durable taint/deny: %+v %v", events, err)
+	}
+}
+
+// An exec within the argv limits can still escape past one frame (each '<'
+// is six bytes in JSON). It is refused alone; the channel keeps serving.
+func TestOversizedRequestRefusedBeforeSending(t *testing.T) {
+	dir := t.TempDir()
+	p, err := policy.Load(dir, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "effects.db")
+	log, err := effects.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = log.Close() }()
+	server, peer := net.Pipe()
+	defer peer.Close()
+	go func() { _ = Serve(server, policy.NewGate(p, dir), log) }()
+	client := NewClient(peer)
+	argv := make([]string, 16)
+	for i := range argv {
+		argv[i] = strings.Repeat("<", 4000)
+	}
+	if err := client.Check(Request{Source: "seccomp", Kind: "proc.exec", Target: "/usr/bin/true", Argv: argv}); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("oversized frame: %v", err)
+	}
+	if err := client.Check(Request{Source: "fuse", Kind: "fs.read", Target: "after"}); err != nil {
+		t.Fatal("channel lost after an oversized request:", err)
+	}
+	events, err := effects.Read(path)
+	if err != nil || len(events) != 1 || events[0].Target != "after" {
+		t.Fatalf("wrong log: %+v %v", events, err)
 	}
 }

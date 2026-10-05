@@ -212,8 +212,14 @@ func serveExec(fd, stop int, check func(runtimepolicy.Request) error) error {
 		}
 		allow := false
 		if readErr == nil {
-			allow = check(r) == nil
-		} else {
+			err := check(r)
+			allow = err == nil
+			// Refused before it reached the host: logged without its argv.
+			if errors.Is(err, runtimepolicy.ErrFrameTooLarge) {
+				readErr = err
+			}
+		}
+		if readErr != nil {
 			// The error itself is an observed, denied attempt, never an empty allow.
 			_ = check(runtimepolicy.Request{Source: "seccomp", Kind: "proc.exec.invalid", Target: fmt.Sprintf("pid:%d", n.PID), PID: n.PID, Detail: readErr.Error()})
 		}

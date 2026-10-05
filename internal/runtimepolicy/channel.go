@@ -45,6 +45,11 @@ const maxFrame = 128 * 1024
 const maxChecks = 8
 const maxPending = 64
 
+// ErrFrameTooLarge refuses one operation whose checks do not fit a frame.
+// The host would end the channel on such a frame, and every later check
+// would be denied with it.
+var ErrFrameTooLarge = errors.New("runtime request exceeds the channel frame")
+
 // Serve evaluates frames in wire order, grouping already queued requests into a
 // durable commit. There is no batching delay on the sequential path. All allows
 // wait for the FULL WAL commit; audit failure denies the entire commit group.
@@ -229,7 +234,6 @@ type Client struct {
 	mu      sync.Mutex
 	writeMu sync.Mutex
 	conn    net.Conn
-	enc     *json.Encoder
 	pending map[uint64]chan response
 	next    uint64
 	err     error
@@ -246,7 +250,7 @@ func NewClient(conn net.Conn) *Client {
 // waits, serialization, policy, audit, and reply transport. It overlaps host
 // metrics and callback duration; these totals are not additive.
 func NewClientWithProfile(conn net.Conn, profile *Profile) *Client {
-	c := &Client{conn: conn, enc: json.NewEncoder(conn), pending: make(map[uint64]chan response), slots: make(chan struct{}, maxPending), done: make(chan struct{}), profile: profile}
+	c := &Client{conn: conn, pending: make(map[uint64]chan response), slots: make(chan struct{}, maxPending), done: make(chan struct{}), profile: profile}
 	go c.read()
 	return c
 }
@@ -339,13 +343,21 @@ func (c *Client) exchange(f frame) (result error) {
 	c.pending[id] = ch
 	c.mu.Unlock()
 	defer func() { c.mu.Lock(); delete(c.pending, id); c.mu.Unlock() }()
-	c.writeMu.Lock()
-	err := c.conn.SetWriteDeadline(time.Now().Add(timeout))
-	if err == nil {
-		f.ID = id
-		err = c.enc.Encode(f)
+	f.ID = id
+	data, err := json.Marshal(f)
+	if err == nil && len(data) >= maxFrame { // the newline must fit too
+		err = fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(data))
+		fmt.Fprintln(os.Stderr, "airbag:", err)
+		return err
 	}
-	c.writeMu.Unlock()
+	if err == nil {
+		c.writeMu.Lock()
+		err = c.conn.SetWriteDeadline(time.Now().Add(timeout))
+		if err == nil {
+			_, err = c.conn.Write(append(data, '\n'))
+		}
+		c.writeMu.Unlock()
+	}
 	if err != nil {
 		c.fail(err)
 		return err
