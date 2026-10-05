@@ -284,12 +284,21 @@ func TestCmdWaitsForLinksOut(t *testing.T) {
 		{"to a system directory above user data", func(ws, home string) (string, error) {
 			return filepath.Join(ws, "all"), os.Symlink(filepath.Dir(home), filepath.Join(ws, "all"))
 		}, false},
+		{"to a process's own file", func(ws, _ string) (string, error) {
+			// The user's own process: not a file of someone else's.
+			return filepath.Join(ws, "notes.md"), os.Symlink("/proc/self/status", filepath.Join(ws, "notes.md"))
+		}, false},
 		{"inside the workspace", func(ws, _ string) (string, error) {
 			_ = os.WriteFile(filepath.Join(ws, "body.md"), []byte("ok\n"), 0o644)
 			return filepath.Join(ws, "notes.md"), os.Symlink("body.md", filepath.Join(ws, "notes.md"))
 		}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if strings.Contains(c.name, "process") {
+				if _, err := os.Stat("/proc/self/status"); err != nil {
+					t.Skip("no /proc here")
+				}
+			}
 			s, box := testBox(t)
 			s.Home = filepath.Dir(s.Workspace) // the workspace is in $HOME
 			log := tool(t, "pubtool", "0")
