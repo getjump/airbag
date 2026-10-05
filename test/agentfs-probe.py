@@ -262,7 +262,7 @@ def airbag_baseline(binary, output):
     result = {"platform": platform.platform(), "backend": "airbag-native",
               "status": "failed", "security_equivalence_tested": False}
     try:
-        with tempfile.TemporaryDirectory(prefix="airbag-native-mac-") as private:
+        with tempfile.TemporaryDirectory(prefix="ab-mac-", dir="/var/tmp") as private:
             base = Path(private).resolve() / "base"
             home = base.parent / "home"
             base.mkdir()
