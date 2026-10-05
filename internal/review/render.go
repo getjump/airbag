@@ -475,7 +475,9 @@ func Diff(w io.Writer, c Change) {
 	}
 	// Agent state and copies of an agent config (Claude Code keeps
 	// backups of ~/.claude.json) may hold tokens: no contents.
-	if c.Layer == "home" && (strings.HasPrefix(path.Base(c.Rel), ".claude.json") && configFor(filepath.ToSlash(c.Rel)) == nil ||
+	// Only Claude Code's own backups, beside the config in $HOME: an
+	// agent file elsewhere with such a name is shown like any other.
+	if c.Layer == "home" && (!strings.Contains(filepath.ToSlash(c.Rel), "/") && strings.HasPrefix(c.Rel, ".claude.json") && configFor(filepath.ToSlash(c.Rel)) == nil ||
 		func() bool { _, kind := Noise(c.Rel); return kind == "agent state" && !agentMemory(c.Rel) }()) {
 		fmt.Fprintf(w, "%s %s (agent state; contents not shown)\n", map[string]string{Added: "+", Deleted: "-", Modified: "~", Replaced: "!"}[c.Kind], display(c))
 		return

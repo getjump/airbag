@@ -1024,3 +1024,31 @@ func TestReplaceIfKeepsARacingXattr(t *testing.T) {
 		t.Fatalf("file xattr %q (%v) content %v, want the host's file and xattr kept", v, err, readCfg(t, p))
 	}
 }
+
+// Integers above 2^53 keep their exact value when compared.
+func TestCanonKeepsBigIntegers(t *testing.T) {
+	if canon([]byte(`{"a":9007199254740992}`)) == canon([]byte(`{"a":9007199254740993}`)) {
+		t.Fatal("two different large integers compare equal")
+	}
+	if canon([]byte(`{"b":1,"a":2}`)) != canon([]byte(`{"a":2, "b":1}`)) {
+		t.Fatal("key order or spacing changes the canonical form")
+	}
+}
+
+// Only Claude Code's backups beside the config are shown without
+// contents: a file elsewhere with such a name is shown in full.
+func TestDiffShowsConfigLookalikesElsewhere(t *testing.T) {
+	dir := t.TempDir()
+	upper := filepath.Join(dir, ".claude.json.desktop")
+	writeCfg(t, upper, "Exec=/tmp/run-me\n")
+	var b strings.Builder
+	Diff(&b, Change{Layer: "home", Rel: ".config/autostart/.claude.json.desktop", Path: filepath.Join(dir, "absent"), Upper: upper, Kind: Added})
+	if !strings.Contains(b.String(), "run-me") {
+		t.Fatalf("diff hid an autostart file named like a config backup: %q", b.String())
+	}
+	b.Reset()
+	Diff(&b, Change{Layer: "home", Rel: ".claude.json.backup", Path: filepath.Join(dir, "absent"), Upper: upper, Kind: Added})
+	if strings.Contains(b.String(), "run-me") {
+		t.Fatalf("diff showed a config backup's contents: %q", b.String())
+	}
+}

@@ -855,9 +855,16 @@ func canon(b []byte) string {
 	if len(b) == 0 {
 		return ""
 	}
+	// Numbers stay as written (json.Number): through float64, two
+	// integers above 2^53 would compare equal.
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
 	var v any
-	if err := json.Unmarshal(b, &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return string(b)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return string(b) // trailing data
 	}
 	out, err := json.Marshal(v)
 	if err != nil {
