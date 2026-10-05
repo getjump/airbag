@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/outbox"
@@ -265,10 +264,11 @@ func display(c Change) string {
 }
 
 // oneLine quotes a name the agent chose (a path, a link target) when it
-// holds a character that is not printable: review keeps newlines, so a
-// raw one could add lines that pass for other changes.
+// holds a line break: the terminal-safe writer escapes other control
+// characters but keeps newlines, so a raw one could add lines that pass
+// for other changes.
 func oneLine(s string) string {
-	if strings.ContainsFunc(s, func(r rune) bool { return !unicode.IsPrint(r) }) {
+	if strings.ContainsAny(s, "\n\r") {
 		return strconv.Quote(s)
 	}
 	return s
