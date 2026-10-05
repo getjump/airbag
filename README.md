@@ -266,6 +266,7 @@ Before more features comes a measurement on real work against the alternatives:
 - [Review and apply](docs/review.md): `--attention`, `--json`, rollback, `apply --branch`
 - [Policies](docs/policies.md): rules over effects, deferred commands, bound credentials
 - [Threat model](docs/threat-model.md): what airbag protects against, and what not
+- [Execution boundaries](docs/execution-backends.md): `airbag capabilities`, `--require-isolation`, no fallback
 - [How airbag compares](docs/comparison.md): nono, try, AgentFS, Docker Sandboxes, agentsh
 - [Status in detail](docs/status.md): hooks, shell models, tests, the effect log
 - [Roadmap and decisions](docs/roadmap.md): what is deferred on purpose, and why

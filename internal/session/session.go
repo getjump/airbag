@@ -28,11 +28,17 @@ const (
 )
 
 type Meta struct {
-	ID        string    `json:"id"`
-	Created   time.Time `json:"created"`
-	Ended     time.Time `json:"ended,omitzero"`
-	Workspace string    `json:"workspace"`
-	Home      string    `json:"home"`
+	// Execution boundary and the user's persisted requirement. Empty fields
+	// identify legacy native sessions, not a stronger isolation guarantee.
+	Backend          string    `json:"backend,omitempty"`
+	Isolation        string    `json:"isolation,omitempty"`
+	Egress           string    `json:"egress,omitempty"`
+	RequireIsolation string    `json:"require_isolation,omitempty"`
+	ID               string    `json:"id"`
+	Created          time.Time `json:"created"`
+	Ended            time.Time `json:"ended,omitzero"`
+	Workspace        string    `json:"workspace"`
+	Home             string    `json:"home"`
 	// WorkspaceID and HomeID: the directories Workspace and Home were
 	// when the session began. Apply writes nothing below one that is
 	// another directory now.
@@ -378,6 +384,12 @@ func Find(id, workspace string) (*Session, error) {
 // the upper layers stay, overlayfs gets fresh work directories and the
 // run directory loses the sockets of the previous run.
 func Resume(id, workspace string) (*Session, error) {
+	return ResumeChecked(id, workspace, nil)
+}
+
+// ResumeChecked validates the chosen execution boundary before changing the
+// branch, run directory, counters or status of a stopped session.
+func ResumeChecked(id, workspace string, validate func(*Session) error) (*Session, error) {
 	var s *Session
 	if id == "last" {
 		all, err := List()
@@ -411,6 +423,11 @@ func Resume(id, workspace string) (*Session, error) {
 	// passthrough paths would write where the root leads now.
 	if err := s.CheckRoots(); err != nil {
 		return nil, fmt.Errorf("%w; put the directory back to resume session %s", err, s.ID)
+	}
+	if validate != nil {
+		if err := validate(s); err != nil {
+			return nil, err
+		}
 	}
 	for _, d := range []string{s.WSWork(), s.HomeWork(), s.EtcWork(), s.RunDir()} {
 		_ = filepath.WalkDir(d, func(p string, de os.DirEntry, err error) error {
