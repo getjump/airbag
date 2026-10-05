@@ -201,7 +201,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 		case outbox.Pending, string(operation.Approved):
 			why := "`" + outbox.Line(in.Argv) + "` waits for apply"
 			if in.Kind == outbox.KindCmd && out > 0 {
-				why += fmt.Sprintf("; %d links this session adds lead out of the workspace or to a secret file, and apply holds it while one does, unless it leads to an installed program (`airbag apply --trust-links` runs it anyway)", out)
+				why += fmt.Sprintf("; %d links this session adds lead out of the workspace, other than to an installed program, or to a secret file, and apply holds it while one does (`airbag apply --trust-links` runs it anyway)", out)
 			}
 			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: why})
 		case outbox.Unknown:
@@ -215,11 +215,12 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 
 // linksOut counts the links this session put in the real files, or
 // adds with cs, whose target is outside the workspace or a secret file
-// (notes.md -> .env). Apply holds the session's deferred commands while
-// such a link is in the real files, unless it leads to an installed
-// program; a link review cannot read counts. A link an earlier, partial
-// apply wrote is no change any more, but still holds them, until a change
-// the session makes to it is applied as well.
+// (notes.md -> .env), as apply decides: a link to an installed program
+// (links.Installed) does not count. Apply holds the session's deferred
+// commands while such a link is in the real files; a link review cannot
+// read counts. A link an earlier, partial apply wrote is no change any
+// more, but still holds them, until a change the session makes to it is
+// applied as well.
 func linksOut(s *session.Session, cs []Change) int {
 	in := func(p, dir string) bool {
 		if dir == "" {
@@ -244,8 +245,16 @@ func linksOut(s *session.Session, cs []Change) int {
 		if !filepath.IsAbs(text) {
 			dir = resolved(filepath.Dir(path))
 		}
+		// As apply's linksOut decides: nowhere, a secret file, or outside
+		// the workspace other than an installed program.
 		t, ok := links.Follow(dir, text)
-		return !ok || !in(t, wsReal) || secretfs.IsSecret(strings.ToLower(filepath.Base(t)))
+		switch {
+		case !ok, secretfs.IsSecret(strings.ToLower(filepath.Base(t))):
+			return true
+		case in(t, wsReal):
+			return false
+		}
+		return !links.Installed(t)
 	}
 	n := 0
 	// A path counts once: the change, or else the link in the real files,

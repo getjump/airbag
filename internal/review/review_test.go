@@ -402,6 +402,27 @@ func TestReportNamesTrustLinks(t *testing.T) {
 	}
 }
 
+// A link to an installed program does not hold a command in apply, so
+// review does not count it either. As root nothing is installed in that
+// sense: root may write everything.
+func TestReportSkipsLinksToInstalledPrograms(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root may write every file")
+	}
+	ws, upper := t.TempDir(), t.TempDir()
+	s := &session.Session{Meta: session.Meta{ID: "s-1", Workspace: ws}}
+	cmd := outbox.Intent{ID: "i-1", Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Status: outbox.Pending}
+	if err := os.Symlink("/bin/sh", filepath.Join(upper, "python")); err != nil {
+		t.Fatal(err)
+	}
+	c := Change{Layer: "ws", Rel: "python", Path: filepath.Join(ws, "python"), Upper: filepath.Join(upper, "python"), Kind: Added, Type: fs.ModeSymlink}
+	for _, a := range BuildReport(s, []Change{c}, nil, []outbox.Intent{cmd}, nil).Attention {
+		if a.Target == "i-1" && strings.Contains(a.Why, "trust-links") {
+			t.Fatalf("a link to /bin/sh holds the command: %s", a.Why)
+		}
+	}
+}
+
 // The clone of a workspace named through a link is compared with where
 // the link leads, so the agent's deletions show; the real files are
 // named by the workspace's path.
