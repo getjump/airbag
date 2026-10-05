@@ -28,6 +28,12 @@ import (
 )
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
+	// The roots are checked again right before the first thing made for
+	// the run: since the session was created or resumed, either could
+	// have become another directory.
+	if err := s.CheckRoots(); err != nil {
+		return 1, fmt.Errorf("%w; session %s was not started", err, s.ID)
+	}
 	// An empty mode is durable: a session from before the option, or one
 	// that never set it.
 	switch s.RuntimeAudit {
@@ -40,28 +46,8 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		return 1, err
 	}
 	defer func() { _ = host.Close() }()
-
-	// Pass-through dirs must exist on the host, or the agent would
-	// create them inside the branch and lose them on discard. A path
-	// through a symlink is not created: MkdirAll would follow it out of
-	// $HOME, and init refuses to pass it through anyway.
-	for _, p := range s.Passthrough {
-		if strings.HasSuffix(p, "/") && noSymlinkSoFar(s.Home, p) == nil {
-			_ = os.MkdirAll(filepath.Join(s.Home, p), 0o700)
-		}
-	}
-	// A branch hole (a passed-through project's memory/) needs to exist
-	// in the real $HOME: as a mountpoint inside the passed-through parent,
-	// and as the lower layer of the copy-on-write view put on it (init.go).
-	// Under a symlink it is skipped like its parent, which init then
-	// leaves in the branch.
-	for _, h := range s.BranchHoles {
-		if noSymlinkSoFar(s.Home, h) != nil {
-			continue
-		}
-		if err := os.MkdirAll(filepath.Join(s.Home, h), 0o700); err != nil {
-			return 1, fmt.Errorf("branch hole ~/%s: %w", h, err)
-		}
+	if err := prepareHome(s); err != nil {
+		return 1, err
 	}
 
 	self, err := os.Executable()
@@ -172,4 +158,36 @@ func userNSHint() string {
 			" run `airbag doctor` for the one-time fix"
 	}
 	return ""
+}
+
+// prepareHome makes what init passes through in a branched $HOME. A
+// $HOME that is not branched passes nothing through, so nothing is made
+// in it: it may be one the session could not record (HomeUnrecorded).
+func prepareHome(s *session.Session) error {
+	if !s.OverHome {
+		return nil
+	}
+	// Pass-through dirs must exist on the host, or the agent would
+	// create them inside the branch and lose them on discard. A path
+	// through a symlink is not created: MkdirAll would follow it out of
+	// $HOME, and init refuses to pass it through anyway.
+	for _, p := range s.Passthrough {
+		if strings.HasSuffix(p, "/") && noSymlinkSoFar(s.Home, p) == nil {
+			_ = os.MkdirAll(filepath.Join(s.Home, p), 0o700)
+		}
+	}
+	// A branch hole (a passed-through project's memory/) needs to exist
+	// in the real $HOME: as a mountpoint inside the passed-through parent,
+	// and as the lower layer of the copy-on-write view put on it (init.go).
+	// Under a symlink it is skipped like its parent, which init then
+	// leaves in the branch.
+	for _, h := range s.BranchHoles {
+		if noSymlinkSoFar(s.Home, h) != nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Join(s.Home, h), 0o700); err != nil {
+			return fmt.Errorf("branch hole ~/%s: %w", h, err)
+		}
+	}
+	return nil
 }

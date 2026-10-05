@@ -175,6 +175,51 @@ func TestMacProfileNoMkdirThroughSymlink(t *testing.T) {
 	}
 }
 
+// A $HOME that was not there when the session began is not recorded, so
+// nothing tells a directory put there later from it: the profile makes
+// no state directory there and opens none for writing.
+func TestMacProfileUnrecordedHomeStaysReadOnly(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	proj, holes := ClaudeProjectState(ws, ws)
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true,
+		Passthrough: append(append([]string{}, DefaultPassthrough...), proj...), BranchHoles: holes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.HomeUnrecorded() {
+		t.Fatalf("a missing $HOME is recorded: %+v", s.HomeID)
+	}
+	p, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(home); !os.IsNotExist(err) {
+		t.Fatalf("the profile made the unrecorded $HOME: %v", err)
+	}
+	for _, w := range append(p.Write, p.WriteFiles...) {
+		if w == home || strings.HasPrefix(w, home+"/") {
+			t.Errorf("the unrecorded $HOME is writable at %s", w)
+		}
+	}
+	// Made later, it is still not the session's: nothing is made in it.
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if p, err = macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache")); err != nil {
+		t.Fatal(err)
+	}
+	if es, _ := os.ReadDir(home); len(es) != 0 {
+		t.Errorf("made in a $HOME the session did not record: %v", es)
+	}
+	for _, w := range append(p.Write, p.WriteFiles...) {
+		if strings.HasPrefix(w, home+"/") {
+			t.Errorf("a $HOME the session did not record is writable at %s", w)
+		}
+	}
+}
+
 // A project's memory/ linked elsewhere in ~/.claude, or under a linked
 // project directory, is denied where it really is, and so are the
 // directories above it, whether the link target exists yet or not.

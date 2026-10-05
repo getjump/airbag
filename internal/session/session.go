@@ -211,6 +211,15 @@ func (s *Session) CheckRoots() error {
 	return nil
 }
 
+// HomeUnrecorded reports a $HOME the session records nothing for: one
+// that was not there, and not branched, when it began. Nothing tells
+// what is there now from what was, so run makes and opens nothing there.
+// A session from before roots were recorded has no workspace recorded
+// either, and keeps what it did then.
+func (s *Session) HomeUnrecorded() bool {
+	return s.Home != "" && s.HomeID.Real == "" && s.WorkspaceID.Real != ""
+}
+
 // u64 widens a stat field, whose type differs between Linux and macOS.
 func u64[T int32 | uint32 | int64 | uint64](v T) uint64 { return uint64(v) }
 
@@ -254,10 +263,11 @@ func Create(m Meta) (*Session, error) {
 	// Where the workspace and $HOME lead now; apply and resume refuse
 	// them once they are other directories. A root that cannot be
 	// recorded refuses the session. $HOME is recorded branched or not:
-	// run writes there either way (passthrough and branch-hole
-	// directories, agent state on macOS). Only a $HOME that is not there
-	// and is not branched (HOME=/nonexistent with --no-home) has nothing
-	// to tell apart, and records nothing.
+	// run writes there when it is branched (passthrough and branch-hole
+	// directories) and on macOS, which never branches it (agent state).
+	// Only a $HOME that is not there and is not branched
+	// (HOME=/nonexistent with --no-home) has nothing to tell apart, and
+	// records nothing; run then makes nothing there (HomeUnrecorded).
 	for _, r := range []struct {
 		path string
 		id   *DirID
