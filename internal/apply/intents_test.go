@@ -173,6 +173,31 @@ func TestCmdProgramInWorkspace(t *testing.T) {
 	}
 }
 
+// The same through a workspace whose path has a link in it (~/code ->
+// /mnt/data/code; /tmp -> /private/tmp on macOS): the program's resolved
+// path is still inside the workspace.
+func TestCmdProgramInLinkedWorkspace(t *testing.T) {
+	s, box := testBox(t)
+	link := filepath.Join(t.TempDir(), "code")
+	if err := os.Symlink(s.Workspace, link); err != nil {
+		t.Fatal(err)
+	}
+	s.Workspace = link
+	_ = os.WriteFile(filepath.Join(link, "pubtool"), []byte("#!/bin/sh\ntouch "+filepath.Join(link, "pwned")+"\n"), 0o755)
+	t.Setenv("PATH", link+":"+os.Getenv("PATH"))
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: link})
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if status(t, box, it.ID) != outbox.Rejected {
+		t.Fatalf("status %s: %q", status(t, box, it.ID), out.String())
+	}
+	if _, err := os.Stat(filepath.Join(link, "pwned")); err == nil {
+		t.Fatal("a program from the workspace ran")
+	}
+}
+
 // After a failure the intents behind it wait; the next apply runs them.
 func TestFailureStopsTheRest(t *testing.T) {
 	s, box := testBox(t)

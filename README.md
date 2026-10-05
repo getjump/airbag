@@ -489,8 +489,9 @@ tests, `nix develop` gives a shell with Go and the test tools.
 One static binary, no daemon, no Docker. Needs Linux 5.12+ with unprivileged user
 namespaces. On Ubuntu 23.10+ AppArmor restricts them; `airbag doctor` prints the
 one-time profile to install. On macOS there is a native prototype (Seatbelt
-around the agent, an APFS clone as the branch), not yet tried on a real Mac, and the
-Linux VM setup that works today; see [docs/macos.md](docs/macos.md).
+around the agent, an APFS clone as the branch), tested in CI on macOS 15 and 26 but
+not yet used on real work, and the Linux VM setup that works today; see
+[docs/macos.md](docs/macos.md).
 
 ## Status
 
