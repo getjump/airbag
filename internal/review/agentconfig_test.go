@@ -756,3 +756,38 @@ func TestConfigGroupWritableShared(t *testing.T) {
 		}
 	}
 }
+
+// A legacy config that replaces a dangling link is read for the first
+// time too, though Scan sees the link it replaces and calls it Modified;
+// one that replaces a readable file is not new.
+func TestLegacyConfigReplacesDanglingLink(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		real func(t *testing.T, p string)
+		want bool
+	}{
+		{"dangling", func(t *testing.T, p string) { symlink(t, "nowhere.json", p) }, true},
+		{"readable", func(t *testing.T, p string) { writeCfg(t, p, `{"numStartups":1}`) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, realPath, _ := cfgSession(t)
+			writeCfg(t, realPath, `{"numStartups":1}`)
+			legacy := filepath.Join(s.Home, ".claude/.config.json")
+			tc.real(t, legacy)
+			writeCfg(t, filepath.Join(s.HomeUpper(), ".claude/.config.json"), `{"numStartups":2}`)
+			cs, err := Scan(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range cs {
+				if c.Rel == ".claude/.config.json" {
+					if got := slices.Contains(c.Flags, "new, read instead of ~/.claude.json"); got != tc.want {
+						t.Errorf("kind %s, flags %v", c.Kind, c.Flags)
+					}
+					return
+				}
+			}
+			t.Fatalf("no change in %+v", cs)
+		})
+	}
+}

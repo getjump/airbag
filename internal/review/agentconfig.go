@@ -372,7 +372,12 @@ func configNotes(c Change) (notes []string, ok bool) {
 // one: the trust and settings in that one stop applying. "" if none.
 func shadowing(c Change) string {
 	cf := configAt(c)
-	if cf == nil || cf.shadows == "" || c.Kind != Added {
+	if cf == nil || cf.shadows == "" || c.Kind == Deleted {
+		return ""
+	}
+	// New to the CLI, unless a regular file could be read there before:
+	// a dangling link the agent replaces is Modified to Scan.
+	if fi, err := os.Stat(c.Path); c.Kind != Added && err == nil && fi.Mode().IsRegular() {
 		return ""
 	}
 	home := c.home // through a link, the change may be in the workspace
