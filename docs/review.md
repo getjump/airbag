@@ -50,7 +50,13 @@ path), apply, rollback, resume and the outbox change nothing there and say so; p
 the directory back first. A directory is told by its path, inode, device and, where
 the filesystem keeps them, its creation time, inode generation and filesystem ID;
 on NFS or FUSE, which keep neither of the first two, a directory removed and made
-again with the same inode number passes. Sessions made by development builds from
+again with the same inode number passes. A filesystem mounted again under a new
+device number passes only where it keeps a creation time and an ID of its own
+(ext4, btrfs). On macOS, NFS and FUSE, and on xfs whose device is renumbered,
+it is refused, since nothing tells it from another one: take what you need from
+`airbag diff`, then discard the session. On an overlay (a container's filesystem)
+the creation time is not used: copying a directory up to the top layer gives it a
+new one. Sessions made by development builds from
 before this check record nothing and are not checked: discard them.
 
 ## Apply onto a git branch

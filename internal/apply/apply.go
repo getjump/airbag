@@ -439,6 +439,11 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 				it.ID, failed, s.ID)
 			continue
 		}
+		// Again for each intent: the one before may have moved the
+		// workspace, and the prompt names where this one would run.
+		if err := outboxHeld(s); err != nil {
+			return err
+		}
 		var status string
 		switch it.Kind {
 		case outbox.KindPush:

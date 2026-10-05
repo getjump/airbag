@@ -160,7 +160,8 @@ func (id DirID) Check(p string) error {
 	case id.FS != 0 && got.FS != id.FS,
 		got.Dev != id.Dev && (id.Born == 0 || id.FS == 0):
 		return fmt.Errorf("%s is on another filesystem than when the session began: another one, or a snapshot of this one, is mounted there, "+
-			"or this one was mounted again and records nothing that tells it is the same", p)
+			"or this one was mounted again and records nothing that tells it is the same (macOS, NFS, FUSE; xfs when its device is renumbered); "+
+			"in that last case airbag cannot tell, so take what you need from airbag diff, then discard the session", p)
 	}
 	return nil
 }
