@@ -82,8 +82,11 @@ user namespace; otherwise it stops the run.
 
 Preflight rejects workspace secret files (the native secret-read FUSE/taint
 contract is not integrated), explicit hide rules, HOME branching, TCP forwards
-and Nix daemon access. There is no runtime filesystem or exec-notify audit from
-the separate experimental policy PR. JIT token issuance/TTL, generic automatic
+and Nix daemon access. The runtime policies (`--fs-policy`, `--exec-policy`,
+`--runtime-audit=buffered`, `--fs-cache`, `--runtime-profile`;
+[runtime-policy.md](runtime-policy.md)) run in the native sandbox only: these
+backends refuse them, and refuse to resume a session that has them, rather than
+run without them. JIT token issuance/TTL, generic automatic
 kill budgets and Firecracker jailer integration remain separate work. Without
 the jailer, an escape from the VMM runs as the invoking user, with their HOME,
 credentials and unfiltered network, and no chroot, cgroup or UID drop;

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -31,6 +32,35 @@ func TestExecutionRequirementFailsBeforeSessionCreation(t *testing.T) {
 			}
 			if _, err := os.Stat(root); !os.IsNotExist(err) {
 				t.Fatalf("failed preflight created session files: %v", err)
+			}
+		})
+	}
+}
+
+// The runtime policies run in the native sandbox only: an optional
+// runtime asked for one is refused before anything else, rather than run
+// without it.
+func TestOptionalRuntimeRefusesRuntimePolicies(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the runtime policies are Linux options")
+	}
+	for _, args := range [][]string{
+		{"--backend=gvisor", "--exec-policy", "--", "true"},
+		{"--backend=gvisor", "--fs-policy", "--", "true"},
+		{"--backend=microvm", "--runtime-audit=buffered", "--", "true"},
+		{"--backend=microvm", "--fs-cache=sealed", "--", "true"},
+		{"--backend=gvisor", "--runtime-profile", "--", "true"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "sessions")
+			t.Setenv("AIRBAG_HOME", root)
+			t.Setenv("AIRBAG_SESSION", "")
+			code, err := cmdRun(args)
+			if code != 2 || err == nil || !strings.Contains(err.Error(), "runtime policy") {
+				t.Fatalf("code=%d err=%v", code, err)
+			}
+			if _, err := os.Stat(root); !os.IsNotExist(err) {
+				t.Fatalf("created session files: %v", err)
 			}
 		})
 	}

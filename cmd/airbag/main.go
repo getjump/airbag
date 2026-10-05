@@ -220,6 +220,11 @@ func cmdRun(args []string) (int, error) {
 	if err != nil {
 		return 2, err
 	}
+	// The runtime policies run in the native sandbox's PID 1 and FUSE
+	// views; an optional runtime has neither, and would run without them.
+	if execution.Name != "native" && (*filePolicy || *execPolicy || auditExplicit || *fileCache != "off" || *runtimeProfile) {
+		return 2, fmt.Errorf("%s does not run the runtime policy, audit, cache and profile options; use the native backend", execution.Name)
+	}
 	if env := os.Getenv("AIRBAG_ALLOW"); env != "" {
 		allow = append(allow, strings.Split(env, ",")...)
 	}
@@ -276,6 +281,9 @@ func cmdRun(args []string) (int, error) {
 		if s, err = session.ResumeChecked(*resume, ws, func(s *session.Session) error {
 			if err := validateExecution(s, execution, *requireIsolation); err != nil {
 				return err
+			}
+			if execution.Name != "native" && (s.FilePolicy || s.ExecPolicy || s.RuntimeProfile || s.FileCache != "" && s.FileCache != "off" || s.RuntimeAudit == "buffered") {
+				return fmt.Errorf("session %s runs with runtime policy options, which %s does not run; resume it on the native backend", s.ID, execution.Name)
 			}
 			if s.Runtime != runtimeConfig {
 				return errors.New("resume requires the same runtime rootfs, binary and kernel")
