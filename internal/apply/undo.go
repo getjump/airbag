@@ -471,8 +471,16 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	if len(kept) == 0 {
 		// Nothing else is left, so what keeps those directories there
 		// is the user's, and there is no later rollback to try again.
-		// The caller removes the journal (remove) once the session says
+		// The caller removes the journal (settle) once the session says
 		// so: until then it is what tells apply the rollback is not done.
+		// It is saved with nothing left first, so a rollback run again
+		// after a crash in between has nothing to replay: replayed, an
+		// entry rolled back since its last save would take a file the
+		// user made again at its path, the same as the agent's, for the
+		// agent's. Best effort: without it, the last save is replayed,
+		// which finds nothing else to do.
+		g.Entries, g.Dirs = nil, nil
+		_ = g.save()
 		return left, nil
 	}
 	// Keep what was left, with its previous versions, so nothing from

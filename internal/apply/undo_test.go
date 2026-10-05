@@ -2640,3 +2640,71 @@ func TestRollbackLeavingPathsStaysStoppedUntilTheSessionIsSaved(t *testing.T) {
 		t.Fatalf("the user's edit is not left as it is: %q", got)
 	}
 }
+
+// A rollback that finished saves its journal with nothing left before
+// the session is saved: killed in between, the rollback run again
+// replays nothing, and a file the user made again since, the same as
+// the agent's added one, stays.
+func TestFinishedRollbackReplaysNothing(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "m.txt"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	up := t.TempDir()
+	for _, n := range []string{"a.txt", "m.txt"} {
+		if err := os.WriteFile(filepath.Join(up, n), []byte("agent\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// a.txt goes after m.txt's restore, the journal's last save.
+	cs := []review.Change{
+		{Layer: "ws", Rel: "a.txt", Path: filepath.Join(ws, "a.txt"), Upper: filepath.Join(up, "a.txt"), Kind: review.Added, Mode: 0o644},
+		{Layer: "ws", Rel: "m.txt", Path: filepath.Join(ws, "m.txt"), Upper: filepath.Join(up, "m.txt"), Kind: review.Modified, Mode: 0o644},
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, cs, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusApplied
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// What Rollback does before it saves the session; killed here.
+	g, err := lastGeneration(s)
+	if err != nil || g == nil {
+		t.Fatal(err)
+	}
+	g.roots = rootsOf(s)
+	if left, err := g.rollback(&out); err != nil || left != 0 {
+		t.Fatalf("left %d: %v\n%s", left, err, out.String())
+	}
+	// The user makes a.txt again, the same as the agent's.
+	if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "a.txt")); got != "agent\n" {
+		t.Fatalf("the rollback run again removed the user's a.txt: %q\n%s", got, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
+		t.Fatalf("m.txt = %q", got)
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied {
+		t.Fatalf("the session is left applied: %+v %v", saved, err)
+	}
+	if g, err := lastGeneration(s); err != nil || g != nil {
+		t.Fatalf("the finished journal is left: %+v %v", g, err)
+	}
+}
