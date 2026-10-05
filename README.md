@@ -403,8 +403,9 @@ The command runs on your machine, with your environment and credentials, after
   secret file (`notes.md -> .env`, `docs -> ~/.config`, a venv's interpreter in
   `~/.local`), the commands wait, whatever their arguments say: an argument that
   is or runs through such a link would read or write there without showing it.
-  Links to system files anyone may read (`/usr/bin/python3`) do not count; links
-  to any directory outside do, `/usr` included. Remove
+  Links to installed programs (`/usr/bin/python3`: root's, in root's
+  directories) do not count; links to any directory outside, `/usr` included, or
+  to a configuration file anyone may read, do. Remove
   or replace the links, or after inspecting them run `airbag apply --trust-links`;
 - after a failure the rest wait, since a pull request without its push means
   nothing; after `apply --branch` they all wait, because the working tree is not

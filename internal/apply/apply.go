@@ -16,6 +16,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -594,10 +595,10 @@ func hostDir(s *session.Session, dir string) string {
 // where it leads. A deferred command is confirmed by its arguments, and
 // an argument that is, or runs through, such a link reaches its target
 // without showing it (notes.md -> ~/.env, docs -> ~/.config). A link is
-// harmless only when it stays in the workspace, or leads to a file anyone
-// may read that the user neither owns nor may write or replace; all else
-// counts, any directory outside, the user's home, other disks and the
-// session's own storage included. Places are compared as files, not
+// harmless only when it stays in the workspace, or leads to an installed
+// program (public); all else counts, any directory or configuration file
+// outside, the user's home, other disks and the session's own storage
+// included. Places are compared as files, not
 // as names, so case and firmlinks on macOS do not matter. Each link is
 // checked as it is now: one the user removed or replaced no longer counts.
 func linksOut(s *session.Session) []string {
@@ -663,13 +664,15 @@ func inside(p string, root os.FileInfo) bool {
 	}
 }
 
-// public reports whether p is somewhere a program may read without
-// learning anything of the user's, and may not write: a regular file
-// anyone may read, owned by someone else, that the user can neither write
-// nor replace (its directory is not the user's to write). A directory
-// never is, whatever its name: what lies below it is not known, and on
-// macOS firmlinks join user data into /usr and /System. Something that
-// does not exist yet is public only if the user cannot create it.
+// public reports whether p is an installed program, which is what a
+// venv's interpreter links to: a regular file with an execute bit, owned
+// by root, in directories owned by root that anyone may search, none of
+// them writable by the user. Other files anyone may read are not public:
+// a machine's configuration can carry credentials, and a file root wrote
+// into a user's folder can be the user's data. A directory never is: what
+// lies below it is not known, and on macOS firmlinks join user data into
+// /usr and /System. Something that does not exist yet is public only if
+// the user cannot create it.
 func public(p string) bool {
 	var st unix.Stat_t
 	if unix.Stat(p, &st) != nil {
@@ -679,8 +682,56 @@ func public(p string) bool {
 		}
 		return unix.Access(d, unix.W_OK) != nil
 	}
-	return st.Mode&unix.S_IFMT == unix.S_IFREG && int64(st.Uid) != int64(os.Getuid()) && st.Mode&0o004 != 0 &&
-		unix.Access(p, unix.W_OK) != nil && unix.Access(filepath.Dir(p), unix.W_OK) != nil
+	file, ok := placeOf(p)
+	if !ok {
+		return false
+	}
+	var dirs []place
+	for d := filepath.Dir(p); ; d = filepath.Dir(d) {
+		dir, ok := placeOf(d)
+		if !ok {
+			return false
+		}
+		dirs = append(dirs, dir)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	return program(file, dirs)
+}
+
+// place is what public looks at in a file or directory: its mode, owner,
+// and whether the user may write it.
+type place struct {
+	mode     fs.FileMode
+	uid      int64
+	writable bool
+}
+
+func placeOf(p string) (place, bool) {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return place{}, false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return place{}, false
+	}
+	return place{mode: fi.Mode(), uid: int64(st.Uid), writable: unix.Access(p, unix.W_OK) == nil}, true
+}
+
+// program reports whether file, below dirs, is an installed program: see
+// public.
+func program(file place, dirs []place) bool {
+	if !file.mode.IsRegular() || file.mode&0o111 == 0 || file.uid != 0 || file.writable {
+		return false
+	}
+	for _, d := range dirs {
+		if !d.mode.IsDir() || d.mode&0o001 == 0 || d.uid != 0 || d.writable {
+			return false
+		}
+	}
+	return true
 }
 
 // listLinks names up to three links, and how many more.
