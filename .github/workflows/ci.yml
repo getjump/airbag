@@ -66,9 +66,9 @@ jobs:
           for t in test/e2e.sh test/*-e2e.sh; do echo "== $t"; sh "$t"; done
           python3 test/ctrlc.py
 
-  # The macOS prototype on macOS 15 and the newest macOS (macos-latest,
-  # macOS 26 now, and the next one when GitHub moves the label), on Apple
-  # silicon, and on Intel (macOS 26 is Apple's last for it): the unit tests run
+  # The macOS prototype on macOS 15 and 26 on Apple silicon, on the newest
+  # macOS (macos-latest: 26 now, the next one when GitHub moves the label),
+  # and on Intel (macOS 26 is Apple's last for it): the unit tests run
   # natively, and airbag-macprobe checks what it relies on (sandbox-exec,
   # APFS clones, a user NFS mount) on a real macOS. The probe's report is
   # kept; the end-to-end tests run as a first look and do not fail the
@@ -78,7 +78,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-latest, macos-26-intel]
+        os: [macos-15, macos-26, macos-latest, macos-26-intel]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
