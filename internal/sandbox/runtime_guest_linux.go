@@ -271,7 +271,7 @@ func restrictGuest() error {
 // ignores a limit stops the run instead of leaving it open.
 func checkNoUserNamespaces() error {
 	if _, _, e := unix.RawSyscall(unix.SYS_CLONE3, 0, 0, 0); e != unix.ENOSYS {
-		return fmt.Errorf("clone3 is not filtered (%v); refusing to start the agent", e)
+		return fmt.Errorf("clone3 is not filtered (%w); refusing to start the agent", e)
 	}
 	cmd := exec.CommandContext(context.Background(), "/run/airbag/bin/airbag", GuestArg, "userns")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER}
