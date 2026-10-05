@@ -8,6 +8,7 @@ import mmap
 import os
 from pathlib import Path
 import platform
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -95,6 +96,44 @@ def workload():
     return 0 if all(value["passed"] for value in checks.values()) else 1
 
 
+def mounted_workload(binary, db, home, env, backend, output):
+    """Test explicit mount separately from the release's exec/overlay failure."""
+    point = home / "mnt"
+    point.mkdir()
+    command = [binary, "mount", "--foreground", "--backend", backend, str(db), str(point)]
+    with (output / "mount-server.log").open("w") as log:
+        server = subprocess.Popen(command, cwd=home, env=env, stdout=log,
+                                  stderr=subprocess.STDOUT, start_new_session=True)
+        mounted = False
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                mounts = subprocess.run(["mount"], capture_output=True, text=True, check=True).stdout
+                if any(str(point) in line and ("fuse" in line.lower() or "nfs" in line.lower())
+                       for line in mounts.splitlines()):
+                    mounted = True
+                    break
+                if server.poll() is not None:
+                    raise RuntimeError("mount server exited; see mount-server.log")
+                time.sleep(0.1)
+            if not mounted:
+                raise RuntimeError("mount not ready in 15s; see mount-server.log")
+            return subprocess.run([sys.executable, str(Path(__file__).resolve()), "--workload"],
+                                  cwd=point, env=env, capture_output=True, text=True, timeout=180)
+        finally:
+            if mounted:
+                unmount = ["/sbin/umount", str(point)] if sys.platform == "darwin" else ["fusermount3", "-u", str(point)]
+                cleanup = subprocess.run(unmount, capture_output=True, text=True, timeout=30)
+                (output / "unmount.log").write_text(cleanup.stdout + cleanup.stderr)
+            if server.poll() is None:
+                os.killpg(server.pid, signal.SIGTERM)
+                try:
+                    server.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(server.pid, signal.SIGKILL)
+                    server.wait(timeout=10)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agentfs", type=Path)
@@ -135,10 +174,18 @@ def main():
             if not args.cli_only:
                 backend = "nfs" if sys.platform == "darwin" else "fuse"
                 result["backend"] = backend
+                # Preserve exec's independent outcome; do not silently report
+                # an explicit mount as a successful exec invocation.
                 start = time.monotonic()
-                proc = subprocess.run([binary, "exec", "--backend", backend, str(db),
-                                       sys.executable, str(Path(__file__).resolve()), "--workload"],
-                                      cwd=home, env=env, capture_output=True, text=True, timeout=180)
+                execution = subprocess.run([binary, "exec", "--backend", backend, str(db), "/usr/bin/true"],
+                                           cwd=home, env=env, capture_output=True, text=True, timeout=60)
+                result["exec_overlay"] = {"passed": execution.returncode == 0,
+                                          "exit_code": execution.returncode,
+                                          "seconds": time.monotonic() - start}
+                (args.output / "exec-overlay.log").write_text(execution.stdout + execution.stderr)
+                result["mount_method"] = "mount-foreground"
+                start = time.monotonic()
+                proc = mounted_workload(binary, db, home, env, backend, args.output)
                 result["mount_and_workload_seconds"] = time.monotonic() - start
                 (args.output / "mount.log").write_text(proc.stdout + proc.stderr)
                 records = [json.loads(line.split(" ", 1)[1]) for line in proc.stdout.splitlines()
