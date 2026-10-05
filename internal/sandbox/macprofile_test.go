@@ -119,9 +119,9 @@ func TestMacProfileNoMkdirThroughSymlink(t *testing.T) {
 	}
 }
 
-// A project's memory/ linked elsewhere in ~/.claude is denied where it
-// really is, and so are the directories above it, whether the link
-// target exists yet or not.
+// A project's memory/ linked elsewhere in ~/.claude, or under a linked
+// project directory, is denied where it really is, and so are the
+// directories above it, whether the link target exists yet or not.
 func TestMacProfileDeniesLinkedMemory(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	home, ws := t.TempDir(), t.TempDir()
@@ -139,6 +139,9 @@ func TestMacProfileDeniesLinkedMemory(t *testing.T) {
 	if err := os.Symlink(filepath.Join(home, ".claude/elsewhere"), filepath.Join(home, ".claude/projects/c")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink("../not-yet", filepath.Join(home, ".claude/projects/d")); err != nil {
+		t.Fatal(err)
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -148,12 +151,12 @@ func TestMacProfileDeniesLinkedMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	h, _ := filepath.EvalSymlinks(home)
-	for _, want := range []string{"shared/mem", "later/mem", "elsewhere/memory"} {
+	for _, want := range []string{"shared/mem", "later/mem", "elsewhere/memory", "not-yet/memory"} {
 		if !slices.Contains(p.NoWrite, filepath.Join(h, ".claude", want)) {
 			t.Errorf("%s not denied: %v", want, p.NoWrite)
 		}
 	}
-	for _, d := range []string{"shared", "later"} {
+	for _, d := range []string{"shared", "later", "not-yet"} {
 		if !slices.Contains(p.NoWriteRegex, "^"+regexp.QuoteMeta(filepath.Join(h, ".claude", d))+"$") {
 			t.Errorf("%s may be renamed: %v", d, p.NoWriteRegex)
 		}

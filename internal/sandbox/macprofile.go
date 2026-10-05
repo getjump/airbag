@@ -138,34 +138,35 @@ func realMemory(home string) []string {
 	}
 	var out []string
 	for _, e := range ents {
-		dir, err := filepath.EvalSymlinks(filepath.Join(root, e.Name()))
-		if err != nil {
-			continue
-		}
-		m := filepath.Join(dir, "memory")
-		for range maxMemoryHops {
-			fi, err := os.Lstat(m)
-			if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
-				break
-			}
-			t, err := os.Readlink(m)
-			if err != nil {
-				break
-			}
-			if !filepath.IsAbs(t) {
-				t = filepath.Join(filepath.Dir(m), t)
-			}
-			if d, err := filepath.EvalSymlinks(filepath.Dir(t)); err == nil {
-				t = filepath.Join(d, filepath.Base(t))
-			}
-			m = t
-		}
-		if m != filepath.Join(root, e.Name(), "memory") {
+		if m := follow(filepath.Join(follow(filepath.Join(root, e.Name())), "memory")); m != filepath.Join(root, e.Name(), "memory") {
 			out = append(out, m)
 		}
 	}
 	return out
 }
 
-// maxMemoryHops bounds the links realMemory follows, against a loop.
+// follow returns where p leads, with the links on the way followed: the
+// last one by what it says, though nothing may be there yet.
+func follow(p string) string {
+	for range maxMemoryHops {
+		if d, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+			p = filepath.Join(d, filepath.Base(p))
+		}
+		fi, err := os.Lstat(p)
+		if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+			return p
+		}
+		t, err := os.Readlink(p)
+		if err != nil {
+			return p
+		}
+		if !filepath.IsAbs(t) {
+			t = filepath.Join(filepath.Dir(p), t)
+		}
+		p = t
+	}
+	return p
+}
+
+// maxMemoryHops bounds the links follow follows, against a loop.
 const maxMemoryHops = 40
