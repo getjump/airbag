@@ -285,9 +285,12 @@ Outbox     1
 ```
 
 `airbag review --attention` prints only what needs a decision: secret reads, flagged
-changes, every change in `$HOME` that is not a cache, agent state or an agent config
-change of benign keys only, many deletions, waiting pushes, blocked calls, refusals
-past the log's rate. In `$HOME` a change is matched by where the write really landed,
+changes, every change in `$HOME` that is not a cache, agent state, inert git data
+(objects, logs, the index) or an agent config change of benign keys only (with the
+file's mode unchanged), many deletions, waiting pushes, blocked calls, refusals
+past the log's rate. In a download cache whose entries a host build runs as they
+are (Go modules, crates, Maven and Gradle jars, npx packages, pre-commit hooks),
+only new entries are folded; a change to one the host already has needs a decision. In `$HOME` a change is matched by where the write really landed,
 so one made through a link (`~/.bashrc` pointing into `~/dotfiles`) shows as a change
 to the link's target, which needs a decision even when review cannot tell what the
 link stands for. `airbag review --json` prints

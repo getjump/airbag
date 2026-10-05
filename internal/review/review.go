@@ -259,7 +259,9 @@ func classify(s *session.Session, cs []Change) {
 			if notes, ok := configNotes(*c); ok {
 				flags := withoutBenign(notes)
 				c.Flags = append(c.Flags, flags...)
-				c.benign = len(flags) == 0
+				// A mode change can open a config that holds the login
+				// (oauthAccount, primaryApiKey) to other users' reads.
+				c.benign = len(flags) == 0 && sameMode(*c)
 			}
 			// A file or link in place of a directory takes what was in it
 			// away, as a replacement does, though Scan says Modified.
@@ -279,13 +281,20 @@ func classify(s *session.Session, cs []Change) {
 				c.Flags = append(c.Flags, "agent instructions")
 			}
 		}
-		if c.Kind != Deleted && c.Type == 0 && c.Mode&0o111 != 0 && !hasPrefix(rel, buildDirs) && !strings.HasPrefix(rel, ".git/") {
+		if c.Kind != Deleted && c.Type == 0 && c.Mode&0o111 != 0 && !hasPrefix(rel, buildDirs) && (c.Layer != "ws" || !strings.HasPrefix(rel, ".git/")) {
 			c.Flags = append(c.Flags, "executable")
 		}
 		if c.Kind != Deleted && c.Type == 0 && len(secrets) > 0 && containsSecret(c.Upper, secrets) {
 			c.Flags = append(c.Flags, "secret in diff")
 		}
 	}
+}
+
+// sameMode reports whether a change keeps the mode of the file it
+// changes, or makes a new one.
+func sameMode(c Change) bool {
+	fi, err := os.Lstat(c.Path)
+	return err != nil || fi.Mode().Perm() == c.Mode.Perm()
 }
 
 func hasPrefix(rel string, patterns []string) bool {

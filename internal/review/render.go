@@ -24,18 +24,32 @@ import (
 
 // Noise in $HOME: caches and agent state, folded into one line per
 // group. A match ending in "/" is a directory prefix and its own group;
-// others are path.Match patterns.
-var homeNoise = []struct{ match, group, kind string }{
-	{".cache/", "", "cache"}, {".npm/", "", "cache"}, {"go/pkg/", "", "cache"},
-	{".cargo/registry/", "", "cache"}, {".local/share/", "", "cache"},
-	{".local/state/", "", "cache"}, {".rustup/", "", "cache"},
+// others are path.Match patterns. The first match counts. code marks a
+// download cache whose entries a host build or tool runs as they are
+// (Go modules, crates, Maven jars, npx packages): only a new entry is
+// folded there, a change to one the host has is shown.
+var homeNoise = []struct {
+	match, group, kind string
+	code               bool
+}{
+	{".cache/pre-commit/", "", "cache", true}, {".cache/", "", "cache", false},
+	{".npm/_npx/", "", "cache", true}, {".npm/", "", "cache", false},
+	{"go/pkg/", "", "cache", true}, {".cargo/registry/", "", "cache", true}, {".cargo/git/", "", "cache", true},
+	{".m2/repository/", "", "cache", true}, {".gradle/caches/", "", "cache", true},
+	{".gradle/wrapper/dists/", "", "cache", true}, {".yarn/berry/cache/", "", "cache", true},
+	{".bun/install/cache/", "", "cache", true}, {".nuget/packages/", "", "cache", true},
+	// Not all of ~/.local/share: it holds editor plugins (nvim) and
+	// dotfile managers' sources (chezmoi), which the host runs.
+	{".local/share/Trash/", "", "cache", false}, {".local/share/recently-used.xbel", ".local/share/", "cache", false},
+	{".local/share/zoxide/", "", "cache", false},
+	{".local/state/", "", "cache", false}, {".rustup/", "", "cache", true},
 	// Codex keeps its state in SQLite next to config.toml; config.toml,
 	// AGENTS.md, rules and user skills stay visible.
-	{".codex/.tmp/", ".codex/", "agent state"}, {".codex/tmp/", ".codex/", "agent state"},
-	{".codex/thread-writer-locks/", ".codex/", "agent state"}, {".codex/shell_snapshots/", ".codex/", "agent state"},
-	{".codex/skills/.system/", ".codex/", "agent state"}, {".codex/*.sqlite*", ".codex/", "agent state"},
-	{".codex/installation_id", ".codex/", "agent state"}, {".codex/.sandbox_migration", ".codex/", "agent state"},
-	{".codex/version.json", ".codex/", "agent state"}, {".codex/models_cache.json", ".codex/", "agent state"},
+	{".codex/.tmp/", ".codex/", "agent state", false}, {".codex/tmp/", ".codex/", "agent state", false},
+	{".codex/thread-writer-locks/", ".codex/", "agent state", false}, {".codex/shell_snapshots/", ".codex/", "agent state", false},
+	{".codex/skills/.system/", ".codex/", "agent state", false}, {".codex/*.sqlite*", ".codex/", "agent state", false},
+	{".codex/installation_id", ".codex/", "agent state", false}, {".codex/.sandbox_migration", ".codex/", "agent state", false},
+	{".codex/version.json", ".codex/", "agent state", false}, {".codex/models_cache.json", ".codex/", "agent state", false},
 	// Claude Code state that now goes through the branch (only the
 	// current workspace's transcripts pass through). settings.json,
 	// hooks, skills, CLAUDE.md and a project's memory/ are flagged, so
@@ -43,13 +57,13 @@ var homeNoise = []struct{ match, group, kind string }{
 	// except shell snapshots and session env files, which the CLI
 	// sources: a change to one the host already has is flagged
 	// (hostShellState), so it is not folded either.
-	{".claude/projects/", ".claude/", "agent state"}, {".claude/sessions/", ".claude/", "agent state"},
-	{".claude/session-env/", ".claude/", "agent state"}, {".claude/shell-snapshots/", ".claude/", "agent state"},
+	{".claude/projects/", ".claude/", "agent state", false}, {".claude/sessions/", ".claude/", "agent state", false},
+	{".claude/session-env/", ".claude/", "agent state", false}, {".claude/shell-snapshots/", ".claude/", "agent state", false},
 	// Not file-history/: a host /rewind writes it back into files.
-	{".claude/todos/", ".claude/", "agent state"},
-	{".claude/statsig/", ".claude/", "agent state"}, {".claude/backups/", ".claude/", "agent state"},
-	{".claude/debug/", ".claude/", "agent state"}, {".claude/ide/", ".claude/", "agent state"},
-	{".claude/plans/", ".claude/", "agent state"},
+	{".claude/todos/", ".claude/", "agent state", false},
+	{".claude/statsig/", ".claude/", "agent state", false}, {".claude/backups/", ".claude/", "agent state", false},
+	{".claude/debug/", ".claude/", "agent state", false}, {".claude/ide/", ".claude/", "agent state", false},
+	{".claude/plans/", ".claude/", "agent state", false},
 }
 
 const maxListed = 40
@@ -286,17 +300,18 @@ func flagged(c Change) bool { return len(withoutOutside(c.Flags)) > 0 }
 
 // folded returns the line review folds a change in $HOME into, "" when
 // the change is listed on its own: caches, agent state and git
-// internals, when they carry no flag. A symlink is never folded as a
-// cache or agent state: applied, it would lead a later session's path
-// somewhere else.
+// internals that no git command runs, when they carry no flag. A
+// change to an entry the host has in a download cache of code is not
+// folded, nor is a symlink: applied, it would lead a later session's
+// path somewhere else.
 func folded(c Change) string {
-	if c.Layer != "home" || flagged(c) {
+	if c.Layer != "home" || flagged(c) || c.Type == fs.ModeSymlink {
 		return ""
 	}
-	if group, kind := Noise(c.Rel); group != "" && c.Type != fs.ModeSymlink {
+	if group, kind, code := noise(c.Rel); group != "" && (!code || c.Kind == Added) {
 		return group + "… (" + kind + ")"
 	}
-	if repo := GitDir(c.Rel); repo != "" {
+	if repo := GitDir(c.Rel); repo != "" && hasPrefix(strings.TrimPrefix(c.Rel, repo), inertGit) {
 		return repo + "… (git internals)"
 	}
 	return ""
@@ -334,6 +349,12 @@ func GitDir(rel string) string {
 // Noise returns the folding group of a path in $HOME, "" when the path
 // is not noise, and what kind of noise it is.
 func Noise(rel string) (group, kind string) {
+	group, kind, _ = noise(rel)
+	return group, kind
+}
+
+// noise is Noise, and whether the match is a download cache of code.
+func noise(rel string) (group, kind string, code bool) {
 	for _, n := range homeNoise {
 		var hit bool
 		if strings.HasSuffix(n.match, "/") {
@@ -343,13 +364,18 @@ func Noise(rel string) (group, kind string) {
 		}
 		if hit {
 			if n.group == "" {
-				return n.match, n.kind
+				return n.match, n.kind, n.code
 			}
-			return n.group, n.kind
+			return n.group, n.kind, n.code
 		}
 	}
-	return "", ""
+	return "", "", false
 }
+
+// inertGit: what in a repository's git directory no git command runs or
+// reads as settings; the rest (config, hooks, info, modules, refs) is
+// shown.
+var inertGit = []string{"objects/", "logs/", "index", "FETCH_HEAD", "ORIG_HEAD", "COMMIT_EDITMSG"}
 
 func total(m map[string]int) int {
 	n := 0

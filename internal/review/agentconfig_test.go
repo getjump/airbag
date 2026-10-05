@@ -512,7 +512,14 @@ func TestConfigModeWidened(t *testing.T) {
 			}
 		}
 		got := slices.ContainsFunc(flags, func(f string) bool { return strings.Contains(f, "writable by other users") })
-		if got != flagged || (len(Attention(cs)) > 0) != flagged {
+		// Any mode change needs a decision: a config can hold the login,
+		// and a read bit opens it to other users.
+		fi, err := os.Stat(realPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attend := flagged || fi.Mode().Perm() != mode
+		if got != flagged || (len(Attention(cs)) > 0) != attend {
 			t.Errorf("mode %04o: flags %v, attention %d", mode, flags, len(Attention(cs)))
 		}
 	}

@@ -138,6 +138,19 @@ func TestAttentionUnknownHome(t *testing.T) {
 	write(filepath.Join(s.HomeUpper(), ".cache/pip/x"), "x")
 	write(filepath.Join(s.HomeUpper(), ".claude/todos/t.json"), "[]")
 	write(filepath.Join(s.HomeUpper(), "src/repo/.git/objects/ab/cd"), "x")
+	// What a git command runs or reads as settings is shown.
+	write(filepath.Join(s.HomeUpper(), "src/repo/.git/config"), "[core]\n")
+	write(filepath.Join(s.HomeUpper(), ".git/hooks/post-checkout"), "#!/bin/sh\n")
+	if err := os.Chmod(filepath.Join(s.HomeUpper(), ".git/hooks/post-checkout"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Editor plugins live in ~/.local/share; the trash does too.
+	write(filepath.Join(s.HomeUpper(), ".local/share/nvim/lazy/p/init.lua"), "x")
+	write(filepath.Join(s.HomeUpper(), ".local/share/Trash/files/x"), "x")
+	// A new module is folded; a change to one the host has is not.
+	write(filepath.Join(home, "go/pkg/mod/m@v1/old.go"), "package m\n")
+	write(filepath.Join(s.HomeUpper(), "go/pkg/mod/m@v1/old.go"), "package m // changed\n")
+	write(filepath.Join(s.HomeUpper(), "go/pkg/mod/n@v1/new.go"), "package n\n")
 	write(filepath.Join(s.WSUpper(), "main.go"), "package main\n")
 	if err := os.Symlink("/elsewhere", filepath.Join(s.HomeUpper(), ".cache/link")); err != nil {
 		t.Fatal(err)
@@ -150,7 +163,8 @@ func TestAttentionUnknownHome(t *testing.T) {
 	for _, c := range Attention(cs) {
 		got = append(got, c.Layer+":"+c.Rel)
 	}
-	want := []string{"home:.cache/link", "home:dotfiles/bashrc", "home:notes/todo.txt"}
+	want := []string{"home:.cache/link", "home:.git/hooks/post-checkout", "home:.local/share/nvim/lazy/p/init.lua",
+		"home:dotfiles/bashrc", "home:go/pkg/mod/m@v1/old.go", "home:notes/todo.txt", "home:src/repo/.git/config"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("attention %v, want %v", got, want)
 	}
