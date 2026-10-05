@@ -47,11 +47,13 @@ already ran is not undone.
 A session records the directories its workspace and a branched `$HOME` were when it
 began; on macOS, which never branches `$HOME`, it records the `$HOME` it keeps the
 agent's state in. If one is another directory now (moved away, with a link or a new
-directory at its path), run, apply, rollback, resume and the outbox change nothing
-there and say so; put the directory back first. Apply and rollback leave a `$HOME`
-that is not branched alone; on Linux nothing writes in it at all. On macOS one that
-could not be recorded (not there, `HOME=/nonexistent`, say) keeps the agent's state
-read-only. A rollback that finds it so part way stops there and keeps
+directory at its path), run, apply, rollback and resume change nothing there and say
+so, and the outbox runs nothing while the workspace is; put the directory back first.
+Apply and rollback leave a `$HOME` that is not branched alone; on Linux nothing writes
+in it at all. On macOS one that could not be recorded (not there, `HOME=/nonexistent`,
+say) keeps the agent's state read-only. What the outbox runs on the host, a push or a
+deferred command you confirm, runs as you, with your environment and `$HOME` as they
+are then, as it would from your own shell. A rollback that finds it so part way stops there and keeps
 what is left in its journal; until `airbag rollback` is run again to finish it, apply
 refuses. A directory is told by its path, inode, device and, where
 the filesystem keeps them, its creation time, inode generation and filesystem ID.
