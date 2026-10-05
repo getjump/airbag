@@ -96,6 +96,17 @@ def workload():
                      ["git", "fsck", "--no-reflogs"]]:
             subprocess.run(argv, check=True, capture_output=True, text=True, timeout=60)
 
+    def git_fsync():
+        directory = root / "diagnostic-git-fsync"
+        directory.mkdir()
+        (directory / "fixture.txt").write_text("local Git fsync diagnostic\n")
+        config = ["git", "-c", "core.fsync=loose-object", "-c", "core.fsyncMethod=fsync"]
+        for argv in [config + ["init", "-q"], config + ["add", "fixture.txt"],
+                     config + ["-c", "user.name=Filesystem Probe", "-c", "user.email=probe@example.invalid",
+                               "-c", "commit.gpgsign=false", "commit", "-qm", "local fixture"],
+                     config + ["fsck", "--no-reflogs"]]:
+            subprocess.run(argv, cwd=directory, check=True, capture_output=True, text=True, timeout=60)
+
     mounts = subprocess.run(["mount"], capture_output=True, text=True, check=True).stdout
     mounted = any(str(root) in line and ("fuse" in line.lower() or "nfs" in line.lower())
                   for line in mounts.splitlines())
@@ -108,6 +119,7 @@ def workload():
         check(name, operation)
     required_pass = all(value["passed"] for value in checks.values())
     check("diagnostic_fsync_before_chmod", fsync_before_chmod)
+    check("diagnostic_git_fsync", git_fsync)
     print("AGENTFS_PROBE " + json.dumps(checks), flush=True)
     return 0 if required_pass else 1
 
