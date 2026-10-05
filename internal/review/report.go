@@ -213,11 +213,12 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	return r
 }
 
-// linksOut counts the links cs adds whose target, as the agent wrote
-// it, is outside the workspace or a secret file (notes.md -> .env).
-// Apply holds the session's deferred commands while such a link is in
-// the real files, unless it leads to an installed program; a link review
-// cannot read counts.
+// linksOut counts the links this session put in the real files, or
+// adds with cs, whose target is outside the workspace or a secret file
+// (notes.md -> .env). Apply holds the session's deferred commands while
+// such a link is in the real files, unless it leads to an installed
+// program; a link review cannot read counts. A link an earlier, partial
+// apply wrote is no change any more, but still holds them.
 func linksOut(s *session.Session, cs []Change) int {
 	in := func(p, dir string) bool {
 		if dir == "" {
@@ -230,30 +231,42 @@ func linksOut(s *session.Session, cs []Change) int {
 	if wsReal == "" {
 		wsReal, _ = filepath.EvalSymlinks(s.Workspace)
 	}
+	// One component at a time from the link's real directory, as apply
+	// will follow it, through the links already in the real files:
+	// publish -> cache/pkg with cache -> ~/.config, or cache/../secret,
+	// where the .. applies after cache is followed.
+	leads := func(path, text string, err error) bool {
+		if err != nil {
+			return true
+		}
+		dir := "/"
+		if !filepath.IsAbs(text) {
+			dir = resolved(filepath.Dir(path))
+		}
+		t, ok := links.Follow(dir, text)
+		return !ok || !in(t, wsReal) || secretfs.IsSecret(strings.ToLower(filepath.Base(t)))
+	}
 	n := 0
+	changed := make(map[string]bool, len(cs))
 	for _, c := range cs {
+		changed[c.Path] = true
 		if c.Type != fs.ModeSymlink || c.Kind == Deleted {
 			continue
 		}
 		text, err := os.Readlink(c.Upper)
-		if err != nil {
+		if leads(c.Path, text, err) {
 			n++
+		}
+	}
+	for p := range s.Applied {
+		if changed[p] {
 			continue
 		}
-		// One component at a time from the link's real directory, as
-		// apply will follow it, through the links already in the real
-		// files: publish -> cache/pkg with cache -> ~/.config, or
-		// cache/../secret, where the .. applies after cache is followed.
-		dir := "/"
-		if !filepath.IsAbs(text) {
-			dir = resolved(filepath.Dir(c.Path))
-		}
-		t, ok := links.Follow(dir, text)
-		if !ok {
-			n++
+		if fi, err := os.Lstat(p); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
 			continue
 		}
-		if !in(t, wsReal) || secretfs.IsSecret(strings.ToLower(filepath.Base(t))) {
+		text, err := os.Readlink(p)
+		if leads(p, text, err) {
 			n++
 		}
 	}

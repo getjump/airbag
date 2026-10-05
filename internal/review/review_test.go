@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/session"
@@ -372,6 +373,21 @@ func TestReportNamesTrustLinks(t *testing.T) {
 	}
 	if w := why([]Change{inner, abs, gone}, "i-1"); strings.Contains(w, "trust-links") {
 		t.Errorf("links inside the workspace, or removed, hold nothing: %s", w)
+	}
+	// A link a partial apply already wrote is no change now, and still
+	// holds the command; one that stays inside does not.
+	if err := os.Symlink("/etc/app", filepath.Join(ws, "applied")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("v1", filepath.Join(ws, "applied-inner")); err != nil {
+		t.Fatal(err)
+	}
+	s.Applied = map[string]time.Time{filepath.Join(ws, "applied"): time.Now(), filepath.Join(ws, "applied-inner"): time.Now()}
+	if w := why(nil, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("an applied link out is not counted: %s", w)
+	}
+	if w := why([]Change{link("applied", "v3")}, "i-1"); strings.Contains(w, "trust-links") {
+		t.Errorf("an applied link the session now changes counts as the change: %s", w)
 	}
 }
 
