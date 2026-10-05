@@ -9,8 +9,9 @@ own Linux machine before a release.
 1. `airbag doctor` passes. On Ubuntu 23.10+ install the AppArmor profile it prints.
 2. Log in to Claude Code outside airbag once (`claude`, then `/login`). The
    OAuth callback listens on localhost, which the sandbox cannot reach, so the
-   first login happens outside. Inside, `~/.claude/.credentials.json` and
-   `~/.claude.json` pass through, so token refreshes are kept.
+   first login happens outside. Inside, `~/.claude/.credentials.json` passes
+   through, so token refreshes are kept; `~/.claude.json` goes through the
+   branch and shows in review by key name.
 
 ## Session
 
@@ -50,7 +51,7 @@ $ airbag diff
 - [ ] Steps list the agent's tool calls with the files each one changed;
 - [ ] Network shows `api.anthropic.com` and any denied hosts;
 - [ ] the real files are unchanged (`git status` is clean);
-- [ ] `airbag review --attention` lists the waiting push and any flagged change;
+- [ ] `airbag review --attention` lists the waiting push, any flagged change and any change in `$HOME` outside caches and agent state;
 - [ ] `airbag review --json | jq -r .schema` prints `airbag.review/v1`.
 
 ## Iterate, then take the result
@@ -87,8 +88,8 @@ Run the same session tasks, then:
 - [ ] Steps list Codex's commands (Codex reports them as `Bash`);
 - [ ] a command an `airbag.yaml` rule denies is refused before it runs;
 - [ ] Network shows `chatgpt.com` or `api.openai.com`;
-- [ ] Home folds Codex's state into one `~/.codex/… (agent state)` line;
-- [ ] `airbag run -- codex resume` lists the earlier session.
+- [ ] Home folds Codex's state into one `~/.codex/… (agent state, not applied)` line;
+- [ ] `airbag run -- codex resume` lists the earlier session (on the host, after apply, it may not: Codex's thread index is agent state, which apply leaves out).
 - [ ] `airbag run --strict -- codex` without the bypass flag prints the warning
   that Codex's own sandbox cannot start.
 

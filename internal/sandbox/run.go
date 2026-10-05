@@ -103,10 +103,25 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	go func() { _ = ctl.Serve(cl) }()
 
 	// Pass-through dirs must exist on the host, or the agent would
-	// create them inside the branch and lose them on discard.
+	// create them inside the branch and lose them on discard. A path
+	// through a symlink is not created: MkdirAll would follow it out of
+	// $HOME, and init refuses to pass it through anyway.
 	for _, p := range s.Passthrough {
-		if strings.HasSuffix(p, "/") {
+		if strings.HasSuffix(p, "/") && noSymlinkSoFar(s.Home, p) == nil {
 			_ = os.MkdirAll(filepath.Join(s.Home, p), 0o700)
+		}
+	}
+	// A branch hole (a passed-through project's memory/) needs to exist
+	// in the real $HOME: as a mountpoint inside the passed-through parent,
+	// and as the lower layer of the copy-on-write view put on it (init.go).
+	// Under a symlink it is skipped like its parent, which init then
+	// leaves in the branch.
+	for _, h := range s.BranchHoles {
+		if noSymlinkSoFar(s.Home, h) != nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Join(s.Home, h), 0o700); err != nil {
+			return 1, fmt.Errorf("branch hole ~/%s: %w", h, err)
 		}
 	}
 

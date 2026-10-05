@@ -1,7 +1,9 @@
 package review
 
 import (
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -50,13 +52,19 @@ var persistHomeTable = []persistence{
 	{"git", []string{".gitconfig", ".config/git/"}},
 	{"build tool and package source config", []string{
 		".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".config/pip/", ".pip/",
-		".cargo/config", ".cargo/config.toml", ".config/go/", ".m2/settings.xml",
+		".cargo/config", ".cargo/config.toml", ".config/go/env", ".m2/settings.xml",
 		".gradle/init.d/", ".gradle/init.gradle", ".gradle/gradle.properties",
 	}},
 	{"credential helpers that run commands", []string{".docker/", ".kube/", ".aws/config", ".config/gh/", ".ssh/"}},
+	// ~/.claude.json is handled by agentconfig.go, not here: a change is
+	// flagged "persist" only when it touches a key that runs code or
+	// changes trust, so routine counter rewrites do not alarm.
 	{"agent settings, hooks and instructions", []string{
 		".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/", ".claude/agents/",
-		".claude/skills/", ".claude/commands/", ".claude/plugins/", ".claude/CLAUDE.md", ".claude.json",
+		".claude/skills/", ".claude/commands/", ".claude/plugins/", ".claude/CLAUDE.md",
+		".claude/rules/", ".claude/output-styles/", ".claude/workflows/", ".claude/agent-memory/",
+		// The cache of server-managed settings, applied at startup.
+		".claude/remote-settings.json",
 		".codex/config.toml", ".codex/hooks.json", ".codex/rules/", ".codex/AGENTS.md",
 		".gemini/", ".cursor/", ".config/airbag/",
 	}},
@@ -105,4 +113,44 @@ func matchPersist(rel, pat string) bool {
 	default:
 		return strings.TrimSuffix(rel, "/") == pat
 	}
+}
+
+// hostShellState: agent state directories whose entries the agent's CLI
+// sources as shell code, one entry per session: Claude Code's shell
+// snapshots and its sessions' env files. A change to an entry the real
+// $HOME already has is shell code a host session runs, so it is flagged
+// and shown, never folded. A new shell snapshot is the sandbox session's
+// own, under a name no host session uses; a session's env files are
+// found by its id, and the host can resume the sandbox's sessions by id
+// (their transcripts pass through), so every change there counts.
+var hostShellState = []struct {
+	dir string
+	all bool // a new entry counts too
+}{{".claude/shell-snapshots/", false}, {".claude/session-env/", true}}
+
+// shellStateFlag marks such a change; Diff shows its contents.
+const shellStateFlag = "shell code a host session sources"
+
+// touchesHostShellState reports whether a home change of the given kind
+// at rel is in a hostShellState directory and touches an entry the real
+// $HOME already has (the first name below the directory), or deletes or
+// replaces the directory itself while the real one holds entries.
+func touchesHostShellState(home, rel, kind string) bool {
+	rel = strings.TrimSuffix(rel, "/")
+	for _, d := range hostShellState {
+		dir := strings.TrimSuffix(d.dir, "/")
+		if rel == dir {
+			ents, _ := os.ReadDir(filepath.Join(home, dir))
+			return (kind == Deleted || kind == Replaced) && len(ents) > 0
+		}
+		if rest, ok := strings.CutPrefix(rel, d.dir); ok {
+			if d.all {
+				return true
+			}
+			first, _, _ := strings.Cut(rest, "/")
+			_, err := os.Lstat(filepath.Join(home, dir, first))
+			return err == nil
+		}
+	}
+	return false
 }

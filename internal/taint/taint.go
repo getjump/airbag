@@ -35,13 +35,17 @@ type Set struct {
 	mu      sync.Mutex
 	sources map[Label][]string
 	onAdd   []func(Label, string)
+	// hooked[l] is closed once the hooks for l's first Add have run.
+	hooked map[Label]chan struct{}
 }
 
-func NewSet() *Set { return &Set{sources: map[Label][]string{}} }
+func NewSet() *Set { return &Set{sources: map[Label][]string{}, hooked: map[Label]chan struct{}{}} }
 
 // OnAdd registers f to run the first time a label is added, before Add
 // returns, so an observer (close tunnels, log) acts before the action
-// that triggered the label proceeds.
+// that triggered the label proceeds. A later Add of the label returns
+// only once they have run too: the action that triggered it may be a
+// retry of one whose wait for the hooks gave up.
 func (s *Set) OnAdd(f func(Label, string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -49,19 +53,30 @@ func (s *Set) OnAdd(f func(Label, string)) {
 }
 
 // Add records that source gave the session label. It returns true the
-// first time that label appears; the hooks run only then.
+// first time that label appears; the hooks run only then. Every Add
+// returns after they have.
 func (s *Set) Add(label Label, source string) bool {
 	s.mu.Lock()
 	_, had := s.sources[label]
 	s.sources[label] = append(s.sources[label], source)
 	hooks := s.onAdd
-	s.mu.Unlock()
-	if !had {
-		for _, f := range hooks {
-			f(label, source)
-		}
+	done, ok := s.hooked[label]
+	if !ok {
+		done = make(chan struct{})
+		s.hooked[label] = done
 	}
-	return !had
+	s.mu.Unlock()
+	if had {
+		<-done
+		return false
+	}
+	for _, f := range hooks {
+		f(label, source)
+	}
+	// Not deferred: a hook that panicked did not finish, and a later Add
+	// must not go on as if it had.
+	close(done)
+	return true
 }
 
 // Has reports whether the session carries label.

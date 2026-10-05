@@ -3,6 +3,7 @@ package apply
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/getjump/airbag/internal/review"
@@ -84,9 +85,9 @@ func mark(c review.Change) string {
 
 func display(c review.Change) string {
 	if c.Layer == "home" {
-		return "~/" + c.Rel
+		return review.OneLine("~/" + c.Rel)
 	}
-	return c.Rel
+	return review.OneLine(c.Rel)
 }
 
 func withoutOutside(fl []string) []string {
@@ -115,12 +116,36 @@ func appendNew(list []string, items ...string) []string {
 // matches reports whether a unit touches one of the given paths.
 func (u Unit) matches(paths []string) bool {
 	for _, c := range u.Changes {
-		for _, p := range paths {
-			p = strings.TrimSuffix(p, "/")
-			rel := strings.TrimPrefix(p, "~/")
-			if c.Path == p || strings.HasPrefix(c.Path, p+"/") || c.Rel == rel || strings.HasPrefix(c.Rel, rel+"/") {
-				return true
-			}
+		if changeMatches(c, paths) {
+			return true
+		}
+	}
+	return false
+}
+
+// homeMatches reports whether c is in $HOME, at or under one of paths
+// written as a $HOME path (~/... or absolute under home): a path written
+// as a workspace one does not take what apply leaves out of $HOME.
+func homeMatches(c review.Change, paths []string, home string) bool {
+	if c.Layer != "home" {
+		return false
+	}
+	var hp []string
+	for _, p := range paths {
+		if strings.HasPrefix(p, "~/") || filepath.IsAbs(p) && (p == home || strings.HasPrefix(p, home+string(filepath.Separator))) {
+			hp = append(hp, p)
+		}
+	}
+	return changeMatches(c, hp)
+}
+
+// changeMatches reports whether c is at or under one of paths.
+func changeMatches(c review.Change, paths []string) bool {
+	for _, p := range paths {
+		p = strings.TrimSuffix(p, "/")
+		rel := strings.TrimPrefix(p, "~/")
+		if c.Path == p || strings.HasPrefix(c.Path, p+"/") || c.Rel == rel || strings.HasPrefix(c.Rel, rel+"/") {
+			return true
 		}
 	}
 	return false
@@ -132,7 +157,13 @@ func forget(cs []review.Change) {
 	for i := len(cs) - 1; i >= 0; i-- {
 		c := cs[i]
 		if c.IsDir() && c.Kind != review.Deleted {
-			_ = os.Remove(c.Upper) // only if empty
+			// Only if empty. A replacement that still holds what apply
+			// left out stays as a plain directory, or a second apply
+			// would replace the host's directory again, taking away
+			// what the first one wrote.
+			if os.Remove(c.Upper) != nil && c.Kind == review.Replaced {
+				clearOpaque(c.Upper)
+			}
 			continue
 		}
 		_ = os.RemoveAll(c.Upper)
