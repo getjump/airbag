@@ -151,12 +151,70 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   sets stay in that pseudo-terminal, never in the shell you return to; a
   seccomp filter refuses TIOCSTI and TIOCLINUX as well, and the agent runs
   with `no_new_privs`. Ctrl-C, Ctrl-Z with `fg`, and resizing work as usual.
+- **Less kernel to attack.** The same seccomp filter is allow-by-default and
+  refuses a set of syscalls that widen the kernel's attack surface: io_uring
+  (which can open sockets without a `socket()` call), `bpf`,
+  `perf_event_open`, `userfaultfd`, the kernel keyring
+  (`add_key`/`keyctl`/`request_key`), `kexec`, module loading,
+  `open_by_handle_at`, `quotactl`, `acct`, `swapon`, `reboot`, `syslog`,
+  `move_pages`, `migrate_pages`, `fanotify_init`, and sockets (`socket` and
+  `socketpair`) of families other than Unix, IPv4/IPv6 and netlink, so
+  `AF_VSOCK`, `AF_PACKET` and `AF_TIPC` are out. An `AF_NETLINK` socket is
+  allowed, but not the `NETLINK_NETFILTER` and `NETLINK_XFRM` protocols,
+  which reach nf_tables and the IPsec state. It stays allow-by-default so
+  nested user namespaces, `mount`, `pivot_root`, `setns` and the rest that
+  Codex's and Chromium's own sandboxes use keep working; `ptrace` stays
+  allowed for the agent's own programs (gdb, strace, `go test -race`). It
+  covers the native ABI and every compat one and kills an unknown
+  architecture, so a refused call cannot slip past by its number on a 32-bit
+  or x32 entry. Two gaps remain in the default mode. A 32-bit (i386) program
+  can still create a socket of any family or netlink protocol through the
+  `socketcall` multiplexer, whose arguments are behind a pointer the filter
+  cannot read. And the agent can make its own user and network namespace,
+  where it is root, and there still reach `NETLINK_ROUTE` (traffic control,
+  qdiscs), generic netlink and the legacy x_tables `setsockopt` interface.
+  `--strict` closes both: it refuses i386 socket creation and forbids new
+  user namespaces. The second is not covered when airbag runs as root: the
+  agent is then root in its own namespace, where a network namespace needs
+  no new user namespace.
+  Alongside the filter: the agent's `/proc` hides other processes
+  (`hidepid`) and `/dev/kmsg` and `/dev/userfaultfd` are hidden; the agent
+  cannot ptrace the supervisor or read its `/proc/1/mem` or `/proc/1/environ`
+  (its user namespace has no `CAP_SYS_PTRACE` over PID 1, and PID 1 is set
+  non-dumpable as a second layer); file descriptors inherited from the caller
+  are closed before the agent starts; and core dumps are capped at 1 byte
+  (`RLIMIT_CORE=1`). That stops file dumps and a `core_pattern` that pipes to
+  a host handler like systemd-coredump, unless something in the sandbox
+  lowers the limit (`--strict` silently skips that change). A socket
+  `core_pattern` (`@` or `@@`, Linux 6.16+) ignores the limit and is not
+  covered; `airbag doctor` reports which kind the host uses.
+
+  What this gives up, in return: `perf`, `bpftrace`/`bcc` and
+  `async-profiler`'s perf mode do not work (no `perf_event_open`/`bpf`);
+  tools that cache credentials in the kernel keyring (some Kerberos
+  `KEYRING:` ccaches) do not; inside the agent's own namespaces, nftables,
+  iptables-nft, `conntrack` and rootless Podman networks (netavark) do not
+  (`NETLINK_NETFILTER`), nor do `ip xfrm` and strongSwan (`NETLINK_XFRM`);
+  numactl's `migratepages` and the `move_pages` calls of libnuma and hwloc do
+  not; fanotify tools such as `fatrace` do not; and under `--strict`, 32-bit
+  networking and nested mounts through the new mount API do not. The agents
+  themselves and the usual build and test tools do not use any of these; a
+  `strace -f -c` over a Claude Code and a Codex run touches none of the
+  refused calls.
 - **A strict mode.** `airbag run --strict` also keeps the agent from creating
   user namespaces, so the kernel features only a user namespace exposes stay
-  out of its reach. It is off by default because common tools need them:
-  Codex's own `--sandbox` modes and Chromium's sandbox fail under it (run
-  Codex with `--dangerously-bypass-approvals-and-sandbox`, Chromium with
-  `--no-sandbox`).
+  out of its reach, and in this mode only the filter refuses the new mount
+  API (`fsopen`, `fsconfig`, `open_tree`, `move_mount`, `mount_setattr`, …)
+  with `ENOSYS`, as Flatpak does, so a nested mount cannot reconfigure the
+  VFS, and refuses i386 `socketcall` socket creation. A change to the
+  core-dump limit is silently skipped: `setrlimit` or `prlimit64` on
+  `RLIMIT_CORE` returns success without running, and the limit stays 1 byte,
+  so gpg and `ssh-agent`, which lower it at start, keep working. Reading the
+  limit still works, and a `prlimit64` that sets it and also asks for the
+  old value is refused. If any of this cannot be set up, the run stops. It
+  is off by default because common tools need user namespaces: Codex's own
+  `--sandbox` modes and Chromium's sandbox fail under it (run Codex with
+  `--dangerously-bypass-approvals-and-sandbox`, Chromium with `--no-sandbox`).
 - **More than one run.** `airbag run --session last -- claude --continue` runs the
   agent again on the branch of a stopped session: it sees its own earlier changes,
   the outbox and the effect log continue, and what the session learned stays (a
@@ -422,6 +480,12 @@ airbag protects against accidents and casual exfiltration by an agent you let ru
 without prompts. It is not a VM: the kernel is shared, and whatever the agent reads
 is still sent to the model API. A bound credential keeps its value from the agent,
 not its use: through the bound hosts the agent can do what the token allows.
+
+The seccomp filter removes the parts of the kernel surface an agent has no reason
+to touch (above), which cuts the exposure an unprivileged-user-namespace escape
+would use; but the kernel is still shared, so it is a smaller target, not a VM
+boundary. `airbag doctor` reports the host sysctls that harden the rest, and
+where the host sends core dumps.
 
 For hosts without a credential the proxy decides from the name the client asks for
 and does not see inside TLS. So a broad allowlist entry (`github.com`) is a way for
