@@ -327,3 +327,38 @@ func TestInterceptRefusesUpgrade(t *testing.T) {
 	settle(t, g0, fd0, 2, 2, 3*time.Second) // the client's pool keeps nothing either once KeepAlive closes it
 	c.CloseIdleConnections()
 }
+
+// A cut closes each flow's connections in turn while a secret read
+// waits: no flow holds a TLS connection, whose Close sends an alert and
+// can wait seconds on a peer that does not read.
+func TestInterceptedFlowHoldsNoTLSConn(t *testing.T) {
+	up, _ := echo(t)
+	var p *Proxy
+	c, _, _ := mitmProxyWith(t, up, "", func(px *Proxy) { p = px })
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/", nil)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	held := 0
+	p.mu.Lock()
+	for f := range p.flows {
+		f.mu.Lock()
+		for cn := range f.conns {
+			held++
+			if w, ok := cn.(*watchedConn); ok {
+				cn = w.Conn
+			}
+			if _, ok := cn.(*tls.Conn); ok {
+				t.Errorf("a flow holds a %T", cn)
+			}
+		}
+		f.mu.Unlock()
+	}
+	p.mu.Unlock()
+	if held < 2 {
+		t.Fatalf("%d connections held, want the client's and the upstream's", held)
+	}
+}

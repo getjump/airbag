@@ -140,7 +140,11 @@ func (f *flow) halfClose() {
 }
 
 // hold adds c to what stopping the flow closes. A flow that has
-// stopped already closes c at once and says false.
+// stopped already closes c at once and says false. c.Close must not
+// wait on the peer: a cut closes every flow in turn while a secret read
+// waits, and a TLS connection's Close sends an alert, which can block
+// for seconds on a peer that does not read. Hold the connection under
+// it.
 func (f *flow) hold(c io.Closer) bool {
 	f.mu.Lock()
 	if f.stopped {
@@ -354,52 +358,4 @@ func (c *watchedConn) CloseWrite() error {
 func (c *watchedConn) Close() error {
 	c.f.release(c)
 	return c.Conn.Close()
-}
-
-// capListener keeps at most max of the connections it accepts open: one
-// past that is closed at once, and Accept goes on to the next. Each
-// connection gives its place back when it is closed, by the server or
-// by the handler that hijacked it.
-type capListener struct {
-	net.Listener
-	max  int64
-	open atomic.Int64
-}
-
-func (l *capListener) Accept() (net.Conn, error) {
-	for {
-		c, err := l.Listener.Accept()
-		if err != nil {
-			return nil, err
-		}
-		if l.open.Add(1) <= l.max {
-			return &cappedConn{Conn: c, l: l}, nil
-		}
-		l.open.Add(-1)
-		_ = c.Close()
-	}
-}
-
-// cappedConn is a connection a capListener counts: the first Close
-// gives its place back.
-type cappedConn struct {
-	net.Conn
-	l    *capListener
-	once sync.Once
-}
-
-func (c *cappedConn) Close() error {
-	err := c.Conn.Close()
-	c.once.Do(func() { c.l.open.Add(-1) })
-	return err
-}
-
-// CloseWrite passes a half-close on, as a tunnel does when its upstream
-// has finished and net/http does before it closes a connection.
-func (c *cappedConn) CloseWrite() error {
-	type cw interface{ CloseWrite() error }
-	if x, ok := c.Conn.(cw); ok {
-		return x.CloseWrite()
-	}
-	return nil
 }

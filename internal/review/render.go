@@ -172,6 +172,15 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 			fmt.Fprintf(w, "  %-4s %-40s %s\n", e.Verdict, clip(e.Target, 40), e.Reason)
 		}
 	}
+	dropped := map[string]int{}
+	for _, e := range effs {
+		if e.Kind == effects.Dropped {
+			dropped[e.Target] += effects.DroppedCount(e)
+		}
+	}
+	if len(dropped) > 0 {
+		fmt.Fprintf(w, "\nNot logged %d denials, past %d a second of a kind%s\n", total(dropped), effects.DenyRate, hostList(dropped))
+	}
 
 	fmt.Fprintf(w, "\nOutbox     %d\n", len(intents))
 	secrets := knownSecrets(s.Workspace)

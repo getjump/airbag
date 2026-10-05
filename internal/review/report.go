@@ -59,7 +59,7 @@ type ReportChange struct {
 
 // ReportItem is one thing the human should decide on.
 type ReportItem struct {
-	What   string `json:"what"`   // change, intent, blocked, secret, deletions
+	What   string `json:"what"`   // change, intent, blocked, secret, deletions, log
 	Target string `json:"target"` // a path, an intent ID, a host
 	Why    string `json:"why"`
 }
@@ -140,8 +140,11 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	}
 
 	seenU, seenPkg := map[string]bool{}, map[string]bool{}
+	dropped := map[string]int{}
 	for _, e := range effs {
 		switch {
+		case e.Kind == effects.Dropped:
+			dropped[e.Target] += effects.DroppedCount(e)
 		case e.Kind == "net.egress" || e.Kind == "net.tcp":
 			host, _, err := net.SplitHostPort(e.Target)
 			if err != nil {
@@ -172,6 +175,10 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			r.Attention = append(r.Attention, ReportItem{What: "blocked", Target: e.Target, Why: e.Verdict + " by " + orUnnamed(e.Reason)})
 		}
 	}
+	for _, kind := range sortedKeys(dropped) {
+		r.Attention = append(r.Attention, ReportItem{What: "log", Target: kind,
+			Why: fmt.Sprintf("%d denials not logged: more than %d a second", dropped[kind], effects.DenyRate)})
+	}
 	secrets := knownSecrets(s.Workspace)
 	for _, in := range intents {
 		r.Outbox = append(r.Outbox, ReportIntent{ID: in.ID, Kind: in.Kind, Argv: in.Argv, Status: in.Status, Files: in.Files})
@@ -190,7 +197,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 }
 
 func attentionRank(what string) int {
-	return map[string]int{"secret": 0, "change": 1, "deletions": 2, "intent": 3, "blocked": 4}[what]
+	return map[string]int{"secret": 0, "change": 1, "deletions": 2, "intent": 3, "blocked": 4, "log": 5}[what]
 }
 
 func orUnnamed(rule string) string {

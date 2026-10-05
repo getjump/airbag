@@ -18,6 +18,7 @@ import (
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
+	"github.com/getjump/airbag/internal/netcap"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/secretfs"
@@ -55,16 +56,29 @@ func (s *Server) Serve(l net.Listener) error {
 	mux.HandleFunc("POST /exec", s.exec)
 	mux.HandleFunc("POST /taint", s.taint)
 	// The agent can open connections here, and each one held is a
-	// goroutine and a file descriptor on the host side: a request must
-	// arrive whole within a minute (its header within 10 s), and a
-	// connection waiting for its next request is closed after two.
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: time.Minute, IdleTimeout: 2 * time.Minute}
-	return srv.Serve(l)
+	// goroutine and a file descriptor on the host side: at most
+	// MaxConns are open at once, a request must arrive whole within a
+	// minute (its header within 10 s) and its answer be taken within
+	// one, and a connection waiting for its next request is closed after
+	// two.
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: time.Minute,
+		WriteTimeout: time.Minute, IdleTimeout: 2 * time.Minute}
+	return srv.Serve(netcap.Limit(l, MaxConns))
 }
+
+// MaxConns caps the connections to the control socket open at once.
+// Each shim, hook and secret read holds one while it asks; past the cap
+// one more is closed, and the shim goes on as it does when the host
+// does not answer.
+const MaxConns = 128
+
+// maxBody bounds a request's body: an intent, a deferred command or a
+// hook's payload.
+const maxBody = 4 << 20
 
 func (s *Server) intent(w http.ResponseWriter, r *http.Request) {
 	var in outbox.Intent
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -107,7 +121,7 @@ type DeferReply struct {
 // stops the command later: it runs only on content that matches.
 func (s *Server) deferCmd(w http.ResponseWriter, r *http.Request) {
 	var in outbox.Intent
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&in); err != nil || len(in.Argv) == 0 {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil || len(in.Argv) == 0 {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -202,7 +216,7 @@ func inside(root, p string) (string, bool) {
 // call changed which files.
 func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 	var p agents.HookPayload
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&p); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&p); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -287,7 +301,7 @@ type Exec struct {
 
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	var e Exec
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&e); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&e); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

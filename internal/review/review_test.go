@@ -197,3 +197,24 @@ func TestReport(t *testing.T) {
 		}
 	}
 }
+
+// Denials the log kept out are counted in review, last in attention.
+func TestReportDroppedDenials(t *testing.T) {
+	s := fakeSession(t)
+	effs := []effects.Effect{
+		{Kind: "net.egress", Target: "x:443", Verdict: "deny"},
+		{Kind: effects.Dropped, Target: "net.egress", Reason: "5 net.egress denials not logged: more than 50 a second"},
+		{Kind: "tool.call", Target: "Bash: rm", Verdict: "deny", Reason: "no-rm"},
+		{Kind: effects.Dropped, Target: "net.egress", Reason: "7 net.egress denials not logged: more than 50 a second"},
+	}
+	r := BuildReport(s, nil, effs, nil, nil)
+	last := r.Attention[len(r.Attention)-1]
+	if last.What != "log" || last.Target != "net.egress" || !strings.HasPrefix(last.Why, "12 denials not logged") {
+		t.Errorf("attention %+v", r.Attention)
+	}
+	var b strings.Builder
+	Render(&b, s, nil, effs, nil, nil)
+	if !strings.Contains(b.String(), "Not logged 12 denials, past 50 a second of a kind: net.egress ×12") {
+		t.Errorf("review:\n%s", b.String())
+	}
+}

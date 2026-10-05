@@ -889,3 +889,35 @@ func TestForwardOnStoppedFlowCloses(t *testing.T) {
 		}
 	}
 }
+
+// deadlines is a ResponseWriter that records the write deadlines set
+// on it through a ResponseController.
+type deadlines struct {
+	*httptest.ResponseRecorder
+	set []time.Time
+}
+
+func (d *deadlines) SetWriteDeadline(t time.Time) error { d.set = append(d.set, t); return nil }
+
+// The proxy's own answers, which have no flow to close them, are
+// written within AnswerWrite; a request starts with no deadline.
+func TestAnswerHasWriteDeadline(t *testing.T) {
+	log, _ := newLog(t)
+	p := New(Allowlist{"api.anthropic.com"}, log)
+	for _, target := range []string{"http://paste.example.net/", "http://api.anthropic.com:1/", "http://[::1/"} {
+		w := &deadlines{ResponseRecorder: httptest.NewRecorder()}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://x/", nil)
+		r.URL, _ = url.Parse(target)
+		if r.URL == nil {
+			r.URL = &url.URL{Scheme: "http", Host: "[::1"}
+		}
+		before := time.Now()
+		p.ServeHTTP(w, r)
+		if w.Code < 400 {
+			t.Fatalf("%s: %d", target, w.Code)
+		}
+		if len(w.set) != 2 || !w.set[0].IsZero() || w.set[1].Before(before) || w.set[1].After(time.Now().Add(AnswerWrite)) {
+			t.Errorf("%s: deadlines %v", target, w.set)
+		}
+	}
+}

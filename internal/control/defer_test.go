@@ -104,3 +104,15 @@ func TestJudgeDeferred(t *testing.T) {
 		t.Fatalf("a publish by full path is not deferred, so it is denied: %+v", d)
 	}
 }
+
+// An intent's body is read up to maxBody: one larger is refused, not
+// held in the host's memory.
+func TestIntentBodyBounded(t *testing.T) {
+	s := deferServer(t, "")
+	big := `{"kind":"` + outbox.KindPush + `","argv":["git","push","origin","` + strings.Repeat("a", maxBody) + `"]}`
+	w := httptest.NewRecorder()
+	s.intent(w, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/intent", strings.NewReader(big)))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("%d %s", w.Code, w.Body.String())
+	}
+}

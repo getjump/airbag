@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -48,6 +49,44 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 type Log struct {
 	mu sync.Mutex
 	db *sql.DB
+	// denials meter the deny entries of each kind (Add).
+	denials map[string]*meter
+	now     func() time.Time
+}
+
+// The agent decides how many refusals it provokes, and each is a row on
+// the host's disk. Past a burst of denyBurst, the deny entries of one
+// kind are written at most denyRate a second; those not written are
+// counted, and the count goes in as a log.dropped entry before that
+// kind's next written one, or when the log closes. Every other entry is
+// written: allowed ones are what the agent did.
+const (
+	denyBurst = 1000
+	denyRate  = 50
+	// maxMetered kinds have a meter each; the rest share one.
+	maxMetered = 64
+)
+
+// Dropped is the kind of the entry that counts the deny entries a meter
+// kept out of the log; its target is their kind.
+const Dropped = "log.dropped"
+
+type meter struct {
+	tokens  float64
+	last    time.Time
+	dropped int
+}
+
+// take reports whether one more entry may be written at t.
+func (m *meter) take(t time.Time) bool {
+	m.tokens = min(denyBurst, m.tokens+t.Sub(m.last).Seconds()*denyRate)
+	m.last = t
+	if m.tokens < 1 {
+		m.dropped++
+		return false
+	}
+	m.tokens--
+	return true
 }
 
 func Open(path string) (*Log, error) {
@@ -60,26 +99,113 @@ func Open(path string) (*Log, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Log{db: db}, nil
+	return &Log{db: db, denials: map[string]*meter{}, now: time.Now}, nil
 }
 
-func (l *Log) Add(e Effect) {
-	if e.Time.IsZero() {
-		e.Time = time.Now()
+// Add writes e, unless it is a deny entry past its kind's rate.
+func (l *Log) Add(e Effect) { l.AddAll([]Effect{e}) }
+
+// AddAll writes es in one transaction: a batch costs one sync to disk,
+// not one each.
+func (l *Log) AddAll(es []Effect) {
+	if len(es) == 0 {
+		return
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	tx, err := l.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return
+	}
+	for _, e := range es {
+		l.add(tx, e)
+	}
+	_ = tx.Commit()
+}
+
+// add writes e through tx, with the count of the entries of its kind
+// that were not, if any. l.mu is held.
+func (l *Log) add(tx *sql.Tx, e Effect) {
+	now := l.now()
+	if e.Time.IsZero() {
+		e.Time = now
+	}
+	if e.Verdict == "deny" {
+		key := e.Kind
+		if _, ok := l.denials[key]; !ok && len(l.denials) >= maxMetered {
+			key = ""
+		}
+		m := l.denials[key]
+		if m == nil {
+			m = &meter{tokens: denyBurst, last: now}
+			l.denials[key] = m
+		}
+		if !m.take(now) {
+			return
+		}
+		if m.dropped > 0 {
+			insert(tx, dropped(key, m.dropped, now))
+			m.dropped = 0
+		}
+	}
+	insert(tx, e)
+}
+
+func dropped(kind string, n int, t time.Time) Effect {
+	what := kind
+	if what == "" {
+		what = "other kinds'"
+	}
+	return Effect{Time: t, Kind: Dropped, Target: kind,
+		Reason: fmt.Sprintf("%d %s denials not logged: more than %d a second", n, what, denyRate)}
+}
+
+// DroppedCount is how many deny entries a Dropped entry counts.
+func DroppedCount(e Effect) int {
+	var n int
+	if e.Kind == Dropped {
+		_, _ = fmt.Sscanf(e.Reason, "%d ", &n)
+	}
+	return n
+}
+
+// DenyRate is how many deny entries of a kind a second the log keeps
+// past its burst.
+const DenyRate = denyRate
+
+func insert(tx *sql.Tx, e Effect) {
 	pred := []byte("[]")
 	if e.Predict != nil {
 		if b, err := json.Marshal(e.Predict); err == nil {
 			pred = b
 		}
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	_, _ = l.db.ExecContext(context.Background(), `INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
+	_, _ = tx.ExecContext(context.Background(), `INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
 		e.Time.UTC().Format(time.RFC3339Nano), e.Kind, e.Target, e.Verdict, e.Reason, string(pred))
 }
 
-func (l *Log) Close() error { return l.db.Close() }
+// Close writes the counts of the deny entries still held back, then
+// closes the database.
+func (l *Log) Close() error {
+	l.mu.Lock()
+	var es []Effect
+	for kind, m := range l.denials {
+		if m.dropped > 0 {
+			es = append(es, dropped(kind, m.dropped, l.now()))
+			m.dropped = 0
+		}
+	}
+	if len(es) > 0 {
+		if tx, err := l.db.BeginTx(context.Background(), nil); err == nil {
+			for _, e := range es {
+				insert(tx, e)
+			}
+			_ = tx.Commit()
+		}
+	}
+	l.mu.Unlock()
+	return l.db.Close()
+}
 
 // Read returns all effects in order. It opens the database read-only,
 // so it works while the session is still running.

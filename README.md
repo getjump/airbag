@@ -239,7 +239,7 @@ Outbox     1
 ```
 
 `airbag review --attention` prints only what needs a decision: secret reads, flagged
-changes, many deletions, waiting pushes, blocked calls. `airbag review --json` prints
+changes, many deletions, waiting pushes, blocked calls, refusals past the log's rate. `airbag review --json` prints
 the whole review as data for editors and CI, with a versioned schema
 (`airbag.review/v1`; fields are only added within a version).
 
@@ -498,10 +498,13 @@ The proxy, the forwards and the control socket run in airbag's process on the
 host and parse what the agent sends. airbag closes the connections there that
 stop carrying data (a request header must arrive within 30 seconds at the
 proxy and 10 at the control socket; the other bounds are
-[above](#what-the-agent-gets)) and caps the tunnels, the forwarded connections
-and the connections to the proxy a session holds at once. A connection that
-keeps moving bytes stays open as long as it does, and bandwidth and the rate of
-new connections are not limited.
+[above](#what-the-agent-gets)), and a refusal the agent does not read within 30
+seconds closes its connection. airbag caps the tunnels, the forwarded connections
+and the connections to the proxy and to the control socket a session holds at
+once. Each refusal is a row in the effect log on the host's disk: past a burst of
+1000, refusals of one kind are logged at most 50 a second, and review counts the
+rest. A connection that keeps moving bytes stays open as long as it does, and
+bandwidth and the rate of new connections are not limited.
 
 ## License
 
