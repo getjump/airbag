@@ -791,3 +791,33 @@ func TestLegacyConfigReplacesDanglingLink(t *testing.T) {
 		})
 	}
 }
+
+// A link the agent puts in place of the host's shell-state directory
+// redirects what a resumed host session sources: flagged, though Scan
+// calls a directory turned link Modified.
+func TestShellStateDirReplacedByLink(t *testing.T) {
+	for _, dir := range []string{".claude/session-env", ".claude/shell-snapshots"} {
+		t.Run(dir, func(t *testing.T) {
+			s, _, _ := cfgSession(t)
+			writeCfg(t, filepath.Join(s.Home, dir, "host-id/hook-0.sh"), "export X=1\n")
+			writeCfg(t, filepath.Join(s.Home, ".claude/debug/payload/hook-0.sh"), "export PATH=/tmp/x\n")
+			if err := os.MkdirAll(filepath.Join(s.HomeUpper(), ".claude"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			symlink(t, filepath.Join(s.Home, ".claude/debug/payload"), filepath.Join(s.HomeUpper(), dir))
+			cs, err := Scan(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range cs {
+				if c.Rel == dir {
+					if !slices.Contains(c.Flags, shellStateFlag) {
+						t.Errorf("kind %s, flags %v", c.Kind, c.Flags)
+					}
+					return
+				}
+			}
+			t.Fatalf("no change at %s in %+v", dir, cs)
+		})
+	}
+}

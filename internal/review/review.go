@@ -255,13 +255,19 @@ func classify(s *session.Session, cs []Change) {
 			// or changes trust, unknown keys listed plainly, and benign
 			// counters with no flag, so they need no decision.
 			c.Flags = append(c.Flags, configFlags(*c)...)
-			if slices.ContainsFunc(names, func(n string) bool { return touchesHostShellState(s.Home, n, c.Kind) }) {
+			// A file or link in place of a directory takes what was in it
+			// away, as a replacement does, though Scan says Modified.
+			kind := c.Kind
+			if kind == Modified && !c.IsDir() {
+				kind = Replaced
+			}
+			if slices.ContainsFunc(names, func(n string) bool { return touchesHostShellState(s.Home, n, kind) }) {
 				c.Flags = append(c.Flags, "persist", shellStateFlag)
 			}
 			// Project memory is loaded into later sessions; a link where a
 			// directory above it is points it at whatever the link names.
 			if slices.ContainsFunc(names, func(n string) bool {
-				return agentMemory(n) || (c.Kind == Deleted || c.Kind == Replaced) && holdsMemory(c.Path, n) ||
+				return agentMemory(n) || (kind == Deleted || kind == Replaced) && holdsMemory(c.Path, n) ||
 					c.Type == fs.ModeSymlink && aboveMemory(n)
 			}) {
 				c.Flags = append(c.Flags, "agent instructions")
