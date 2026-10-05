@@ -867,3 +867,25 @@ func TestForwardUnreadHeadersAreBounded(t *testing.T) {
 	}
 	settle(t, g0, fd0, 0, 1, 5*time.Second)
 }
+
+// A forward whose flow has stopped before it begins answers as the
+// connection's last: a body's read deadline may already be set.
+func TestForwardOnStoppedFlowCloses(t *testing.T) {
+	p := &Proxy{}
+	f := &flow{}
+	f.stop()
+	for _, body := range []io.Reader{strings.NewReader("ok"), nil} {
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "http://example.test/", body)
+		if body == nil {
+			r = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.test/", nil)
+		}
+		w := httptest.NewRecorder()
+		p.forward(w, r, "example.test", f)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status %d", w.Code)
+		}
+		if w.Header().Get("Connection") != "close" {
+			t.Fatalf("a body's forward on a stopped flow: headers %v", w.Header())
+		}
+	}
+}

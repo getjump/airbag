@@ -415,6 +415,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	if !f.hold(&closer{cancel}) {
+		w.Header().Set("Connection", "close") // an answer to a stopped flow, as below
 		http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
 		return
 	}
@@ -431,6 +432,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	if r.Body != nil && r.Body != http.NoBody {
 		body := &readStop{rc: http.NewResponseController(w), live: true}
 		if !f.hold(body) {
+			// The flow stopped first, and hold fired body already.
+			w.Header().Set("Connection", "close")
 			http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
 			return
 		}
