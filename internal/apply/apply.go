@@ -231,7 +231,12 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 		for _, c := range picked {
 			if err := gen.apply(c); err != nil {
+				// The session is not applied yet: the journal can go as
+				// soon as everything is rolled back.
 				left, rerr := gen.rollback(o.Out)
+				if rerr == nil && left == 0 {
+					gen.remove(o.Out)
+				}
 				return applyFailed(c.Path, s.ID, err, left, rerr)
 			}
 		}

@@ -471,21 +471,8 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	if len(kept) == 0 {
 		// Nothing else is left, so what keeps those directories there
 		// is the user's, and there is no later rollback to try again.
-		// Renamed first to a name the listings pass by: a removal cut
-		// short leaves no numbered directory without its journal.
-		// A name of its own: one an earlier removal could not clear
-		// may still be there with this generation's number.
-		gone := fmt.Sprintf("%s.%d.gone", g.dir, time.Now().UnixNano())
-		if err := os.Rename(g.dir, gone); err != nil {
-			return left, err
-		}
-		// Out of the numbered ones, the rollback is done: what is left of
-		// it is no reason to fail one that finished, which would leave
-		// the session as applied and make a second rollback undo the
-		// apply before this one.
-		if err := removeTree(gone); err != nil {
-			fmt.Fprintf(out, "  warning: %s is left (%v); the next apply tries to remove it again\n", gone, err)
-		}
+		// The caller removes the journal (remove) once the session says
+		// so: until then it is what tells apply the rollback is not done.
 		return left, nil
 	}
 	// Keep what was left, with its previous versions, so nothing from
@@ -495,6 +482,24 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	}
 	g.Entries, g.Dirs, g.Complete, g.Partial, g.Stopped = kept, still, true, true, false
 	return left, g.save()
+}
+
+// remove takes a generation that is rolled back in full out of the
+// numbered ones, then deletes it. Called once the session's own state
+// says so: a crash before leaves the journal, so apply still refuses
+// and a rollback finishes it again. It is renamed first, to a name of
+// its own, so a removal cut short leaves no numbered directory without
+// a journal, nor a name an earlier one could not clear. What is left of
+// it is only warned about: the rollback is done.
+func (g *generation) remove(out io.Writer) {
+	gone := fmt.Sprintf("%s.%d.gone", g.dir, time.Now().UnixNano())
+	if err := os.Rename(g.dir, gone); err != nil {
+		fmt.Fprintf(out, "  warning: the finished rollback's journal %s is left (%v); airbag rollback removes it\n", g.dir, err)
+		return
+	}
+	if err := removeTree(gone); err != nil {
+		fmt.Fprintf(out, "  warning: %s is left (%v); the next apply tries to remove it again\n", gone, err)
+	}
 }
 
 // leftWhole returns the replaced directories, their previous versions
@@ -822,6 +827,9 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 		return err
 	}
 	if partial {
+		if left == 0 {
+			g.remove(out)
+		}
 		fmt.Fprintf(out, "Session %s: %d of the paths left by the last rollback are rolled back now; %d stay as they are.\n", s.ID, n-left, left)
 		return nil
 	}
@@ -831,6 +839,11 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	s.Baseline = time.Now()
 	if err := s.Save(); err != nil {
 		return err
+	}
+	// Only now: with the session still applied and the journal gone, a
+	// crash would leave apply to run the outbox on the rolled-back tree.
+	if left == 0 {
+		g.remove(out)
 	}
 	fmt.Fprintf(out, "Rolled back %d changes of session %s; they are back in the session (airbag review).\n", n-left, s.ID)
 	if left > 0 {

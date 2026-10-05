@@ -2570,3 +2570,32 @@ func TestRollbackCutShortAfterARestoreKeepsTheUsersFiles(t *testing.T) {
 		}
 	}
 }
+
+// The session says rolled back before the journal goes: killed while
+// the journal is removed, it is not left applied with no journal to
+// show the rollback, which would let apply run the outbox on the
+// rolled-back tree.
+func TestRollbackSavesTheSessionBeforeItsJournalGoes(t *testing.T) {
+	s, _, ws := modifiedApplied(t)
+	s.Status = session.StatusApplied // all of it applied: the outbox runs next
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	removeTree = func(string) error {
+		removeTree = os.RemoveAll
+		panic("killed") // as a crash: nothing after this runs
+	}
+	t.Cleanup(func() { removeTree = os.RemoveAll })
+	var out bytes.Buffer
+	func() {
+		defer func() { _ = recover() }()
+		_ = Rollback(s, nil, &out)
+		t.Fatal("the removal was not reached")
+	}()
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
+		t.Fatalf("not rolled back: %q", got)
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied {
+		t.Fatalf("killed while its journal went, the session is left applied: %+v %v", saved, err)
+	}
+}
