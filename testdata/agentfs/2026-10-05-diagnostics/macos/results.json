@@ -1,0 +1,70 @@
+{
+  "platform": "macOS-15.7.9-arm64-arm-64bit-Mach-O",
+  "architecture": "arm64",
+  "mounted": true,
+  "security_equivalence_tested": false,
+  "durability_equivalence_tested": false,
+  "version": "agentfs v0.6.4",
+  "cli_read_back": "hello",
+  "tool_calls_after_cli_read_write": 0,
+  "backend": "nfs",
+  "exec_overlay": {
+    "passed": false,
+    "exit_code": 1,
+    "seconds": 30.019076583000015
+  },
+  "mount_method": "mount-foreground",
+  "mount_and_workload_seconds": 1.0340092499999969,
+  "exit_code": 1,
+  "checks": {
+    "real_mount": {
+      "passed": true,
+      "cwd": "/private/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/airbag-agentfs-probe-8upjroy7/mnt",
+      "mount": [
+        "127.0.0.1:/ on /private/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/airbag-agentfs-probe-8upjroy7/mnt (nfs, nodev, nosuid, mounted by runner)"
+      ]
+    },
+    "cow": {
+      "passed": true,
+      "seconds": 0.008384874999990188
+    },
+    "create_fsync_stat_rename_read": {
+      "passed": true,
+      "seconds": 0.0029001249999964784
+    },
+    "hardlink_symlink": {
+      "passed": true,
+      "seconds": 0.005973458999960712
+    },
+    "mmap_read": {
+      "passed": true,
+      "seconds": 0.002859292000039204
+    },
+    "local_flock": {
+      "passed": true,
+      "seconds": 0.0013746669999932237
+    },
+    "readonly_object": {
+      "passed": false,
+      "error": "[Errno 13] Permission denied"
+    },
+    "git_commit_fsck": {
+      "passed": false,
+      "error": "Command '['git', 'add', 'seed.txt']' returned non-zero exit status 128.",
+      "stderr": "fatal: error when closing loose object file: Permission denied\n"
+    },
+    "diagnostic_fsync_before_chmod": {
+      "passed": true,
+      "seconds": 0.004308999999977914
+    },
+    "diagnostic_git_fsync": {
+      "passed": false,
+      "error": "Command '['git', '-c', 'core.fsync=loose-object', '-c', 'core.fsyncMethod=fsync', 'add', 'fixture.txt']' returned non-zero exit status 128.",
+      "stderr": "fatal: fsync error on '.git/objects/c2/tmp_obj_yaWhl7': Permission denied\n"
+    }
+  },
+  "host_base_unchanged": true,
+  "tool_calls_after_mounted_operations": 0,
+  "status": "failed",
+  "error": "mounted compatibility check failed; see checks and mount.log"
+}
