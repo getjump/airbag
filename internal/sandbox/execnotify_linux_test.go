@@ -253,6 +253,8 @@ func TestExecTargetInCallerRoot(t *testing.T) {
 		proc + "/fd/8":         jail + "/bin/tool",
 		proc + "/fd/9":         outside,
 		proc + "/fd/10":        jail + "x/bin/tool",
+		proc + "/fd/11":        jail + "/bin/tool (deleted)", // opened, then removed
+		proc + "/fd/12":        jail + "/sub (deleted)",
 	} {
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatal(err)
@@ -285,6 +287,16 @@ func TestExecTargetInCallerRoot(t *testing.T) {
 	}{{9, "tool"}, {9, ""}, {10, ""}} {
 		if got, err := execTarget(proc, c.dirfd, c.name); err == nil {
 			t.Errorf("execTarget(%d, %q) = %q outside the caller's root", c.dirfd, c.name, got)
+		}
+	}
+	// A removed file run through its descriptor, or a name in a removed
+	// directory: the path no longer names what runs.
+	for _, c := range []struct {
+		dirfd int
+		name  string
+	}{{11, ""}, {12, "relative"}} {
+		if got, err := execTarget(proc, c.dirfd, c.name); err == nil {
+			t.Errorf("execTarget(%d, %q) = %q for a removed file", c.dirfd, c.name, got)
 		}
 	}
 	if err := os.Remove(proc + "/cwd"); err != nil {

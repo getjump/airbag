@@ -398,6 +398,12 @@ func openExecRoot(dir string) (execRoot, error) {
 // inside turns a path as PID 1 sees it into the caller's path, or refuses
 // one outside the caller's root.
 func (r execRoot) inside(link string) (string, error) {
+	// The kernel marks a link to a removed file, or to a memfd, with
+	// " (deleted)": the path names no file now, or another one, so a rule
+	// on it would not hold for what runs.
+	if strings.HasSuffix(link, " (deleted)") {
+		return "", fmt.Errorf("exec path %q is a removed or anonymous file", link)
+	}
 	rel, err := filepath.Rel(r.path, link)
 	if err != nil || !filepath.IsAbs(link) || rel == ".." || strings.HasPrefix(rel, "../") {
 		return "", fmt.Errorf("exec path %q is outside the caller's root", link)

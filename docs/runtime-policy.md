@@ -109,7 +109,9 @@ through a `/proc` magic link (`/proc/self/exe`, `/dev/fd/N`) is checked as
 written, and so is one that does not resolve, which the kernel then fails.
 `execveat` handles directory descriptors and AT_EMPTY_PATH (including fexecve).
 A working directory or descriptor outside the caller's root, kept across
-`chroot`, has no path in it: that exec is denied as `proc.exec.invalid`.
+`chroot`, has no path in it: that exec is denied as `proc.exec.invalid`. So is
+one through a descriptor of a removed file or a memfd, whose path no longer names
+what runs.
 Notification IDs are validated before inspection and again before responding.
 
 Arguments are bounded to 256 entries, 4 KiB per string and 64 KiB in all. An
