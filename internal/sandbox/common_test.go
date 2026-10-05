@@ -172,3 +172,29 @@ func TestAddClaudeProjectStateIgnoresEmptyScaffolding(t *testing.T) {
 		t.Errorf("empty copied-up directories kept the project dir in the branch: %v", s.Passthrough)
 	}
 }
+
+// A memory file with another name keeps its project out of the
+// passthrough: written through that name, it would change for real.
+func TestHardLinkedIn(t *testing.T) {
+	home := t.TempDir()
+	proj, hole := ".claude/projects/x", ".claude/projects/x/memory"
+	if err := os.MkdirAll(filepath.Join(home, hole), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mem := filepath.Join(home, hole, "MEMORY.md")
+	if err := os.WriteFile(mem, []byte("notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := hardLinkedIn(home, proj, []string{hole}); got != "" {
+		t.Fatalf("no link: %q", got)
+	}
+	if got := hardLinkedIn(home, proj, []string{".claude/projects/y/memory"}); got != "" {
+		t.Fatalf("a hole of another project or a missing one: %q", got)
+	}
+	if err := os.Link(mem, filepath.Join(home, proj, "t.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if got := hardLinkedIn(home, proj, []string{hole}); got != hole+"/MEMORY.md" {
+		t.Fatalf("linked: %q", got)
+	}
+}

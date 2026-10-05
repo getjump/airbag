@@ -228,6 +228,17 @@ $("$AIRBAG" review)"
 "$AIRBAG" discard --yes >/dev/null
 rm "$proj/memory" && mv "$T/memory.bak" "$proj/memory"
 
+# A memory file with a second, hard-linked name on the transcript side:
+# the project directory stays in the branch, so a write through that
+# name does not reach the real memory.
+ln "$proj/memory/OLD.md" "$proj/hard.jsonl"
+before=$(cat "$proj/memory/OLD.md")
+"$AIRBAG" run -- sh -c "echo planted >> '$proj/hard.jsonl'" >"$T/run.out" 2>&1 || fail "run with a hard-linked memory file failed: $(cat "$T/run.out")"
+[ "$(cat "$proj/memory/OLD.md")" = "$before" ] || fail "a write through the hard link reached the real memory: $(cat "$proj/memory/OLD.md")"
+grep -q "has another hard link); it stays in the branch" "$T/run.out" || fail "no notice for the hard-linked memory file: $(cat "$T/run.out")"
+"$AIRBAG" discard --yes >/dev/null
+rm "$proj/hard.jsonl"
+
 # A ~/.claude that is a symlink out of $HOME: nothing under it passes
 # through, airbag creates nothing behind it, and the agent cannot write
 # the directory it points at.

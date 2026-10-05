@@ -156,6 +156,12 @@ func buildWorld(s *session.Session) error {
 				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (~/%s is a link); it stays in the branch\n", p, s.BranchHoles[i])
 				continue
 			}
+			// Nor can a file in it with another name: written through a
+			// name in the passed-through part, it would change for real.
+			if f := hardLinkedIn(realhome, p, s.BranchHoles); f != "" {
+				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (~/%s has another hard link); it stays in the branch\n", p, f)
+				continue
+			}
 			pass = append(pass, p)
 		}
 		// A branch hole (a passed-through project's memory/) must stay a

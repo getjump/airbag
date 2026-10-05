@@ -473,3 +473,48 @@ func noSymlinkSoFar(root, rel string) error {
 	}
 	return nil
 }
+
+// maxHoleEntries bounds the walk of a branch hole for hard links; a
+// larger hole counts as linked.
+const maxHoleEntries = 10000
+
+// hardLinkedIn returns the first file in one of holes below p (each
+// relative to root) that has more than one name, or "": written through
+// a name outside the hole, such a file would change for real. A hole
+// that cannot be walked in full counts as holding one.
+func hardLinkedIn(root, p string, holes []string) string {
+	for _, h := range holes {
+		if !strings.HasPrefix(h, p+"/") {
+			continue
+		}
+		found, n := "", 0
+		err := filepath.WalkDir(filepath.Join(root, h), func(q string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if n++; n > maxHoleEntries {
+				found = h
+				return filepath.SkipAll
+			}
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			var st unix.Stat_t
+			if err := unix.Lstat(q, &st); err != nil {
+				return err
+			}
+			if st.Nlink > 1 {
+				found, _ = filepath.Rel(root, q)
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if found != "" {
+			return found
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return h
+		}
+	}
+	return ""
+}
