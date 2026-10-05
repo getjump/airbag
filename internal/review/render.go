@@ -11,8 +11,10 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/outbox"
@@ -257,9 +259,19 @@ func list(w io.Writer, all []Change, prefix string) {
 
 func display(c Change) string {
 	if c.Layer == "home" {
-		return "~/" + c.Rel
+		return oneLine("~/" + c.Rel)
 	}
-	return c.Rel
+	return oneLine(c.Rel)
+}
+
+// oneLine quotes a name the agent chose (a path, a link target) when it
+// holds a character that is not printable: review keeps newlines, so a
+// raw one could add lines that pass for other changes.
+func oneLine(s string) string {
+	if strings.ContainsFunc(s, func(r rune) bool { return !unicode.IsPrint(r) }) {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 func flagged(c Change) bool { return len(withoutOutside(c.Flags)) > 0 }
@@ -466,10 +478,10 @@ func Diff(w io.Writer, c Change) {
 		}
 		fmt.Fprintf(w, "--- a/%s\n+++ b/%s\n", display(c), display(c))
 		if old != "" {
-			fmt.Fprintf(w, "-symlink -> %s\n", old)
+			fmt.Fprintf(w, "-symlink -> %s\n", oneLine(old))
 		}
 		if cur != "" {
-			fmt.Fprintf(w, "+symlink -> %s\n", cur)
+			fmt.Fprintf(w, "+symlink -> %s\n", oneLine(cur))
 		}
 		return
 	}

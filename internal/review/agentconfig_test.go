@@ -1109,3 +1109,23 @@ func TestWriteBackKeepsGroup(t *testing.T) {
 		t.Fatalf("group after write-back = %d (%v), want %d", st.Gid, err, other)
 	}
 }
+
+// A link target or a path the agent chose cannot add lines to the diff:
+// one with a newline is shown quoted on one line.
+func TestDiffQuotesMultilineNames(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "l")
+	if err := os.Symlink("x\n+ fake reviewed change", link); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	Diff(&b, Change{Layer: "ws", Rel: "a\n+++ b/other", Path: filepath.Join(dir, "absent"), Upper: link, Kind: Added, Type: fs.ModeSymlink})
+	for _, line := range strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n") {
+		if strings.HasPrefix(line, "+ fake") || strings.HasPrefix(line, "+++ b/other") {
+			t.Fatalf("an agent-chosen name added a diff line: %q", b.String())
+		}
+	}
+	if lines := strings.Count(b.String(), "\n"); lines != 3 {
+		t.Fatalf("diff has %d lines, want 3: %q", lines, b.String())
+	}
+}
