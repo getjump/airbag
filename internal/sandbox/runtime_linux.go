@@ -158,10 +158,13 @@ func runGVisor(s *session.Session, dir, root string) (int, error) {
 	for src, dst := range map[string]string{s.ProxySock(): "/run/airbag/proxy.sock", s.ControlSock(): "/run/airbag/ctl.sock"} {
 		mounts = append(mounts, map[string]any{"destination": dst, "type": "bind", "source": src, "options": []string{"bind", "ro", "nosuid", "nodev"}})
 	}
+	// Rootless runsc maps the host owner of the exported files to namespace UID
+	// zero. Use that virtual identity with no capabilities; it has no host-root
+	// identity and cannot gain one through no_new_privs or user namespaces.
 	caps := map[string][]string{"bounding": {}, "effective": {}, "inheritable": {}, "permitted": {}, "ambient": {}}
 	config := map[string]any{
 		"ociVersion": "1.0.2", "root": map[string]any{"path": root, "readonly": true},
-		"process": map[string]any{"terminal": false, "user": map[string]int{"uid": s.UID, "gid": s.GID}, "args": []string{"/run/airbag/bin/airbag", GuestArg}, "env": []string{"PATH=/run/airbag/bin:/usr/bin:/bin"}, "cwd": "/", "noNewPrivileges": true, "capabilities": caps},
+		"process": map[string]any{"terminal": false, "user": map[string]int{"uid": 0, "gid": 0}, "args": []string{"/run/airbag/bin/airbag", GuestArg}, "env": []string{"PATH=/run/airbag/bin:/usr/bin:/bin"}, "cwd": "/", "noNewPrivileges": true, "capabilities": caps},
 		"mounts":  mounts,
 		"linux": map[string]any{"namespaces": []map[string]string{{"type": "pid"}, {"type": "ipc"}, {"type": "uts"}, {"type": "mount"}, {"type": "network"}},
 			"devices": []map[string]any{

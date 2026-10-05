@@ -11,6 +11,7 @@ import ssl
 import subprocess
 import threading
 import time
+import traceback
 
 
 def main():
@@ -65,9 +66,10 @@ def main():
             (work / 'seed.txt').write_text('original\n')
             (work / 'removed.txt').write_text('original\n')
             (work / 'airbag.yaml').write_text('defer:\n  - publisher send\n')
-            (home / '.config/airbag/airbag.yaml').write_text('''credentials:
+            port = server.server_port
+            (home / '.config/airbag/airbag.yaml').write_text(f'''credentials:
   - name: check
-    hosts: [127.0.0.1]
+    hosts: [127.0.0.1:{port}]
     source: env:BOUND_SOURCE_TOKEN
     env: [CHECK_TOKEN]
 rules:
@@ -75,7 +77,6 @@ rules:
     when: effect.kind == "net.connect" && effect.target == "localhost"
     verdict: deny
 ''')
-            port = server.server_port
             (root / 'check.json').write_text(json.dumps({
                 'Canary': str(canary), 'Original': str(work), 'Address': f'{host_ip}:{port}',
                 'TLSURL': f'https://127.0.0.1:{port}/', 'DeniedURL': f'http://localhost:{port}/'}))
@@ -94,53 +95,56 @@ rules:
                                       capture_output=True, text=True, timeout=timeout)
 
             row = {'backend': backend, 'status': 'failed'}
-            before = len(seen)
-            start = time.monotonic()
-            proc = call('run', *flags, '--', '/probe')
-            row['run_seconds'] = time.monotonic() - start
-            (case / 'run.log').write_text(proc.stdout + proc.stderr)
-            if proc.returncode:
-                row['error'] = f'run exited {proc.returncode}; see run.log'
-                rows.append(row)
-                continue
-            checks = [json.loads(x.split(' ', 1)[1]) for x in proc.stdout.splitlines()
-                      if x.startswith('RUNTIME_CHECK ')]
-            assert len(checks) == 1 and all(checks[0].values())
-            row['checks'] = checks[0]
-            row['cold_build_seconds'] = float(next(x.split()[1] for x in proc.stdout.splitlines()
-                                                  if x.startswith('BUILD_SECONDS ')))
-            metas = list(sessions.glob('s-*/meta.json'))
-            assert len(metas) == 1
-            sid = json.loads(metas[0].read_text())['id']
-            assert (work / 'seed.txt').read_text() == 'original\n'
-            assert not (work / 'result.txt').exists() and not (work / 'escaped').exists()
-            review = call('review', sid, '--json')
-            (case / 'review.json').write_text(review.stdout)
-            assert review.returncode == 0 and 'result.txt' in review.stdout and 'publisher' in review.stdout
-            effects = call('log', sid)
-            (case / 'effects.log').write_text(effects.stdout)
-            assert 'runtime-deny-localhost' in effects.stdout
-            assert 'benign-runtime-bound-token' not in effects.stdout
-            # Resume cannot silently change provider or downgrade the saved requirement.
-            meta_before = metas[0].read_bytes()
-            downgrade = call('run', '--session=' + sid, '--', 'true')
-            assert downgrade.returncode != 0 and metas[0].read_bytes() == meta_before
-            resume = call('run', *flags, '--session=' + sid, '--', '/probe', 'resume')
-            (case / 'resume.log').write_text(resume.stdout + resume.stderr)
-            assert resume.returncode == 0
-            assert len(seen) - before == 2
-            # Apply only files; do not execute the deliberately nonexistent publisher.
-            applied = call('apply', sid, '--yes', '--only=seed.txt,result.txt,main.go,built,removed.txt')
-            (case / 'apply.log').write_text(applied.stdout + applied.stderr)
-            assert applied.returncode == 0
-            assert (work / 'seed.txt').read_text() == 'changed in guest\n'
-            assert (work / 'result.txt').read_text() == 'reviewable output\n'
-            assert not (work / 'removed.txt').exists()
-            row.update(status='passed', host_source_unchanged_before_apply=True,
-                       resume_passed=True, explicit_apply_passed=True,
-                       host_observed_credential_requests=len(seen) - before)
             rows.append(row)
-            print(json.dumps(row), flush=True)
+            try:
+                before = len(seen)
+                start = time.monotonic()
+                proc = call('run', *flags, '--', '/probe')
+                row['run_seconds'] = time.monotonic() - start
+                (case / 'run.log').write_text(proc.stdout + proc.stderr)
+                if proc.returncode:
+                    row['error'] = f'run exited {proc.returncode}; see run.log'
+                    continue
+                checks = [json.loads(x.split(' ', 1)[1]) for x in proc.stdout.splitlines()
+                          if x.startswith('RUNTIME_CHECK ')]
+                assert len(checks) == 1 and all(checks[0].values())
+                row['checks'] = checks[0]
+                row['cold_build_seconds'] = float(next(x.split()[1] for x in proc.stdout.splitlines()
+                                                      if x.startswith('BUILD_SECONDS ')))
+                metas = list(sessions.glob('s-*/meta.json'))
+                assert len(metas) == 1
+                sid = json.loads(metas[0].read_text())['id']
+                assert (work / 'seed.txt').read_text() == 'original\n'
+                assert not (work / 'result.txt').exists() and not (work / 'escaped').exists()
+                review = call('review', sid, '--json')
+                (case / 'review.json').write_text(review.stdout)
+                assert review.returncode == 0 and 'result.txt' in review.stdout and 'publisher' in review.stdout
+                effects = call('log', sid)
+                (case / 'effects.log').write_text(effects.stdout)
+                assert 'runtime-deny-localhost' in effects.stdout
+                assert 'benign-runtime-bound-token' not in effects.stdout
+                # Resume cannot silently change provider or downgrade the saved requirement.
+                meta_before = metas[0].read_bytes()
+                downgrade = call('run', '--session=' + sid, '--', 'true')
+                assert downgrade.returncode != 0 and metas[0].read_bytes() == meta_before
+                resume = call('run', *flags, '--session=' + sid, '--', '/probe', 'resume')
+                (case / 'resume.log').write_text(resume.stdout + resume.stderr)
+                assert resume.returncode == 0
+                assert len(seen) - before == 2
+                # Apply only files; do not execute the deliberately nonexistent publisher.
+                applied = call('apply', sid, '--yes', '--only=seed.txt,result.txt,main.go,built,removed.txt')
+                (case / 'apply.log').write_text(applied.stdout + applied.stderr)
+                assert applied.returncode == 0
+                assert (work / 'seed.txt').read_text() == 'changed in guest\n'
+                assert (work / 'result.txt').read_text() == 'reviewable output\n'
+                assert not (work / 'removed.txt').exists()
+                row.update(status='passed', host_source_unchanged_before_apply=True,
+                           resume_passed=True, explicit_apply_passed=True,
+                           host_observed_credential_requests=len(seen) - before)
+                print(json.dumps(row), flush=True)
+            except (OSError, AssertionError, RuntimeError, subprocess.SubprocessError) as error:
+                row['error'] = str(error) or type(error).__name__
+                (case / 'error.log').write_text(traceback.format_exc())
     finally:
         server.shutdown()
         server.server_close()

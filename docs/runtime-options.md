@@ -43,7 +43,8 @@ prediction; this does not claim syscall process audit.
 For gVisor, `--network=none` provides only sandbox loopback. The image receives
 exactly two host Unix sockets: the proxy and policy control channel. The helper
 bridges sandbox HTTP proxy traffic to its scoped socket. Rootfs is readonly;
-workspace and HOME/tmp are the only mutable views. Agent capabilities are empty,
+workspace and HOME/tmp are the only mutable views. The rootless guest uses virtual UID zero (mapped to the host user) so private
+files retain access permissions. This grants no host root identity. Agent capabilities are empty,
 no_new_privs is enabled and user namespace creation is denied.
 
 Firecracker has no NIC. Guest-to-host vsock ports expose proxy, control and a
