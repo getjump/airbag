@@ -87,6 +87,7 @@ func (p *Proxy) limits() Limits {
 type flow struct {
 	host, target string // for Cut and its log
 	idle, drain  time.Duration
+	now          func() time.Time // the clock quiet is measured by
 	start        time.Time
 	last         atomic.Int64 // time since start when a byte last moved
 
@@ -97,8 +98,13 @@ type flow struct {
 	timer   *time.Timer
 }
 
-func newFlow(idle, drain time.Duration) *flow {
-	f := &flow{idle: idle, drain: drain, start: time.Now(), conns: map[io.Closer]bool{}}
+// newFlow makes a flow that measures quiet by now, the real clock when
+// now is nil.
+func newFlow(idle, drain time.Duration, now func() time.Time) *flow {
+	if now == nil {
+		now = time.Now
+	}
+	f := &flow{idle: idle, drain: drain, now: now, start: now(), conns: map[io.Closer]bool{}}
 	f.mu.Lock() // check waits until f.timer is set
 	if idle > 0 {
 		f.timer = time.AfterFunc(idle, f.check)
@@ -108,7 +114,7 @@ func newFlow(idle, drain time.Duration) *flow {
 }
 
 // touch records that a byte moved.
-func (f *flow) touch() { f.last.Store(int64(time.Since(f.start))) }
+func (f *flow) touch() { f.last.Store(int64(f.now().Sub(f.start))) }
 
 // limit is how long the flow may stay quiet now; 0 is no limit.
 func (f *flow) limit() time.Duration {
@@ -130,7 +136,7 @@ func (f *flow) check() {
 		f.mu.Unlock()
 		return
 	}
-	if quiet := time.Since(f.start) - time.Duration(f.last.Load()); quiet < lim {
+	if quiet := f.now().Sub(f.start) - time.Duration(f.last.Load()); quiet < lim {
 		f.timer.Reset(lim - quiet)
 		f.mu.Unlock()
 		return
@@ -336,7 +342,7 @@ func (f *flow) pipe(a net.Conn, ar io.Reader, b net.Conn) {
 // sooner when no byte has moved for idle (0: no limit), or, once one
 // side has finished sending, when the other has been quiet for drain.
 func Relay(a, b net.Conn, idle, drain time.Duration) {
-	newFlow(idle, drain).pipe(a, a, b)
+	newFlow(idle, drain, nil).pipe(a, a, b)
 }
 
 // watchedConn marks its flow active on each byte read or written, and

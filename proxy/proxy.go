@@ -109,6 +109,9 @@ type Proxy struct {
 	// admitting runs as admit starts, when set: a test acts there, after
 	// a connection's checks and before it is registered.
 	admitting func()
+	// now is the clock flows measure quiet by, when set: a test's, which
+	// moves when the test sees bytes arrive, not as a busy runner pauses.
+	now func() time.Time
 }
 
 // admit registers a connection the agent opens through the proxy,
@@ -134,7 +137,7 @@ func (p *Proxy) admit(w http.ResponseWriter, host, target string) (f *flow, done
 		answer(w, "airbag: this session has "+strconv.Itoa(n)+" connections open through the proxy, the most it may; close some and retry", http.StatusServiceUnavailable)
 		return nil, nil
 	}
-	f = newFlow(lim.Idle, lim.Drain)
+	f = newFlow(lim.Idle, lim.Drain, p.now)
 	f.host, f.target = host, target
 	p.flows[f] = true
 	p.mu.Unlock()
