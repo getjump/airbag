@@ -17,8 +17,10 @@ jobs:
     # deployment tags limited to v*. A job that names an environment that
     # does not exist yet creates it with no protection at all.
     # Immutable releases are a setting of their own (Settings > General >
-    # Releases), which this job's token cannot read: once it is on, the
-    # owner sets the repository variable RELEASES_IMMUTABLE to true.
+    # Releases), which this job's token cannot read: the endpoint needs
+    # admin read. The environment holds RELEASE_SETTINGS_TOKEN, a
+    # fine-grained token for this repository with Administration:
+    # read-only and nothing else, used only to read that setting.
     environment: release
     permissions:
       contents: write # create the draft release, upload its assets, publish it
@@ -26,13 +28,21 @@ jobs:
       attestations: write # store the build provenance
     steps:
       # Publishing the draft does not make it immutable; the setting does.
-      # Without it nothing is built, so no mutable release goes out.
+      # It is read now, before anything is built, so no mutable release
+      # goes out; verify checks the published release itself.
       - name: immutable releases are on
         env:
-          RELEASES_IMMUTABLE: ${{ vars.RELEASES_IMMUTABLE }}
+          GH_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          [ "$RELEASES_IMMUTABLE" = true ] || {
-            echo "::error::turn on immutable releases (Settings > General > Releases), then set the repository variable RELEASES_IMMUTABLE to true and run the release again (re-run this workflow, or delete the tag and push it again)"
+          [ -n "$GH_TOKEN" ] || {
+            echo "::error::add RELEASE_SETTINGS_TOKEN to the release environment: a fine-grained token for this repository with Administration: read-only"
+            exit 1
+          }
+          # 404 when the setting is off.
+          enabled=$(gh api "repos/$REPO/immutable-releases" --jq .enabled) || enabled=
+          [ "$enabled" = true ] || {
+            echo "::error::immutable releases are off for $REPO (or the token cannot read the setting); turn them on (Settings > General > Releases) and run the release again"
             exit 1
           }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

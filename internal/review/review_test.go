@@ -338,6 +338,7 @@ func TestReportNamesTrustLinks(t *testing.T) {
 	out := link("docs", "/etc/app")
 	up := link("parent", "../elsewhere")
 	inner := link("latest", "v1")
+	secret := link("notes.md", ".env")
 	abs := link("abs", filepath.Join(ws, "v2"))
 	gone := Change{Layer: "ws", Rel: "old", Path: filepath.Join(ws, "old"), Kind: Deleted, Type: fs.ModeSymlink}
 	why := func(cs []Change, id string) string {
@@ -351,6 +352,9 @@ func TestReportNamesTrustLinks(t *testing.T) {
 	}
 	if w := why([]Change{out, up, inner}, "i-1"); !strings.Contains(w, "airbag apply --trust-links") || !strings.Contains(w, "2 links") {
 		t.Errorf("the command's line does not name --trust-links for 2 links out: %s", w)
+	}
+	if w := why([]Change{secret}, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("a link to a secret file inside the workspace holds the command too: %s", w)
 	}
 	if w := why([]Change{out}, "i-2"); strings.Contains(w, "trust-links") {
 		t.Errorf("a push names --trust-links, which does not hold it: %s", w)

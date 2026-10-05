@@ -1651,6 +1651,11 @@ func TestApplyRefusesMovedRoot(t *testing.T) {
 	}
 	c := review.Change{Layer: "ws", Rel: "new.txt", Path: filepath.Join(ws, "new.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
 	elsewhere := moveRoot(t, ws)
+	// A file of the same name where the link leads: read as a conflict
+	// if the roots were not checked first.
+	if err := os.WriteFile(filepath.Join(elsewhere, "new.txt"), []byte("theirs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	box, err := outbox.Open(s.EffectsPath())
 	if err != nil {
 		t.Fatal(err)
@@ -1678,8 +1683,8 @@ func TestApplyRefusesMovedRoot(t *testing.T) {
 	if err := g.apply(c); err == nil || !strings.Contains(err.Error(), "leads to") {
 		t.Fatalf("the generation applied through a moved root: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(elsewhere, "new.txt")); err == nil {
-		t.Fatal("the change landed where the link leads")
+	if data, err := os.ReadFile(filepath.Join(elsewhere, "new.txt")); err != nil || string(data) != "theirs\n" {
+		t.Fatalf("the change landed where the link leads: %q %v", data, err)
 	}
 }
 
@@ -1870,6 +1875,11 @@ func TestHeldNeedsTheLayersRoot(t *testing.T) {
 	}
 	if err := r.held("ws", filepath.Join(t.TempDir(), "a/b"), "a/b"); err == nil {
 		t.Fatal("a path outside the layer's root passed")
+	}
+	for _, rel := range []string{"../x", ".", ""} {
+		if err := r.held("ws", filepath.Join(ws, rel), rel); err == nil {
+			t.Fatalf("a Rel of %q passed", rel)
+		}
 	}
 	if err := r.held("etc", "/etc/x", "x"); err == nil {
 		t.Fatal("a layer with no root passed")

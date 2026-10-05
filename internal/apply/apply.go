@@ -1008,7 +1008,7 @@ func (r roots) held(layer, path, rel string) error {
 	default:
 		return fmt.Errorf("%s: the session has no %q layer", path, layer)
 	}
-	if !filepath.IsLocal(filepath.FromSlash(rel)) || filepath.Join(ro.path, filepath.FromSlash(rel)) != filepath.Clean(path) {
+	if r := filepath.FromSlash(rel); !filepath.IsLocal(r) || r == "." || filepath.Join(ro.path, r) != filepath.Clean(path) {
 		return fmt.Errorf("%s is not %s in %s", path, rel, ro.path)
 	}
 	return ro.id.Check(ro.path)

@@ -102,7 +102,9 @@ type Meta struct {
 // resolved, and its inode, which tells it from another directory made at
 // the same path. The device number is left out: it changes for the same
 // directory when the filesystem is mounted again (an overlay or FUSE
-// mount, a WSL disk, a btrfs subvolume).
+// mount, a WSL disk, a btrfs subvolume). Another filesystem mounted at
+// the same path can have a root of the same inode; writes then still go
+// to the path the user named.
 type DirID struct {
 	Real string `json:"real"`
 	Ino  uint64 `json:"ino"`

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/steps"
 	"github.com/getjump/airbag/operation"
@@ -199,7 +200,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 		case outbox.Pending, string(operation.Approved):
 			why := "`" + outbox.Line(in.Argv) + "` waits for apply"
 			if in.Kind == outbox.KindCmd && out > 0 {
-				why += fmt.Sprintf("; %d links this session adds lead out of the workspace, and apply holds it while one does, unless it leads to an installed program (`airbag apply --trust-links` runs it anyway)", out)
+				why += fmt.Sprintf("; %d links this session adds lead out of the workspace or to a secret file, and apply holds it while one does, unless it leads to an installed program (`airbag apply --trust-links` runs it anyway)", out)
 			}
 			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: why})
 		case outbox.Unknown:
@@ -212,9 +213,10 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 }
 
 // linksOut counts the links cs adds whose target, as the agent wrote
-// it, is outside the workspace. Apply holds the session's deferred
-// commands while such a link is in the real files, unless it leads to an
-// installed program; a link review cannot read counts.
+// it, is outside the workspace or a secret file (notes.md -> .env).
+// Apply holds the session's deferred commands while such a link is in
+// the real files, unless it leads to an installed program; a link review
+// cannot read counts.
 func linksOut(s *session.Session, cs []Change) int {
 	in := func(p, dir string) bool {
 		if dir == "" {
@@ -237,7 +239,7 @@ func linksOut(s *session.Session, cs []Change) int {
 			t = filepath.Join(filepath.Dir(c.Path), t)
 		}
 		t = filepath.Clean(t)
-		if !in(t, s.Workspace) && !in(t, s.WorkspaceID.Real) {
+		if !in(t, s.Workspace) && !in(t, s.WorkspaceID.Real) || secretfs.IsSecret(strings.ToLower(filepath.Base(t))) {
 			n++
 		}
 	}
