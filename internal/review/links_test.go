@@ -497,3 +497,31 @@ func TestChangeAboveAliasTarget(t *testing.T) {
 		})
 	}
 }
+
+// A config linked to a file inside the workspace's .git is still the
+// config: git internals drop only the names of linked directories
+// above them.
+func TestConfigLinkedIntoWorkspaceGit(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	writeCfg(t, filepath.Join(ws, ".git/claude.json"), `{"numStartups":1}`)
+	symlink(t, filepath.Join(ws, ".git/claude.json"), filepath.Join(home, ".claude.json"))
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCfg(t, filepath.Join(s.WSUpper(), ".git/claude.json"), `{"numStartups":1,"mcpServers":{"x":{"command":"evil"}}}`)
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == ".git/claude.json" {
+			if !slices.Contains(c.Flags, "persist key(s): mcpServers") {
+				t.Errorf("flags %v", c.Flags)
+			}
+			return
+		}
+	}
+	t.Fatalf("no change in %+v", cs)
+}

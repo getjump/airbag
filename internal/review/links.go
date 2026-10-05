@@ -249,14 +249,15 @@ func listHome(rels []string) string {
 }
 
 // aliasRels returns the watched names a change at real path p stands
-// for, relative to $HOME and slash separated.
-func aliasRels(aliases []homeAlias, p string) []string {
+// for, relative to $HOME and slash separated; with exact, only those
+// linked to p itself, not to a directory above it.
+func aliasRels(aliases []homeAlias, p string, exact bool) []string {
 	var out []string
 	for _, a := range aliases {
 		switch {
 		case p == a.target:
 			out = append(out, a.link)
-		case strings.HasPrefix(p, a.target+string(filepath.Separator)):
+		case !exact && strings.HasPrefix(p, a.target+string(filepath.Separator)):
 			out = append(out, a.link+filepath.ToSlash(p[len(a.target):]))
 		}
 	}

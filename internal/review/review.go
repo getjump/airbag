@@ -207,10 +207,11 @@ func classify(s *session.Session, cs []Change) {
 		if c.Layer == "home" {
 			names = append(names, rel)
 		}
-		for _, a := range aliasRels(aliases, c.Path) {
-			if c.Layer == "ws" && strings.HasPrefix(rel, ".git/") {
-				break // git's own files; the workspace table flags hooks and config
-			}
+		// Git's own files take no name from a linked directory above them
+		// (the workspace table flags hooks and config), only one a
+		// watched path links to exactly.
+		gitInternal := c.Layer == "ws" && strings.HasPrefix(rel, ".git/")
+		for _, a := range aliasRels(aliases, c.Path, gitInternal) {
 			if c.IsDir() {
 				a += "/"
 			}
