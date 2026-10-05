@@ -92,10 +92,18 @@ func guestSetup(c guestConfig, vm bool) error {
 		if os.Getpid() != 1 {
 			return fmt.Errorf("microVM guest must be PID 1")
 		}
-		for _, m := range []struct{ source, target, kind string }{{"devtmpfs", "/dev", "devtmpfs"}, {"proc", "/proc", "proc"}, {"sysfs", "/sys", "sysfs"}, {"tmpfs", "/tmp", "tmpfs"}, {"tmpfs", "/home/agent", "tmpfs"}} {
+		for _, m := range []struct{ source, target, kind string }{{"devtmpfs", "/dev", "devtmpfs"}, {"sysfs", "/sys", "sysfs"}, {"tmpfs", "/tmp", "tmpfs"}, {"tmpfs", "/home/agent", "tmpfs"}} {
 			if err := unix.Mount(m.source, m.target, m.kind, unix.MS_NOSUID, ""); err != nil && !errors.Is(err, unix.EBUSY) {
 				return err
 			}
+		}
+		// As native mounts it: hidepid=2 keeps PID 1 out of the agent's view.
+		procFlags := uintptr(unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC)
+		if err := unix.Mount("proc", "/proc", "proc", procFlags, "hidepid=2"); err != nil {
+			if err2 := unix.Mount("proc", "/proc", "proc", procFlags, ""); err2 != nil && !errors.Is(err2, unix.EBUSY) {
+				return err2
+			}
+			fmt.Fprintf(os.Stderr, "airbag: warning: /proc without hidepid (%v); other processes stay visible to the agent\n", err)
 		}
 		if err := unix.Mount("/dev/vdb", c.Workspace, "ext4", unix.MS_NOSUID|unix.MS_NODEV, ""); err != nil {
 			return err
