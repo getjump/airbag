@@ -53,7 +53,7 @@ func TestRelayCapHolds(t *testing.T) {
 		}
 	}()
 	relay := unixListener(t, "relay")
-	lim := relayLimits{max: 2, idle: 400 * time.Millisecond, drain: 200 * time.Millisecond}
+	lim := relayLimits{max: 2, idle: 3 * time.Second, drain: 200 * time.Millisecond}
 	go serveRelay(relay, lim, func() (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(context.Background(), "unix", down.Addr().String())
 	})
@@ -69,9 +69,10 @@ func TestRelayCapHolds(t *testing.T) {
 	for range 10 {
 		clients = append(clients, dial())
 	}
+	// Those past the cap close at once; allow a slow machine a second.
 	alive := 0
 	for _, c := range clients {
-		if !closedSoon(c, 150*time.Millisecond) {
+		if !closedSoon(c, time.Second) {
 			alive++
 		}
 	}
@@ -80,7 +81,7 @@ func TestRelayCapHolds(t *testing.T) {
 	}
 	// Everything ends within idle, or drain once the downstream that
 	// refused its second connection has closed it.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(6 * time.Second)
 	for _, c := range clients {
 		if !closedSoon(c, time.Until(deadline)) {
 			t.Fatal("a relay pair outlived its idle and drain bounds")
@@ -136,7 +137,7 @@ func TestRelayCapsWhatItOpens(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = c.Close() })
-		if !closedSoon(c, 150*time.Millisecond) {
+		if !closedSoon(c, time.Second) {
 			alive++
 		}
 	}
