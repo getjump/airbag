@@ -205,4 +205,34 @@ func TestOptionalResumeRefusesASecretInTheCopy(t *testing.T) {
 	if err := validateRuntimeResume(s, sandbox.NativeBackend()); err != nil {
 		t.Fatalf("native mediates the file and is refused: %v", err)
 	}
+	// A directory the check cannot read is refused too: the agent owns
+	// the copy and can make it readable again. Root reads it and finds
+	// the file.
+	if err := os.Remove(filepath.Join(s.CloneDir(), "app", ".env")); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(s.CloneDir(), "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "id_rsa"), []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	if err := resume(); err == nil {
+		t.Fatal("a directory the check cannot read is passed")
+	}
+	// Without a copy, run makes one from the checked workspace.
+	if err := os.Chmod(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(s.CloneDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := resume(); err != nil {
+		t.Fatalf("a session without a copy is refused: %v", err)
+	}
 }

@@ -83,7 +83,7 @@ user namespace; otherwise it stops the run.
 Preflight rejects workspace secret files (the native secret-read FUSE/taint
 contract is not integrated), explicit hide rules, HOME branching, TCP forwards
 and Nix daemon access. Resume also refuses a session whose copy holds a secret
-file that an earlier run wrote. The runtime policies (`--fs-policy`, `--exec-policy`,
+file that an earlier run wrote, or a directory the check cannot read. The runtime policies (`--fs-policy`, `--exec-policy`,
 `--runtime-audit=buffered`, `--fs-cache`, `--runtime-profile`;
 [runtime-policy.md](runtime-policy.md)) run in the native sandbox only: these
 backends refuse them, and refuse to resume a session that has them, rather than

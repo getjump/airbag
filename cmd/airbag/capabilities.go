@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 
 	"github.com/getjump/airbag/internal/sandbox"
 	"github.com/getjump/airbag/internal/secretfs"
@@ -71,7 +74,16 @@ func validateRuntimeResume(s *session.Session, b sandbox.Backend) error {
 	if s.FilePolicy || s.ExecPolicy || s.RuntimeProfile || s.FileCache != "" && s.FileCache != "off" || s.RuntimeAudit == "buffered" {
 		return fmt.Errorf("session %s runs with runtime policy options, which %s does not run; resume it on the native backend", s.ID, b.Name)
 	}
-	if files := secretfs.Find(s.CloneDir()); len(files) != 0 {
+	// No copy: run makes it again from the workspace, which
+	// PreflightRuntime checked.
+	if _, err := os.Lstat(s.CloneDir()); errors.Is(err, fs.ErrNotExist) { //nolint:gosec // the session's own directory under AIRBAG_HOME, the user's choice
+		return nil
+	}
+	files, err := secretfs.FindAll(s.CloneDir())
+	if err != nil {
+		return fmt.Errorf("session %s's copy cannot be checked for secret files, which %s cannot mediate: %w; review the session, then apply or discard it", s.ID, b.Name, err)
+	}
+	if len(files) != 0 {
 		return fmt.Errorf("session %s's copy holds a secret file (%s), which %s cannot mediate; review the session, then apply or discard it", s.ID, files[0], b.Name)
 	}
 	return nil

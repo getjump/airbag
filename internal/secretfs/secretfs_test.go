@@ -85,3 +85,33 @@ func TestFindThroughLinkedRoot(t *testing.T) {
 		t.Fatalf("Open through a link opened %d files", len(files))
 	}
 }
+
+// FindAll is for a tree the agent owns: a directory the walk cannot
+// read may hold a secret file the agent reads after a chmod, so it is an
+// error, where Find skips it.
+func TestFindAllRefusesWhatItCannotRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads every directory")
+	}
+	tree := t.TempDir()
+	locked := filepath.Join(tree, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, ".env"), []byte("K=v\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	if got := Find(tree); len(got) != 0 {
+		t.Fatalf("Find read a directory it cannot: %v", got)
+	}
+	if got, err := FindAll(tree); err == nil {
+		t.Fatalf("FindAll passed a directory it cannot read: %v", got)
+	}
+	if _, err := FindAll(filepath.Join(tree, "missing")); err == nil {
+		t.Fatal("FindAll passed a tree that is not there")
+	}
+}
