@@ -51,7 +51,7 @@ The agent doing what airbag says it cannot. With a default or documented
 configuration, an agent under `airbag run` that can:
 
 - change your files or `$HOME` before `airbag apply`, other than the agent
-  state the README says passes through, or run code on the host before you
+  state the docs say passes through, or run code on the host before you
   approve it;
 - read what airbag hides: credential files and variables, host sockets, a
   bound credential's real value, or airbag's own memory and environment;
@@ -63,10 +63,10 @@ configuration, an agent under `airbag run` that can:
 - get a `git push` past the outbox, or make `airbag apply` write something
   `airbag review` did not show;
 - push input into the terminal you return to;
-- make a syscall, or open a socket family or netlink protocol, that the README
-  says the seccomp filter refuses;
+- make a syscall, or open a socket family or netlink protocol, that the docs
+  say the seccomp filter refuses;
 - crash airbag's process on the host, or hold more there than the bounds the
-  README states, through the proxy, the forwards, the mirror or the control
+  docs state, through the proxy, the forwards, the mirror or the control
   socket.
 
 A way to change a release that reaches users (the binaries, `SHA256SUMS`,
@@ -78,17 +78,17 @@ The limits airbag documents are not vulnerabilities, unless they also break a
 promise the docs make elsewhere:
 
 - airbag is not a VM. The kernel is shared, so a kernel bug the sandbox can
-  reach is a kernel bug: report it upstream. A call the README says the filter
+  reach is a kernel bug: report it upstream. A call the docs say the filter
   refuses that gets through is in scope, above.
 - What the agent reads is sent to the model API. Its own file tools are not
   filtered, so a secret it reads can reach its model.
 - What the policy allows: an allowed host used to send data out, a bound token
   used on its hosts, `--allow`, `--pass-env`, `--nix-daemon`.
-- The rest of the README's [threat model](README.md#threat-model): the proxy
+- The rest of the [threat model](docs/threat-model.md): the proxy
   decides by the name the client asks for and does not see inside TLS, so a
   broad allowlist entry and domain fronting are ways out; bandwidth and the
   rate of new connections are not limited.
-- The gaps the README names: the two of the default mode that `--strict`
+- The gaps the README and docs/ name: the two of the default mode that `--strict`
   closes, and the one it leaves when airbag runs as root; a socket
   `core_pattern`; a `defer:` command called by its full path.
 - Command models are predictions. A script they read as `opaque` is not a
