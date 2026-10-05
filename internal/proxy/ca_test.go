@@ -1,8 +1,12 @@
 package proxy
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -12,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // The leaf cache stays within its bound however many names the agent
@@ -103,7 +108,7 @@ func TestCANameConstraintKinds(t *testing.T) {
 			if (err == nil) != want {
 				t.Errorf("CA for %v, leaf for %s: verify err %v, want ok=%v", c.hosts, host, err, want)
 			}
-			if err := verifyOpenSSL(t, ca, leaf, host); (err == nil) != want && !errors.Is(err, errNoOpenSSL) {
+			if err := verifyOpenSSL(t, ca, leaf, host, "sslserver"); (err == nil) != want && !errors.Is(err, errNoOpenSSL) {
 				t.Errorf("CA for %v, leaf for %s: openssl: %v, want ok=%v", c.hosts, host, err, want)
 			}
 		}
@@ -116,12 +121,47 @@ func TestCANameConstraintKinds(t *testing.T) {
 	}
 }
 
+// The session CA vouches for TLS servers only: a certificate its key
+// signs for another use (a TLS client) does not verify for that use.
+func TestCAServerAuthOnly(t *testing.T) {
+	ca, err := NewCA([]string{"api.github.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial(),
+		Subject:      pkix.Name{CommonName: "api.github.com"},
+		DNSNames:     []string{"api.github.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     ca.cert.NotAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key) // the key could sign any use
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM(ca.PEM)
+	cert, _ := x509.ParseCertificate(der)
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err == nil {
+		t.Error("a TLS client certificate signed by the session CA verified")
+	}
+	if err := verifyOpenSSL(t, ca, &tls.Certificate{Certificate: [][]byte{der}}, "api.github.com", "sslclient"); err == nil {
+		t.Error("openssl: a TLS client certificate signed by the session CA verified")
+	}
+}
+
 var errNoOpenSSL = errors.New("no openssl")
 
-// verifyOpenSSL checks leaf for host with the openssl command, when
-// there is one: OpenSSL also checks a leaf's common name against the
-// constraints, which Go does not.
-func verifyOpenSSL(t *testing.T, ca *CA, leaf *tls.Certificate, host string) error {
+// verifyOpenSSL checks leaf for host and purpose (sslserver, sslclient)
+// with the openssl command, when there is one: OpenSSL also checks a
+// leaf's common name against the constraints, which Go does not.
+func verifyOpenSSL(t *testing.T, ca *CA, leaf *tls.Certificate, host, purpose string) error {
 	t.Helper()
 	bin, err := exec.LookPath("openssl")
 	if err != nil {
@@ -135,7 +175,7 @@ func verifyOpenSSL(t *testing.T, ca *CA, leaf *tls.Certificate, host string) err
 	if net.ParseIP(host) != nil {
 		flag = "-verify_ip"
 	}
-	out, err := exec.CommandContext(t.Context(), bin, "verify", "-x509_strict", "-purpose", "sslserver", flag, host, "-CAfile", caFile, leafFile).CombinedOutput() //nolint:gosec // openssl on files this test wrote
+	out, err := exec.CommandContext(t.Context(), bin, "verify", "-x509_strict", "-purpose", purpose, flag, host, "-CAfile", caFile, leafFile).CombinedOutput() //nolint:gosec // openssl on files this test wrote
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}

@@ -316,7 +316,8 @@ TLS with a certificate authority made for the session: its key stays in
 airbag's memory, and its name constraints permit only those names (and the
 names under them) and no name of the other kind (no IP address when the hosts
 are names, no DNS name when they are addresses), so a verifier that checks
-constraints, as Go and OpenSSL do, accepts it for no other site. airbag
+constraints, as Go and OpenSSL do, accepts it for no other site. Its
+extended key usage is TLS server authentication only. airbag
 replaces the placeholder with the value in the request's
 headers (Basic credentials included) and query, checks the real host against this
 machine's roots, and replaces the value with the placeholder in the response, so a

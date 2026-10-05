@@ -29,7 +29,8 @@ import (
 // CA signs the certificates the proxy shows for the hosts it
 // intercepts. It is made for one session and lives in memory: the key
 // is never written anywhere. Name constraints limit it to the bound
-// hosts, so even its key could not vouch for any other site.
+// hosts, so even its key could not vouch for any other site, and its
+// extended key usage to TLS servers, so not for a client or for code.
 type CA struct {
 	cert *x509.Certificate
 	key  *ecdsa.PrivateKey
@@ -62,6 +63,7 @@ func NewCA(hosts []string) (*CA, error) {
 		NotBefore:                   time.Now().Add(-time.Hour),
 		NotAfter:                    time.Now().Add(30 * 24 * time.Hour),
 		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		ExtKeyUsage:                 []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid:       true,
 		IsCA:                        true,
 		MaxPathLenZero:              true,
