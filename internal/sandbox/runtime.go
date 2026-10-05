@@ -96,6 +96,9 @@ func PreflightRuntime(b Backend, c session.RuntimeConfig, workspace string, over
 	} else if c.Kernel != "" {
 		return c, fmt.Errorf("gvisor does not use --runtime-kernel")
 	}
+	if err := optionalHostReady(b.Name); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 

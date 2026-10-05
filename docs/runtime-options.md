@@ -65,7 +65,11 @@ and Nix daemon access. There is no runtime filesystem or exec-notify audit from
 the separate experimental policy PR. JIT token issuance/TTL, generic automatic
 kill budgets and Firecracker jailer integration remain separate work.
 
-This adapter supports noninteractive commands; PTY/resize/job control are not
+Preflight also checks static Airbag, socket path length and the microVM image tool.
+Agent managed hook configuration is installed into the readonly guest image,
+preserving existing Codex requirements.
+
+This adapter supports noninteractive commands and rejects terminal stdin; PTY/resize/job control are not
 provided. Each microVM run starts fresh HOME/tmp and exports only workspace;
 background processes are killed before export. On interruption/crash without
 export, the prior branch is retained and the run fails. Input files are copied,

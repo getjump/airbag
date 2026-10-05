@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"debug/elf"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/session"
+	"golang.org/x/sys/unix"
 )
 
 const guestConfigPath = "/run/airbag/config.json"
@@ -30,6 +33,35 @@ type guestConfig struct {
 	Workspace string   `json:"workspace"`
 	UID       int      `json:"uid"`
 	GID       int      `json:"gid"`
+}
+
+func optionalHostReady(backend string) error {
+	if _, err := unix.IoctlGetTermios(int(os.Stdin.Fd()), unix.TCGETS); err == nil {
+		return fmt.Errorf("%s currently supports noninteractive stdin only; use native for a terminal", backend)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	image, err := elf.Open(self)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = image.Close() }()
+	for _, program := range image.Progs {
+		if program.Type == elf.PT_INTERP {
+			return fmt.Errorf("optional runtimes require a static Airbag binary; build with CGO_ENABLED=0")
+		}
+	}
+	if backend == "microvm" {
+		if _, err := exec.LookPath("mkfs.ext4"); err != nil {
+			return fmt.Errorf("microvm requires mkfs.ext4: %w", err)
+		}
+	}
+	if len(session.Root()+"/s-abcdef/v.sock_4002") >= 108 {
+		return fmt.Errorf("optional runtime session root is too long for Unix sockets; choose a shorter AIRBAG_HOME")
+	}
+	return nil
 }
 
 func prepareRuntimeWorkspace(s *session.Session) error {
@@ -78,6 +110,19 @@ func runOptional(s *session.Session) (int, error) {
 	defer func() { _ = r.Close() }()
 	for _, path := range []string{"run/airbag/bin", "run/airbag/sockets", "dev", "proc", "sys", "tmp", "home/agent", s.CloneDir()[1:]} {
 		if err := r.MkdirAll(path, 0o755); err != nil {
+			return 1, err
+		}
+	}
+	for _, path := range []string{agents.ClaudeManagedSettingsDir[1:], filepath.Dir(agents.CodexRequirementsPath)[1:]} {
+		if err := r.MkdirAll(path, 0o755); err != nil {
+			return 1, err
+		}
+	}
+	if err := r.WriteFile(agents.ClaudeManagedSettingsDir[1:]+"/90-airbag.json", agents.ClaudeManagedSettings(), 0o444); err != nil {
+		return 1, err
+	}
+	if _, err := r.Stat(agents.CodexRequirementsPath[1:]); os.IsNotExist(err) {
+		if err := r.WriteFile(agents.CodexRequirementsPath[1:], agents.CodexRequirements(), 0o444); err != nil {
 			return 1, err
 		}
 	}
@@ -256,6 +301,12 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 		return 1, err
 	}
 	sock := filepath.Join(s.Dir, "v.sock")
+	// Firecracker does not unlink its listening socket on clean shutdown. The
+	// previous provider has exited before a stopped session can be resumed.
+	if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
+		return 1, err
+	}
+	defer func() { _ = os.Remove(sock) }()
 	var listeners []net.Listener
 	defer func() {
 		for _, l := range listeners {
