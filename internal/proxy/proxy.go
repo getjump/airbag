@@ -24,6 +24,7 @@ import (
 	"github.com/getjump/airbag/internal/creds"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
+	"github.com/getjump/airbag/internal/netcap"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/taint"
 )
@@ -105,7 +106,7 @@ func (p *Proxy) admit(w http.ResponseWriter, host, target string) (f *flow, done
 	if n := p.Limits.MaxFlows; n > 0 && len(p.flows) >= n {
 		p.mu.Unlock()
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "too many open connections"})
-		http.Error(w, "airbag: this session has "+strconv.Itoa(n)+" connections open through the proxy, the most it may; close some and retry", http.StatusServiceUnavailable)
+		answer(w, "airbag: this session has "+strconv.Itoa(n)+" connections open through the proxy, the most it may; close some and retry", http.StatusServiceUnavailable)
 		return nil, nil
 	}
 	f = newFlow(p.Limits.Idle, p.Limits.Drain)
@@ -122,7 +123,9 @@ func (p *Proxy) admit(w http.ResponseWriter, host, target string) (f *flow, done
 
 // Cut closes open connections to hosts outside keep. A tunnel opened
 // before the session read a secret would otherwise carry it out:
-// policy is checked when a connection opens, not on every byte.
+// policy is checked when a connection opens, not on every byte. The
+// read waits for Cut, so every connection is closed first and the log,
+// which other writers may hold up, is written after.
 func (p *Proxy) Cut(keep Allowlist, reason string) {
 	p.mu.Lock()
 	var cut []*flow
@@ -133,11 +136,13 @@ func (p *Proxy) Cut(keep Allowlist, reason string) {
 		}
 	}
 	p.mu.Unlock()
+	var logged []effects.Effect
 	for _, f := range cut {
 		if f.stop() { // not closed already as idle
-			p.Log.Add(effects.Effect{Kind: "net.egress", Target: f.target, Verdict: "cut", Reason: reason})
+			logged = append(logged, effects.Effect{Kind: "net.egress", Target: f.target, Verdict: "cut", Reason: reason})
 		}
 	}
+	_ = p.Log.AddAll(logged)
 }
 
 func New(allow Allowlist, log *effects.Log) *Proxy {
@@ -187,7 +192,7 @@ func (p *Proxy) Serve(l net.Listener) error {
 	// next one, is not a flow: past twice Limits.MaxFlows open at once,
 	// one more is closed.
 	if n := p.Limits.MaxFlows; n > 0 {
-		l = &capListener{Listener: l, max: 2 * int64(n)}
+		l = netcap.Limit(l, 2*n)
 	}
 	// A request's header must arrive within 30 s, and a connection
 	// waiting for its next request is closed after Limits.KeepAlive.
@@ -195,9 +200,21 @@ func (p *Proxy) Serve(l net.Listener) error {
 	return srv.Serve(l)
 }
 
+// AnswerWrite bounds the write of an answer the proxy gives itself (a
+// refusal, an error), which has no flow to close it: a client that
+// sends requests and reads none of the answers would otherwise hold the
+// connection in a blocked write.
+const AnswerWrite = 30 * time.Second
+
+// answer is http.Error within AnswerWrite.
+func answer(w http.ResponseWriter, msg string, code int) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(AnswerWrite))
+	http.Error(w, msg, code)
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The previous response on this connection may have left a write
-	// deadline (forward); this request starts without one.
+	// deadline (answer, forward); this request starts without one.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	host := r.URL.Hostname()
 	if r.Method == http.MethodConnect {
@@ -228,7 +245,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if why != "" {
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: clipTarget(r.Host), Verdict: "deny", Reason: why})
-		http.Error(w, "airbag: "+clipTarget(r.Host)+": "+why, http.StatusBadRequest)
+		answer(w, "airbag: "+clipTarget(r.Host)+": "+why, http.StatusBadRequest)
 		return
 	}
 	host = canon
@@ -251,11 +268,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !p.Allow.Allows(host) && (p.Gate == nil || !p.Gate.AllowsHost(host)) {
 		if Registries.Allows(host) {
 			p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "registry: use the mirror"})
-			http.Error(w, "airbag: "+host+" is reached through http://airbag.mirror; point the package manager at the mirror (airbag sets GOPROXY, npm_config_registry, PIP_INDEX_URL)", http.StatusForbidden)
+			answer(w, "airbag: "+host+" is reached through http://airbag.mirror; point the package manager at the mirror (airbag sets GOPROXY, npm_config_registry, PIP_INDEX_URL)", http.StatusForbidden)
 			return
 		}
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "host not in allowlist"})
-		http.Error(w, "airbag: egress to "+host+" denied by policy (host not in allowlist)", http.StatusForbidden)
+		answer(w, "airbag: egress to "+host+" denied by policy (host not in allowlist)", http.StatusForbidden)
 		return
 	}
 	if port == "" && r.Method != http.MethodConnect {
@@ -263,7 +280,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !slices.Contains(webPorts, port) && !p.Allow.AllowsPort(host, port) {
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "port not allowed"})
-		http.Error(w, "airbag: port "+port+" on "+host+" denied by policy (only 80 and 443 unless the allowlist names the port: --allow "+host+":"+port+")", http.StatusForbidden)
+		answer(w, "airbag: port "+port+" on "+host+" denied by policy (only 80 and 443 unless the allowlist names the port: --allow "+host+":"+port+")", http.StatusForbidden)
 		return
 	}
 	if p.refuseTainted(w, host, target) {
@@ -272,7 +289,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.Gate != nil {
 		if d, id := p.Gate.Check(policy.Input{Effect: models.Effect{Kind: "net.connect", Target: host, Detail: port}}); d.Verdict != policy.Allow {
 			p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: d.Verdict, Reason: d.Rule})
-			http.Error(w, policy.Explain(d, id), http.StatusForbidden)
+			answer(w, policy.Explain(d, id), http.StatusForbidden)
 			return
 		}
 	}
@@ -313,7 +330,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) refuseTainted(w http.ResponseWriter, host, target string) bool {
 	if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
 		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "secret-taint"})
-		http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted()+
+		answer(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted()+
 			"; only model APIs and cached packages stay reachable", http.StatusForbidden)
 		return true
 	}
@@ -327,7 +344,7 @@ func (p *Proxy) refuse(w http.ResponseWriter, target, host string, err error) bo
 		return false
 	}
 	p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "address: " + b.why})
-	http.Error(w, "airbag: "+host+" "+b.Error(), http.StatusForbidden)
+	answer(w, "airbag: "+host+" "+b.Error(), http.StatusForbidden)
 	return true
 }
 
@@ -336,17 +353,17 @@ func (p *Proxy) refuse(w http.ResponseWriter, target, host string, err error) bo
 func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string, f *flow) {
 	up, err := p.dial(r.Context(), f, r.Host, !p.Allow.explicitIP(host))
 	if errors.Is(err, errStopped) {
-		http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
+		answer(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
 		return
 	}
 	if err != nil {
 		if !p.refuse(w, r.Host, host, err) {
-			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway) //nolint:gocritic // the return follows the if
+			answer(w, "airbag: "+err.Error(), http.StatusBadGateway)
 		}
 		return
 	}
 	if !f.hold(up) {
-		http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
+		answer(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
 		return
 	}
 	hj, ok := w.(http.Hijacker)
@@ -416,7 +433,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	defer cancel()
 	if !f.hold(&closer{cancel}) {
 		w.Header().Set("Connection", "close") // an answer to a stopped flow, as below
-		http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
+		answer(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
 		return
 	}
 	// A client that stops sending its request body blocks the transport
@@ -434,7 +451,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 		if !f.hold(body) {
 			// The flow stopped first, and hold fired body already.
 			w.Header().Set("Connection", "close")
-			http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
+			answer(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
 			return
 		}
 		defer func() {
@@ -459,7 +476,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	pu, err := p.Upstream(out.URL)
 	if err != nil {
 		stopped()
-		http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway)
+		answer(w, "airbag: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	tr := &http.Transport{DialContext: f.dialer(p.dialContext(!p.Allow.explicitIP(host)))}
@@ -471,7 +488,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	if err != nil {
 		stopped()
 		if !p.refuse(w, r.Host, host, err) {
-			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway) //nolint:gocritic // the return follows the if
+			answer(w, "airbag: "+err.Error(), http.StatusBadGateway)
 		}
 		return
 	}
