@@ -86,12 +86,18 @@ type Proxy struct {
 	flows map[*flow]bool // open tunnels, intercepted connections and forwarded requests
 	// forbid vets the address a connection is about to use (guard.go).
 	forbid func(netip.Addr) string
+	// admitting runs as admit starts, when set: a test acts there, after
+	// a connection's checks and before it is registered.
+	admitting func()
 }
 
 // admit registers a connection the agent opens through the proxy,
 // until done is called. Past Limits.MaxFlows it is refused: it answers
 // 503, logs the refusal and returns a nil flow.
 func (p *Proxy) admit(w http.ResponseWriter, host, target string) (f *flow, done func()) {
+	if p.admitting != nil {
+		p.admitting()
+	}
 	p.mu.Lock()
 	if p.flows == nil {
 		p.flows = map[*flow]bool{}
@@ -251,10 +257,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "airbag: port "+port+" on "+host+" denied by policy (only 80 and 443 unless the allowlist names the port: --allow "+host+":"+port+")", http.StatusForbidden)
 		return
 	}
-	if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
-		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "secret-taint"})
-		http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted()+
-			"; only model APIs and cached packages stay reachable", http.StatusForbidden)
+	if p.refuseTainted(w, host, target) {
 		return
 	}
 	if p.Gate != nil {
@@ -269,6 +272,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer done()
+	// A secret read while this connection was checked: Cut has run
+	// already and did not see it. The label is set before Cut takes
+	// p.mu, and admit registered the flow under p.mu, so either Cut saw
+	// the flow or this sees the label.
+	if p.refuseTainted(w, host, target) {
+		return
+	}
 	p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "allow"})
 	// Talking to a host that is neither a model API nor a registry
 	// brings outside data into the session: label it untrusted, so a
@@ -287,6 +297,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.forward(w, r, host, f)
+}
+
+// refuseTainted refuses a connection to a host other than a model API
+// once the session has read a secret.
+func (p *Proxy) refuseTainted(w http.ResponseWriter, host, target string) bool {
+	if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
+		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "secret-taint"})
+		http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted()+
+			"; only model APIs and cached packages stay reachable", http.StatusForbidden)
+		return true
+	}
+	return false
 }
 
 // refuse answers a connection the address guard stopped.
