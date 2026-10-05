@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability (private)
+    url: https://github.com/getjump/airbag/security/advisories/new
+    about: A way for the agent to get past the sandbox, the proxy, the outbox or the secret hiding. SECURITY.md says what counts. Please do not open a public issue for it.
