@@ -219,10 +219,22 @@ func classify(s *session.Session, cs []Change) {
 				c.cfg, c.home = cf, s.Home
 			}
 		}
+		// A deletion, a replacement or a link above where a watched path
+		// really is (~/dotfiles, for ~/.bashrc -> ~/dotfiles/bashrc) takes
+		// that path with it or points it elsewhere: it changes the path
+		// as a whole.
+		if c.Kind == Deleted || c.Kind == Replaced || c.Type == fs.ModeSymlink {
+			if above := aliasesAbove(aliases, c.Path); len(above) > 0 && !(c.Layer == "ws" && strings.HasPrefix(rel, ".git/")) {
+				c.Flags = append(c.Flags, "persist", "holds where "+listHome(above)+" really is")
+				if slices.ContainsFunc(above, func(n string) bool { return agentMemory(n) || agentMemory(n+"/memory") }) {
+					c.Flags = append(c.Flags, "agent instructions")
+				}
+			}
+		}
 		persists := func(n string, t []persistence) bool {
 			return (persistReason(n, t) != "" || slices.Contains(persistNames, path.Base(n))) && !strings.HasSuffix(n, ".sample")
 		}
-		if persists(rel, table) || slices.ContainsFunc(names, func(n string) bool { return persists(n, persistHomeTable) }) {
+		if (persists(rel, table) || slices.ContainsFunc(names, func(n string) bool { return persists(n, persistHomeTable) })) && !slices.Contains(c.Flags, "persist") {
 			c.Flags = append(c.Flags, "persist")
 		}
 		if len(names) > 0 {

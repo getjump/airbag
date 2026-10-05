@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -95,6 +96,15 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 		"^"+q+`/\.claude/projects/[^/]+/memory(/|$)`,
 		"^"+q+`/\.(claude|codex)$`,
 		"^"+q+`/\.claude/projects(/[^/]+)?$`)
+	// Seatbelt checks the path a write resolves to: a memory/ that is,
+	// or lies under, a link elsewhere is denied where it really is, with
+	// the directories above it as above.
+	for _, m := range realMemory(s.Home) {
+		p.NoWrite = append(p.NoWrite, m)
+		for d := filepath.Dir(m); d != home && d != filepath.Dir(d); d = filepath.Dir(d) {
+			p.NoWriteRegex = append(p.NoWriteRegex, "^"+regexp.QuoteMeta(d)+"$")
+		}
+	}
 	for _, h := range s.BranchHoles {
 		if noSymlinkSoFar(s.Home, h) == nil { // MkdirAll would follow a symlink out of $HOME
 			_ = os.MkdirAll(filepath.Join(s.Home, h), 0o700)
@@ -115,3 +125,47 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 	}
 	return p, nil
 }
+
+// realMemory returns where each project's memory/ really is, when a
+// link leads there: the project directory or memory/ itself may be one.
+// A link to a place that does not exist yet gives that place, which
+// the agent could otherwise create.
+func realMemory(home string) []string {
+	root := filepath.Join(home, ".claude/projects")
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range ents {
+		dir, err := filepath.EvalSymlinks(filepath.Join(root, e.Name()))
+		if err != nil {
+			continue
+		}
+		m := filepath.Join(dir, "memory")
+		for range maxMemoryHops {
+			fi, err := os.Lstat(m)
+			if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+				break
+			}
+			t, err := os.Readlink(m)
+			if err != nil {
+				break
+			}
+			if !filepath.IsAbs(t) {
+				t = filepath.Join(filepath.Dir(m), t)
+			}
+			if d, err := filepath.EvalSymlinks(filepath.Dir(t)); err == nil {
+				t = filepath.Join(d, filepath.Base(t))
+			}
+			m = t
+		}
+		if m != filepath.Join(root, e.Name(), "memory") {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// maxMemoryHops bounds the links realMemory follows, against a loop.
+const maxMemoryHops = 40

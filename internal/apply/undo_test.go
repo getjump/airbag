@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -1109,6 +1110,59 @@ func TestAppliedConfigDeletionIsNotAHostRemoval(t *testing.T) {
 	}
 	// The next run: the host has no config, and the agent writes one.
 	review.NoteHostConfigs(s)
+	if err := os.WriteFile(branch, []byte(`{"numStartups":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cf := Conflicts(s, mustScan(t, s)); len(cf) != 0 {
+		t.Fatalf("conflicts for a config the agent created after an applied deletion: %v", cf)
+	}
+}
+
+// A config removed with the directory above it, by an applied deletion
+// of ~/.claude, is not one the host removed either.
+func TestAppliedDirDeletionClearsHostConfig(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	legacy := filepath.Join(home, ".claude/.config.json")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte(`{"numStartups":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	review.NoteHostConfigs(s)
+	if !slices.Contains(s.HostConfigs, legacy) {
+		t.Fatalf("not noted: %v", s.HostConfigs)
+	}
+	dir := filepath.Join(s.HomeUpper(), ".claude")
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mknod(dir, syscall.S_IFCHR, 0); err != nil {
+		t.Skipf("cannot create a whiteout here: %v", err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if slices.Contains(s.HostConfigs, legacy) {
+		t.Errorf("still noted after the applied deletion: %v", s.HostConfigs)
+	}
+	review.NoteHostConfigs(s)
+	branch := filepath.Join(s.HomeUpper(), ".claude/.config.json")
+	if err := os.MkdirAll(filepath.Dir(branch), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(branch, []byte(`{"numStartups":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

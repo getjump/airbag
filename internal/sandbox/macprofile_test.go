@@ -3,6 +3,8 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -114,5 +116,46 @@ func TestMacProfileNoMkdirThroughSymlink(t *testing.T) {
 	}
 	if es, _ := os.ReadDir(outside); len(es) != 0 {
 		t.Fatalf("created behind the symlinked ~/.claude: %v", es)
+	}
+}
+
+// A project's memory/ linked elsewhere in ~/.claude is denied where it
+// really is, and so are the directories above it, whether the link
+// target exists yet or not.
+func TestMacProfileDeniesLinkedMemory(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	for _, d := range []string{".claude/shared/mem", ".claude/projects/a", ".claude/projects/b", ".claude/elsewhere"} {
+		if err := os.MkdirAll(filepath.Join(home, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("../../shared/mem", filepath.Join(home, ".claude/projects/a/memory")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".claude/later/mem"), filepath.Join(home, ".claude/projects/b/memory")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".claude/elsewhere"), filepath.Join(home, ".claude/projects/c")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := filepath.EvalSymlinks(home)
+	for _, want := range []string{"shared/mem", "later/mem", "elsewhere/memory"} {
+		if !slices.Contains(p.NoWrite, filepath.Join(h, ".claude", want)) {
+			t.Errorf("%s not denied: %v", want, p.NoWrite)
+		}
+	}
+	for _, d := range []string{"shared", "later"} {
+		if !slices.Contains(p.NoWriteRegex, "^"+regexp.QuoteMeta(filepath.Join(h, ".claude", d))+"$") {
+			t.Errorf("%s may be renamed: %v", d, p.NoWriteRegex)
+		}
 	}
 }

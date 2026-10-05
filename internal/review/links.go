@@ -2,6 +2,7 @@ package review
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -223,6 +224,28 @@ func under(real string, roots []string) (string, bool) {
 		}
 	}
 	return best, bestLen >= 0
+}
+
+// aliasesAbove returns the watched names whose real place is below real
+// path p.
+func aliasesAbove(aliases []homeAlias, p string) []string {
+	var out []string
+	for _, a := range aliases {
+		if strings.HasPrefix(a.target, p+string(filepath.Separator)) {
+			out = append(out, a.link)
+		}
+	}
+	return out
+}
+
+// listHome names up to three paths in $HOME, and how many more.
+func listHome(rels []string) string {
+	shown := rels[:min(3, len(rels))]
+	out := "~/" + strings.Join(shown, ", ~/")
+	if n := len(rels) - len(shown); n > 0 {
+		out += fmt.Sprintf(" and %d more", n)
+	}
+	return out
 }
 
 // aliasRels returns the watched names a change at real path p stands

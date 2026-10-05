@@ -5,7 +5,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/getjump/airbag/internal/session"
 )
@@ -446,4 +449,50 @@ func TestShadowingConfigLinkedIntoWorkspace(t *testing.T) {
 		}
 	}
 	t.Fatalf("no change in %+v", cs)
+}
+
+// A change above where a watched path really is moves it: replacing
+// ~/dotfiles/project with a link points the project's memory elsewhere,
+// and deleting ~/dotfiles takes ~/.bashrc's target with it.
+func TestChangeAboveAliasTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name, at string
+		make     func(t *testing.T, path string)
+		want     []string
+	}{
+		{"link", "dotfiles/project", func(t *testing.T, p string) { symlink(t, "/tmp/elsewhere", p) }, []string{"persist", "agent instructions"}},
+		{"deleted", "dotfiles", func(t *testing.T, p string) {
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := unix.Mknod(p, syscall.S_IFCHR, 0); err != nil {
+				t.Skipf("cannot create a whiteout here: %v", err)
+			}
+		}, []string{"persist", "agent instructions"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _ := cfgSession(t)
+			h := s.Home
+			writeCfg(t, filepath.Join(h, "dotfiles/project/memory/MEMORY.md"), "notes\n")
+			writeCfg(t, filepath.Join(h, "dotfiles/bashrc"), "# rc\n")
+			symlink(t, filepath.Join(h, "dotfiles/project/memory"), filepath.Join(h, ".claude/projects/x/memory"))
+			symlink(t, filepath.Join(h, "dotfiles/bashrc"), filepath.Join(h, ".bashrc"))
+			tc.make(t, filepath.Join(s.HomeUpper(), tc.at))
+			cs, err := Scan(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range cs {
+				if c.Rel == tc.at {
+					for _, f := range tc.want {
+						if !slices.Contains(c.Flags, f) {
+							t.Errorf("flags %v lack %q", c.Flags, f)
+						}
+					}
+					return
+				}
+			}
+			t.Fatalf("no change at %s in %+v", tc.at, cs)
+		})
+	}
 }
