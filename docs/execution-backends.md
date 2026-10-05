@@ -5,11 +5,15 @@ It does not probe the machine or attest a running session. `airbag doctor`
 checks host prerequisites. `airbag run` records the selected backend,
 isolation boundary, egress and explicit requirement in session metadata.
 
-Egress is `allowlist-proxy`, except in a session started with `--nix-daemon`:
-the Nix daemon's builds and substitutes reach the network outside the proxy,
-and the session records `allowlist-proxy+nix-daemon`. That is fixed when the
-session is created. `run` prints backend, isolation and egress when one of them
-is not the default: another backend, a requirement, or egress outside the proxy.
+Egress is `allowlist-proxy` unless the session has a path around the proxy,
+named after it: `+nix-daemon` on Linux for a session started with
+`--nix-daemon` (the daemon's builds and substitutes reach the network; macOS's
+profile allows no Nix socket), and `+tcp-forward` for `--allow tcp://HOST:PORT`
+(on Linux airbag dials HOST:PORT from the host, policy-checked and logged; on
+macOS the agent connects to a port on this machine directly). HiddenHost is
+fixed when the session is created; a resume can add forwards. `run` prints
+backend, isolation and egress when one of them is not the default: another
+backend, a requirement, or a path around the proxy.
 
 Only `--backend=native` is implemented. Linux uses namespaces, overlayfs and
 seccomp; macOS uses Seatbelt and a workspace clone. Both share the host
@@ -57,7 +61,7 @@ silently remove it.
 
 - Native execution exposes a shared host kernel to agent code.
 - Allowed destinations can receive agent data and perform remote effects.
-- `--nix-daemon` opens egress outside the proxy for the Nix daemon.
+- `--nix-daemon` (Linux) and `tcp://` forwards open egress outside the proxy.
 - Agent-state passthroughs can survive discard.
 - Credential placeholders do not issue short-lived credentials or restrict
   the real token's service-level scopes.

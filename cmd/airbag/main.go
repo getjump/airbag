@@ -237,9 +237,6 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 		s.Backend, s.Isolation = execution.Name, execution.Isolation
-		// What this session reaches is fixed when it is created (HiddenHost),
-		// whatever this run's --nix-daemon says.
-		s.Egress = execution.ForRun(s.HiddenHost).Egress
 		if s.RequireIsolation == "" || *requireIsolation != "any" {
 			s.RequireIsolation = *requireIsolation
 		}
@@ -265,6 +262,10 @@ func cmdRun(args []string) (int, error) {
 				s.Forwards = append(s.Forwards, f)
 			}
 		}
+		// What this session reaches: HiddenHost is fixed when it is
+		// created, whatever this run's --nix-daemon says; this run may add
+		// forwards.
+		s.Egress = execution.ForRun(s.HiddenHost, s.Forwards).Egress
 		if err := s.Save(); err != nil {
 			return 1, err
 		}
@@ -277,7 +278,7 @@ func cmdRun(args []string) (int, error) {
 		pass = append(pass, projPass...)
 		meta := session.Meta{
 			Backend: execution.Name, Isolation: execution.Isolation, RequireIsolation: *requireIsolation,
-			Egress:    execution.ForRun(hiddenHost).Egress,
+			Egress:    execution.ForRun(hiddenHost, forwards).Egress,
 			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
