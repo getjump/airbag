@@ -127,6 +127,7 @@ var deniedVerdict = map[string]struct {
 // argChecked are refused or allowed by an argument, not a flat verdict.
 var argChecked = map[string]bool{
 	"ioctl": true, "socket": true, "socketpair": true, "personality": true, "socketcall": true,
+	"setrlimit": true, "prlimit64": true,
 }
 
 // TestDeniedCalls checks every refused-by-number call on every ABI
@@ -231,6 +232,72 @@ func TestSocketcallStrict(t *testing.T) {
 	}
 }
 
+// TestRlimitCoreStrict: in --strict mode a change to RLIMIT_CORE is
+// refused through setrlimit and prlimit64 on every ABI, while a read
+// (prlimit64 with no new limit) and other limits pass; by default all of
+// it passes. The resource numbers are written out here, not taken from
+// the filter, so dropping or widening the rule fails this test.
+func TestRlimitCoreStrict(t *testing.T) {
+	const core, nofile = 4, 7    // RLIMIT_CORE, RLIMIT_NOFILE
+	const newLimit = 0x7ffd_1000 // a pointer to the new limit
+	for _, g := range allNumberings() {
+		for _, strict := range []bool{false, true} {
+			p := agentFilter(abisFor(g.goarch), strict)
+			refused := uint32(retAllow)
+			if strict {
+				refused = retEPERM
+			}
+			for _, a := range g.ns {
+				for _, c := range []struct {
+					what             string
+					nr               uint32
+					arg0, arg1, arg2 uint64
+					want             uint32
+				}{
+					{"setrlimit(CORE)", a.n.setrlimit, core, newLimit, 0, refused},
+					{"setrlimit(CORE) high bits", a.n.setrlimit, 1<<32 | core, newLimit, 0, refused},
+					{"setrlimit(NOFILE)", a.n.setrlimit, nofile, newLimit, 0, retAllow},
+					{"prlimit64(CORE, new)", a.n.prlimit64, 0, core, newLimit, refused},
+					// A pointer is full width: a zero low half is not NULL.
+					{"prlimit64(CORE, new above 4 GiB)", a.n.prlimit64, 0, core, 0x7f00_0000_0000, refused},
+					{"prlimit64(CORE, new) high bits", a.n.prlimit64, 0, 1<<32 | core, newLimit, refused},
+					{"prlimit64(CORE, read)", a.n.prlimit64, 0, core, 0, retAllow},
+					{"prlimit64(NOFILE, new)", a.n.prlimit64, 0, nofile, newLimit, retAllow},
+				} {
+					if c.nr == 0 {
+						t.Errorf("%s arch %#x: no number for %s", g.goarch, a.audit, c.what)
+						continue
+					}
+					d := seccompData(a.audit, c.nr|a.bit, c.arg0, c.arg1)
+					binary.LittleEndian.PutUint64(d[offArg2Low:], c.arg2)
+					if got := runBPF(t, p, d); got != c.want {
+						t.Errorf("%s strict=%v arch %#x %s: got %#x want %#x", g.goarch, strict, a.audit, c.what, got, c.want)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestFilterForUnknownArch: an architecture with no syscall numbers gets
+// no filter by default, and in --strict mode an error rather than a run
+// without the filter.
+func TestFilterForUnknownArch(t *testing.T) {
+	if p, err := filterFor("riscv64", false); p != nil || err != nil {
+		t.Errorf("riscv64: got %d instructions and %v, want no filter and no error", len(p), err)
+	}
+	if _, err := filterFor("riscv64", true); err == nil {
+		t.Error("riscv64 --strict: no error, want one")
+	}
+	for _, goarch := range []string{"amd64", "arm64"} {
+		for _, strict := range []bool{false, true} {
+			if p, err := filterFor(goarch, strict); err != nil || len(p) == 0 {
+				t.Errorf("%s strict=%v: got %d instructions and %v, want a filter", goarch, strict, len(p), err)
+			}
+		}
+	}
+}
+
 // TestX32OwnNumbers: x32's own numbers for kexec_load and ioctl are
 // covered, not only the x86_64 numbers with the x32 bit.
 func TestX32OwnNumbers(t *testing.T) {
@@ -305,8 +372,19 @@ func TestSocketFilter(t *testing.T) {
 }
 
 // TestPersonalityFilter: the safe values pass (0xffffffff is the query),
-// a domain switch is refused, on every ABI.
+// a domain switch and the other flags are refused, on every ABI. The
+// refused values are written out, so widening allowedPersonality to one
+// of them fails this test.
 func TestPersonalityFilter(t *testing.T) {
+	refused := []uint32{
+		0x4,      // another execution domain
+		0x100000, // MMAP_PAGE_ZERO
+		0x200000, // ADDR_COMPAT_LAYOUT
+		0x400000, // READ_IMPLIES_EXEC
+		0x800000, // ADDR_LIMIT_32BIT
+		0x60000,  // UNAME26|ADDR_NO_RANDOMIZE, a pair the list does not name
+		0x440000, // READ_IMPLIES_EXEC|ADDR_NO_RANDOMIZE
+	}
 	for _, g := range allNumberings() {
 		p := agentFilter(abisFor(g.goarch), false)
 		for _, a := range g.ns {
@@ -316,8 +394,14 @@ func TestPersonalityFilter(t *testing.T) {
 					t.Errorf("%s arch %#x personality %#x: got %#x want allow", g.goarch, a.audit, v, got)
 				}
 			}
-			if got := runBPF(t, p, seccompData(a.audit, nr, 0x4, 0)); got != retEPERM {
-				t.Errorf("%s arch %#x personality switch: got %#x want EPERM", g.goarch, a.audit, got)
+			for _, v := range refused {
+				if got := runBPF(t, p, seccompData(a.audit, nr, uint64(v), 0)); got != retEPERM {
+					t.Errorf("%s arch %#x personality %#x: got %#x want EPERM", g.goarch, a.audit, v, got)
+				}
+				// The value is an unsigned int: high bits must not change it.
+				if got := runBPF(t, p, seccompData(a.audit, nr, 1<<32|uint64(v), 0)); got != retEPERM {
+					t.Errorf("%s arch %#x personality %#x high bits: got %#x want EPERM", g.goarch, a.audit, v, got)
+				}
 			}
 		}
 	}
@@ -412,7 +496,7 @@ func nrsByName(n nrSet) map[string]uint32 {
 		"open_tree": n.openTree, "move_mount": n.moveMount, "fsopen": n.fsopen,
 		"fsconfig": n.fsconfig, "fsmount": n.fsmount, "fspick": n.fspick, "mount_setattr": n.mountSetattr,
 		"ioctl": n.ioctl, "socket": n.socket, "socketpair": n.socketpair, "personality": n.personality,
-		"socketcall": n.socketcall,
+		"socketcall": n.socketcall, "setrlimit": n.setrlimit, "prlimit64": n.prlimit64,
 	}
 }
 

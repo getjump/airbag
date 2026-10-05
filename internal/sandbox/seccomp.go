@@ -38,6 +38,9 @@ const (
 	offArg0Low = 16 + 8*0
 	offArg1Low = 16 + 8*1
 	offArg2Low = 16 + 8*2
+	// A pointer is not truncated, so prlimit64's new-limit pointer
+	// (arg2) is compared in both halves.
+	offArg2High = offArg2Low + 4
 
 	// x32SyscallBit marks a syscall made through the x32 ABI; it shares
 	// the AUDIT_ARCH_X86_64 value with 64-bit calls and is told apart
@@ -131,6 +134,11 @@ type nrSet struct {
 	// read, so this is coarse -- in --strict mode 32-bit socket creation
 	// is refused outright.
 	ioctl, socket, socketpair, personality, socketcall uint32
+
+	// Argument-checked in --strict mode only: a change to RLIMIT_CORE is
+	// refused, a read of it and every other limit pass (see the handler
+	// in agentFilter).
+	setrlimit, prlimit64 uint32
 }
 
 // abi is one ABI the filter covers: an AUDIT_ARCH value and the syscall
@@ -161,6 +169,7 @@ var (
 		openTree: 428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
 		ioctl: 16, socket: 41, socketpair: 53, personality: 135,
+		setrlimit: 160, prlimit64: 302,
 	}
 	// nrsX32 is the x32 ABI, from arch/x86/entry/syscalls/syscall_64.tbl
 	// (https://github.com/torvalds/linux/blob/v6.18/arch/x86/entry/syscalls/syscall_64.tbl):
@@ -184,6 +193,7 @@ var (
 		openTree: 428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
 		ioctl: 514, socket: 41, socketpair: 53, personality: 135,
+		setrlimit: 160, prlimit64: 302,
 	}
 	nrs386 = nrSet{
 		ioURingSetup: 425, ioURingEnter: 426, ioURingRegister: 427,
@@ -198,6 +208,7 @@ var (
 		openTree: 428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
 		ioctl: 54, socket: 359, socketpair: 360, personality: 136, socketcall: 102,
+		setrlimit: 75, prlimit64: 340,
 	}
 	nrsARM64 = nrSet{
 		ioURingSetup: 425, ioURingEnter: 426, ioURingRegister: 427,
@@ -212,6 +223,7 @@ var (
 		openTree: 428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
 		ioctl: 29, socket: 198, socketpair: 199, personality: 92,
+		setrlimit: 164, prlimit64: 261,
 	}
 	nrsARM = nrSet{
 		ioURingSetup: 425, ioURingEnter: 426, ioURingRegister: 427,
@@ -226,13 +238,15 @@ var (
 		openTree: 428, moveMount: 429, fsopen: 430,
 		fsconfig: 431, fsmount: 432, fspick: 433, mountSetattr: 442,
 		ioctl: 54, socket: 281, socketpair: 288, personality: 136,
+		setrlimit: 75, prlimit64: 369,
 	}
 )
 
 // abisFor returns the ABIs to filter for a native architecture: the
 // native ABI plus every compat ABI a process of that architecture can
-// invoke. An unsupported native arch returns nil, and no filter is
-// installed (the earlier layers still apply).
+// invoke. An unsupported native arch returns nil: by default no filter
+// is installed (the earlier layers still apply), and --strict refuses
+// to run (filterFor).
 func abisFor(goarch string) []abi {
 	switch goarch {
 	case "amd64":
@@ -312,6 +326,12 @@ func (b *bpfBuilder) jeqNext(k uint32) {
 	b.emit(unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: k, Jt: jump(0), Jf: jump(1)})
 }
 
+// jneNext tests A != k; when they differ it falls through to the next
+// instruction, otherwise it skips it.
+func (b *bpfBuilder) jneNext(k uint32) {
+	b.emit(unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: k, Jt: jump(1), Jf: jump(0)})
+}
+
 // jeqAllow tests A == k; on a match it jumps to the allow label.
 func (b *bpfBuilder) jeqAllow(k uint32) {
 	b.jeqNext(k)
@@ -347,7 +367,7 @@ func (b *bpfBuilder) resolve() []unix.SockFilter {
 }
 
 // agentFilter builds the BPF program for the given ABIs. strict adds the
-// new-mount-API refusals.
+// new-mount-API, socketcall and RLIMIT_CORE refusals.
 func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 	b := newBuilder()
 	for i, a := range abis {
@@ -358,7 +378,7 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 		b.label(fmt.Sprintf("abi%d", i))
 		b.ld(offArch)
 		// If this arch matches, enter the block; otherwise jump on.
-		b.emit(unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: a.audit, Jt: jump(1), Jf: jump(0)})
+		b.jneNext(a.audit)
 		b.jmp(next)
 		b.ld(offNr)
 
@@ -391,6 +411,8 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 				// the filter cannot read, so refuse socket creation by
 				// the sub-call number instead (coarse, --strict only).
 				route(nonzero(s.n.socketcall), "socketcall")
+				route(nonzero(s.n.setrlimit), "setrlimit")
+				route(nonzero(s.n.prlimit64), "prlimit64")
 			}
 		}
 		b.jmp("allow")
@@ -415,6 +437,9 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 	b.jeqNext(unix.AF_NETLINK)
 	b.jmp("netlinkproto")
 	for _, fam := range allowedSocketFamilies {
+		if fam == unix.AF_NETLINK {
+			continue // diverted above
+		}
 		b.jeqAllow(fam)
 	}
 	b.jmp("eperm")
@@ -435,6 +460,31 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 	b.ld(offArg0Low)
 	for _, call := range []uint32{1 /* SYS_SOCKET */, 8 /* SYS_SOCKETPAIR */} {
 		b.jeqNext(call)
+		b.jmp("eperm")
+	}
+	b.jmp("allow")
+
+	// setrlimit and prlimit64 (--strict): refuse a change to RLIMIT_CORE.
+	// PID 1 sets it to 1 byte, soft and hard (init.go), and the kernel
+	// aborts a pipe core_pattern only at exactly 1; any process may lower
+	// its own soft limit to 0, and the pipe handler would then run again.
+	// A read stays allowed: glibc's getrlimit, and with it `ulimit -c`, is
+	// prlimit64 with no new limit (arg2 NULL). The cost: gpg and a
+	// daemonizing ssh-agent lower their own limit at start and stop when
+	// that is refused.
+	b.label("setrlimit")
+	b.ld(offArg0Low) // resource
+	b.jeqNext(unix.RLIMIT_CORE)
+	b.jmp("eperm")
+	b.jmp("allow")
+
+	b.label("prlimit64")
+	b.ld(offArg1Low) // resource
+	b.jneNext(unix.RLIMIT_CORE)
+	b.jmp("allow")
+	for _, off := range []uint32{offArg2Low, offArg2High} { // the new limit
+		b.ld(off)
+		b.jneNext(0)
 		b.jmp("eperm")
 	}
 	b.jmp("allow")
@@ -469,6 +519,25 @@ func jump(n int) uint8 {
 	return uint8(n)
 }
 
+// filterFor builds the filter for a native architecture. One it has no
+// syscall numbers for gets no filter: by default that is nil, and the
+// agent runs with no_new_privs only; in --strict mode, where the filter
+// is part of what the user asked for, it is an error.
+func filterFor(goarch string, strict bool) ([]unix.SockFilter, error) {
+	abis := abisFor(goarch)
+	if abis == nil {
+		if strict {
+			return nil, fmt.Errorf("seccomp: no syscall numbers for %s", goarch)
+		}
+		return nil, nil
+	}
+	p := agentFilter(abis, strict)
+	if len(p) > unix.BPF_MAXINSNS {
+		return nil, fmt.Errorf("seccomp: a filter of %d instructions", len(p))
+	}
+	return p, nil
+}
+
 // restrictAgent sets no_new_privs and installs the filter on every
 // thread of this process; the agent inherits both across fork and execve.
 // TSYNC also copies no_new_privs to the other threads, so one prctl on
@@ -479,15 +548,14 @@ func restrictAgent(strict bool) error {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("no_new_privs: %w", err)
 	}
-	abis := abisFor(runtime.GOARCH)
-	if abis == nil {
+	p, err := filterFor(runtime.GOARCH, strict)
+	if err != nil {
+		return err
+	}
+	if p == nil {
 		return nil // an architecture we have no numbers for: only no_new_privs
 	}
-	p := agentFilter(abis, strict)
-	if len(p) > unix.BPF_MAXINSNS {
-		return fmt.Errorf("seccomp: a filter of %d instructions", len(p))
-	}
-	prog := unix.SockFprog{Len: uint16(len(p)), Filter: &p[0]} //nolint:gosec // at most BPF_MAXINSNS, checked above
+	prog := unix.SockFprog{Len: uint16(len(p)), Filter: &p[0]} //nolint:gosec // at most BPF_MAXINSNS, checked in filterFor
 	_, _, e := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER,
 		unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog))) //nolint:gosec // seccomp(2) takes a pointer to the program; KeepAlive below
 	runtime.KeepAlive(p)

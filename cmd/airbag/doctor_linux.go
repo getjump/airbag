@@ -62,6 +62,16 @@ func cmdDoctor() error {
 	} else {
 		fmt.Println("ok   /dev/fuse writable: reads of secret files are tracked")
 	}
+	// Informational, like FUSE: a pipe handler or a socket is a place the
+	// agent's core dumps may still reach, not a reason to fail.
+	if b, err := os.ReadFile("/proc/sys/kernel/core_pattern"); err == nil {
+		mark := "note:"
+		covered, what := corePattern(strings.TrimSuffix(string(b), "\n"))
+		if covered {
+			mark = "ok  "
+		}
+		fmt.Println(mark, what)
+	}
 	if os.Getuid() == 0 {
 		fmt.Println("note: running as root; Claude Code refuses --dangerously-skip-permissions as root, run airbag as your user")
 	}
@@ -70,6 +80,23 @@ func cmdDoctor() error {
 		return fmt.Errorf("this machine is not ready")
 	}
 	return nil
+}
+
+// corePattern says whether airbag's 1-byte core limit (sandbox/init.go)
+// keeps the agent's core dumps from where the host's kernel.core_pattern
+// sends them. The first character picks the kind, as in the kernel: "|"
+// pipes to a handler, "@" (and "@@") to a socket, anything else is a
+// file.
+func corePattern(pattern string) (covered bool, what string) {
+	switch {
+	case strings.HasPrefix(pattern, "|"):
+		return false, "kernel.core_pattern pipes to a handler (" + pattern + "): airbag's 1-byte core limit " +
+			"stops the agent's core dumps unless something in the sandbox lowers it; --strict refuses that"
+	case strings.HasPrefix(pattern, "@"):
+		return false, "kernel.core_pattern is a socket (" + pattern + "): the kernel ignores the core limit for it, " +
+			"so the agent's core dumps may reach it"
+	}
+	return true, "kernel.core_pattern is a file (" + pattern + "): airbag's 1-byte core limit stops the agent's core dumps"
 }
 
 // reportKernelSysctls prints, for information only, host sysctls that

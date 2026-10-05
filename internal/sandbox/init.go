@@ -518,8 +518,10 @@ func startForwards(s *session.Session) error {
 // pseudo-terminal, so Ctrl-C and Ctrl-Z reach it and not PID 1.
 func runAgent(s *session.Session, ctl *os.File) int {
 	if s.Strict {
+		// The limit is what --strict asks for, so failing to set it stops
+		// the run, as a failed filter install does below.
 		if err := os.WriteFile("/proc/sys/user/max_user_namespaces", []byte("1"), 0); err != nil {
-			fmt.Fprintf(os.Stderr, "airbag: warning: the agent can create user namespaces: %v\n", err)
+			fatal("limit user namespaces", err)
 		}
 	}
 	env := agentEnv(s)
@@ -548,16 +550,21 @@ func runAgent(s *session.Session, ctl *os.File) int {
 		cmd.SysProcAttr.Foreground = true
 		cmd.SysProcAttr.Ctty = 0
 	}
-	// A crash must not write a core dump: it could hold secrets the agent
+	// Core dumps are capped at 1 byte: a dump could hold secrets the agent
 	// had in memory. The limit (soft and hard) is set to 1, not 0,
 	// because 0 does not stop a core_pattern that pipes to a handler
 	// (systemd-coredump, apport), which the kernel runs regardless of
 	// RLIMIT_CORE; dumpable=0 does not carry over either, since exec
-	// resets it for the agent. A limit of exactly 1 blocks both kinds:
-	// fs/coredump.c coredump_pipe() aborts a pipe dump when
-	// cprm->limit == 1 ("RLIMIT_CORE is set to 1, aborting core"), and
-	// the file path is skipped because 1 < binfmt->min_coredump (a page).
-	// (Linux v6.18.) The limit is inherited across fork and exec.
+	// resets it for the agent. A limit of exactly 1 stops both file dumps
+	// and pipe handlers: fs/coredump.c coredump_pipe() aborts a pipe dump
+	// when cprm->limit == 1 ("RLIMIT_CORE is set to 1, aborting core"),
+	// and the file path is skipped because 1 < binfmt->min_coredump (a
+	// page). (Linux v6.18.) The limit is inherited across fork and exec.
+	// It does not hold everywhere: any process may lower its own soft
+	// limit, and at 0 the pipe handler runs again (--strict refuses that
+	// change in the seccomp filter); a socket core_pattern ("@" or "@@",
+	// Linux 6.16+) ignores the limit and is not covered. airbag doctor
+	// reports the host's core_pattern.
 	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 1, Max: 1}); err != nil {
 		fmt.Fprintf(os.Stderr, "airbag: warning: could not limit core dumps: %v\n", err)
 	}

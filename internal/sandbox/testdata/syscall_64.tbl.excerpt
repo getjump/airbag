@@ -10,6 +10,7 @@
 103	common	syslog			sys_syslog
 134	64	uselib
 135	common	personality		sys_personality
+160	common	setrlimit		sys_setrlimit
 163	common	acct			sys_acct
 167	common	swapon			sys_swapon
 168	common	swapoff			sys_swapoff
@@ -26,6 +27,7 @@
 279	64	move_pages		sys_move_pages
 298	common	perf_event_open		sys_perf_event_open
 300	common	fanotify_init		sys_fanotify_init
+302	common	prlimit64		sys_prlimit64
 304	common	open_by_handle_at	sys_open_by_handle_at
 313	common	finit_module		sys_finit_module
 320	common	kexec_file_load		sys_kexec_file_load
