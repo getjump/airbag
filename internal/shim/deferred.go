@@ -13,6 +13,7 @@ import (
 
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/secretfs"
+	"github.com/getjump/airbag/operation"
 	"github.com/getjump/airbag/outbox"
 )
 
@@ -35,10 +36,15 @@ func Deferred(name string, args []string) {
 	cwd, _ := os.Getwd()
 	argv := append([]string{name}, args...)
 	in := outbox.Intent{Argv: argv, Cwd: cwd, Files: pins(cwd, args)}
-	request, captureErr := capturePullRequest(argv, cwd)
+	request, body, captureErr := capturePullRequest(argv, cwd)
 	in.Request = request
 	if captureErr != nil {
 		in.CaptureError = captureErr.Error()
+	}
+	if body != "" {
+		// Pinned where it really is: the host refuses a pin outside
+		// the workspace.
+		in.Files[body] = strings.TrimPrefix(operation.Hash([]byte(request.PullRequest.Body)), "sha256:")
 	}
 	d, err := control.Defer(in)
 	switch {

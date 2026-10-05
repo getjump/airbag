@@ -1,0 +1,38 @@
+name: ai-poll
+on:
+  schedule:
+    # Every 15 minutes. GitHub may start a scheduled run late, and turns
+    # the schedule off after 60 days without activity in the repository.
+    - cron: "4,19,34,49 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+# Untested. A card the owner moved to "AI To Do" on their Projects board
+# becomes the ai:implement label that starts claude.yml: a project owned
+# by a user starts no workflow itself. .github/scripts/board-poll.sh has
+# the checks, docs/agents.md the setup. Off unless the repository
+# variables AGENTS_ENABLED and AGENTS_BOARD are both "true".
+jobs:
+  poll:
+    if: >-
+      vars.AGENTS_ENABLED == 'true' &&
+      vars.AGENTS_BOARD == 'true' &&
+      (github.event_name == 'schedule' || github.actor == github.repository_owner)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: label the card the owner moved
+        env:
+          PROJECT_PAT: ${{ secrets.PROJECT_PAT }}
+          LABEL_PAT: ${{ secrets.LABEL_PAT }}
+        run: sh .github/scripts/board-poll.sh "AI To Do"

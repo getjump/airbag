@@ -51,6 +51,19 @@ func TestPRBodyFileMatchesCapturedBytes(t *testing.T) {
 	}
 }
 
+// The shim pins the body where it really is; through a linked directory
+// that is outside the workspace, and the call is refused.
+func TestPRBodyOutsideWorkspaceRefused(t *testing.T) {
+	s := deferServer(t, "defer: [gh pr create]\n")
+	in := prIntent(s.Root)
+	in.Argv[len(in.Argv)-2], in.Argv[len(in.Argv)-1] = "--body-file", "docs/notes.md"
+	sum := strings.TrimPrefix(operation.Hash([]byte("reviewed")), "sha256:")
+	in.Files = map[string]string{filepath.Join(s.Root, "docs", "notes.md"): sum, filepath.Join(t.TempDir(), "notes.md"): sum}
+	if d := ask(t, s, in); !strings.Contains(d.Refused, "outside the workspace") || d.Queued != nil {
+		t.Fatalf("body outside the workspace queued: %+v", d)
+	}
+}
+
 func TestTypedPolicySeesDestinationAndDigest(t *testing.T) {
 	s := deferServer(t, `defer: [gh pr create]
 rules:

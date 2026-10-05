@@ -259,8 +259,15 @@ func TestReport(t *testing.T) {
 		{Kind: "secret.read", Target: ".env", Verdict: "taint", Reason: "/usr/bin/cat"},
 		{Kind: "tool.call", Target: "Bash: rm -rf /", Verdict: "deny", Reason: "no-rm"},
 	}
-	intents := []outbox.Intent{{ID: "i-1", Argv: []string{"git", "push", "origin", "main"}, Status: outbox.Pending}}
+	intents := []outbox.Intent{{ID: "i-1", Argv: []string{"git", "push", "origin", "main"}, Status: outbox.Pending},
+		{ID: "i-2", Argv: []string{"gh", "pr", "create"}, Status: outbox.Unknown, Output: "no answer"}}
 	r := BuildReport(s, cs, effs, intents, nil)
+	// Intent IDs are per session, so the hint names the session.
+	for _, a := range r.Attention {
+		if a.Target == "i-2" && !strings.Contains(a.Why, "`airbag outbox resolve i-2 done|failed "+s.ID+"`") {
+			t.Errorf("resolve hint without the session: %s", a.Why)
+		}
+	}
 	if r.Schema != Schema || r.Network.Allowed["api.anthropic.com"] != 1 || r.Network.Denied["paste.example.net:443"] != 1 {
 		t.Fatalf("report %+v", r)
 	}
@@ -269,7 +276,7 @@ func TestReport(t *testing.T) {
 		whats = append(whats, a.What+":"+a.Target)
 	}
 	got := strings.Join(whats, " ")
-	for _, want := range []string{"secret:.env", "change:.git/hooks/pre-commit", "change:~/.bashrc", "intent:i-1", "blocked:Bash: rm -rf /"} {
+	for _, want := range []string{"secret:.env", "change:.git/hooks/pre-commit", "change:~/.bashrc", "intent:i-1", "intent:i-2", "blocked:Bash: rm -rf /"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("attention lacks %s: %s", want, got)
 		}

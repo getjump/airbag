@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 
@@ -29,8 +30,24 @@ import (
 	"github.com/getjump/airbag/proxy"
 )
 
-// version is set at release: -ldflags "-X main.version=v0.1.0".
+// version is set at release: -ldflags "-X main.version=v0.1.0". A
+// build without it reports the module version Go stamps (see
+// buildVersion).
 var version = "dev"
+
+// buildVersion returns v, or, while v is still "dev", the main module's
+// version from the build info: go install ...@v0.1.0 stamps v0.1.0, and
+// a build in a git checkout the tag or a pseudo-version. A build that
+// stamps no version ("(devel)") stays "dev".
+func buildVersion(v string, info func() (*debug.BuildInfo, bool)) string {
+	if v != "dev" {
+		return v
+	}
+	if bi, ok := info(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return v
+}
 
 const usage = `airbag — approve outcomes, not commands
 
@@ -114,7 +131,7 @@ func main() {
 	case "approve":
 		err = cmdApprove(args)
 	case "version", "--version":
-		fmt.Println("airbag", version)
+		fmt.Println("airbag", buildVersion(version, debug.ReadBuildInfo))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:

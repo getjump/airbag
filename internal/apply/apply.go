@@ -524,7 +524,14 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, i
 	if err != nil {
 		return reject(box, it, fmt.Sprintf("%s: not found on this machine", it.Argv[0]), o)
 	}
-	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, s.Workspace) {
+	// The program's path has its links resolved, so the workspace's is
+	// compared with its links resolved too (a workspace under ~/code ->
+	// /mnt/data/code, or /tmp -> /private/tmp on macOS).
+	ws := s.Workspace
+	if r, err := filepath.EvalSymlinks(ws); err == nil {
+		ws = r
+	}
+	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, ws) || within(abs, s.Workspace) {
 		return reject(box, it, fmt.Sprintf("%s resolves to %s, inside the workspace; deferred commands run only programs from outside it", it.Argv[0], prog), o)
 	}
 	rels := make([]string, 0, len(it.Files))

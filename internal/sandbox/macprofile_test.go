@@ -14,15 +14,16 @@ import (
 
 func TestMacProfile(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
-	home, ws := t.TempDir(), t.TempDir()
-	// Seatbelt matches canonical paths; macOS's temporary directory uses /var.
-	var err error
-	if home, err = filepath.EvalSymlinks(home); err != nil {
-		t.Fatal(err)
+	// The profile spells paths resolved (Seatbelt checks those): /var is
+	// /private/var on macOS.
+	realTemp := func() string {
+		d, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
 	}
-	if ws, err = filepath.EvalSymlinks(ws); err != nil {
-		t.Fatal(err)
-	}
+	home, ws := realTemp(), realTemp()
 	if err := os.MkdirAll(filepath.Join(ws, "apps", "web"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +114,15 @@ func TestFollowCanonicalizesMissingTargetAncestors(t *testing.T) {
 			t.Errorf("follow(%q) = %q, want %q", path, got, want)
 		}
 	}
+	// A dangling link on the way leads where the agent could make its
+	// target: memory/ is denied there, not under the link's name.
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(alias, "later"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := follow(filepath.Join(dangling, "memory")), filepath.Join(canonical, "later", "memory"); got != want {
+		t.Errorf("follow through a dangling link = %q, want %q", got, want)
+	}
 }
 
 func TestMacHomesHidden(t *testing.T) {
@@ -160,7 +170,14 @@ func TestMacProfileNoMkdirThroughSymlink(t *testing.T) {
 // directories above it, whether the link target exists yet or not.
 func TestMacProfileDeniesLinkedMemory(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
-	home, ws := t.TempDir(), t.TempDir()
+	// $HOME spelled through a link, as /var is for /private/var on macOS:
+	// a memory link to a path that does not exist yet is denied where
+	// it really will be.
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(t.TempDir(), home); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
 	for _, d := range []string{".claude/shared/mem", ".claude/projects/a", ".claude/projects/b", ".claude/elsewhere"} {
 		if err := os.MkdirAll(filepath.Join(home, d), 0o700); err != nil {
 			t.Fatal(err)
