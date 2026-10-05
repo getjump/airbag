@@ -1052,3 +1052,51 @@ func TestDiffShowsConfigLookalikesElsewhere(t *testing.T) {
 		t.Fatalf("diff showed a config backup's contents: %q", b.String())
 	}
 }
+
+// A key name the agent chose cannot add lines to review or pass for
+// another key: control characters, quotes and brackets are quoted.
+func TestKeyNamesStayOneLine(t *testing.T) {
+	for _, path := range [][]string{{"x\nfake review line"}, {"projects", "/a]\nmcpServers[x"}, {"a\u202eb"}} {
+		got := keyChange{path: path}.String()
+		if strings.ContainsAny(got, "\n\r\u202e") {
+			t.Errorf("key %q renders as %q", path, got)
+		}
+	}
+	if got := (keyChange{path: []string{"projects", "/home/me/api", "allowedTools"}}).String(); got != "projects[/home/me/api].allowedTools" {
+		t.Errorf("an ordinary path renders as %q", got)
+	}
+}
+
+// The write-back keeps the config's group: the replacement is a new
+// inode and is given the original owner and group.
+func TestWriteBackKeepsGroup(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
+	groups, _ := os.Getgroups()
+	var other int = -1
+	for _, g := range groups {
+		if g != os.Getgid() {
+			other = g
+			break
+		}
+	}
+	if other < 0 {
+		if os.Geteuid() != 0 {
+			t.Skip("no second group to test with")
+		}
+		other = 12345 // root may give any group
+	}
+	if err := os.Lchown(realPath, -1, other); err != nil {
+		t.Skipf("cannot change the group: %v", err)
+	}
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"userID":"u","numStartups":2}`)
+	WriteBackConfigs(s)
+	if got := readCfg(t, realPath); got["numStartups"] != float64(2) {
+		t.Fatalf("real file = %v, want the counter written back", got)
+	}
+	var st unix.Stat_t
+	if err := unix.Lstat(realPath, &st); err != nil || int(st.Gid) != other {
+		t.Fatalf("group after write-back = %d (%v), want %d", st.Gid, err, other)
+	}
+}

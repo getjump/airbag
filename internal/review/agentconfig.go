@@ -13,9 +13,11 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
@@ -131,6 +133,12 @@ func (k keyChange) String() string {
 	}
 	var b strings.Builder
 	for i, seg := range k.path {
+		// The agent names the keys: one with a control character, a
+		// quote or a bracket is quoted, so it stays one line in review
+		// and cannot pass for another key.
+		if strings.ContainsFunc(seg, func(r rune) bool { return !unicode.IsPrint(r) || strings.ContainsRune(`"[]`, r) }) {
+			seg = strconv.Quote(seg)
+		}
 		switch {
 		case i == 0:
 			b.WriteString(seg)
@@ -908,8 +916,13 @@ func replaceIf(path string, data, want []byte, existed bool, keepDir string, unc
 		return 0, err
 	}
 	if existed {
-		// The replacement is a new inode: it carries the file's extended
-		// attributes (ACLs, labels, the user's own) or nothing is written.
+		// The replacement is a new inode: it carries the file's owner,
+		// group and extended attributes (ACLs, labels, the user's own),
+		// or nothing is written.
+		if err := copyOwner(path, tmp); err != nil {
+			_ = os.Remove(tmp)
+			return 0, fmt.Errorf("%w: its owner cannot be kept (%w)", errNoAtomic, err)
+		}
 		if err := copyXattrs(path, tmp); err != nil {
 			_ = os.Remove(tmp)
 			return 0, fmt.Errorf("%w: its extended attributes cannot be carried over (%w)", errNoAtomic, err)
@@ -969,7 +982,7 @@ func replaceIf(path string, data, want []byte, existed bool, keepDir string, unc
 	// What was displaced must be what this attempt read, with the mode
 	// and extended attributes the replacement was given: a host chmod or
 	// xattr change in between is a change too.
-	if got, err := readRegular(tmp); err == nil && bytes.Equal(got, want) && sameXattrs(tmp, path) {
+	if got, err := readRegular(tmp); err == nil && bytes.Equal(got, want) && sameXattrs(tmp, path) && sameOwner(tmp, path) {
 		if fi, err := os.Lstat(tmp); err == nil && fi.Mode().Perm() == mode {
 			accepted = true
 			return installed, nil
@@ -1015,6 +1028,27 @@ func copyXattrs(from, to string) error {
 		}
 	}
 	return nil
+}
+
+// copyOwner gives to the owner and group of from, if they differ.
+func copyOwner(from, to string) error {
+	var f, t unix.Stat_t
+	if err := unix.Lstat(from, &f); err != nil {
+		return err
+	}
+	if err := unix.Lstat(to, &t); err != nil {
+		return err
+	}
+	if f.Uid == t.Uid && f.Gid == t.Gid {
+		return nil
+	}
+	return unix.Lchown(to, int(f.Uid), int(f.Gid))
+}
+
+// sameOwner reports whether a and b have the same owner and group.
+func sameOwner(a, b string) bool {
+	var as, bs unix.Stat_t
+	return unix.Lstat(a, &as) == nil && unix.Lstat(b, &bs) == nil && as.Uid == bs.Uid && as.Gid == bs.Gid
 }
 
 // sameXattrs reports whether a and b have the same extended attributes
