@@ -1,0 +1,56 @@
+name: agent-labels
+on:
+  issues:
+    types: [opened, labeled]
+  pull_request:
+    types: [labeled]
+
+permissions: {}
+
+# Takes off any ai:* label that someone other than the owner put on, and
+# the ai:* labels an issue someone else opened came with (an issue
+# template can add labels whoever opens it). The agent workflows ignore
+# such labels already; this keeps them from lingering as triggers or as
+# false state. Removed with GITHUB_TOKEN, which starts no workflow.
+#
+# A pull request from a fork gets a read-only token on pull_request, so
+# labels there stay; no agent acts on a fork's pull request.
+jobs:
+  strip:
+    if: >-
+      vars.AGENTS_ENABLED == 'true' &&
+      (github.event.sender.login != github.repository_owner ||
+       github.event.sender.type != 'User') &&
+      (github.event.action == 'opened' || startsWith(github.event.label.name, 'ai:')) &&
+      (github.event_name == 'issues' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: take off the ai:* labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          OPENED_WITH: ${{ toJSON(github.event.issue.labels.*.name) }}
+          SENDER: ${{ github.event.sender.login }}
+        run: |
+          if [ "$ACTION" = opened ]; then
+            names=$(printf '%s' "$OPENED_WITH" | jq -r '.[]')
+          else
+            names=$LABEL
+          fi
+          printf '%s\n' "$names" | while IFS= read -r name; do
+            case $name in
+            [Aa][Ii]:*) ;;
+            *) continue ;;
+            esac
+            echo "taking off $name, put on by $SENDER"
+            uri=$(printf %s "$name" | jq -sRr @uri)
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$NUMBER/labels/$uri" --silent ||
+              echo "::warning::could not take off $name"
+          done

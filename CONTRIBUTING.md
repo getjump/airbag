@@ -22,7 +22,7 @@ The end-to-end tests run real sessions with the `airbag` in your `PATH` (or
 `AIRBAG=/path/to/airbag`), and must run as a regular user, not root:
 
 ```console
-$ for t in test/*-e2e.sh; do sh "$t"; done
+$ for t in test/e2e.sh test/*-e2e.sh; do sh "$t"; done
 $ python3 test/ctrlc.py
 ```
 
@@ -30,6 +30,8 @@ One check needs a directory outside `$HOME`, `/tmp` and `/run` that the test
 user can write, to place a host socket there: `sudo mkdir -m 1777
 /var/lib/airbag-e2e` (or set `AIRBAG_E2E_HOSTDIR`); without it the check is
 skipped.
+
+WSL2 is checked by an informational CI job (`.github/workflows/wsl.yml`).
 
 On macOS, `go build ./cmd/airbag` builds the prototype and `go test ./...` runs
 the unit tests. Of the end-to-end tests, `test/e2e.sh` and
@@ -95,5 +97,26 @@ Smaller, self-contained tasks are labeled
   `test/` when it is about what a session does.
 - Commit messages: an imperative summary line, then what changed and why.
 - Update the README when something user-visible changes.
-- Security problems: please report them privately through a GitHub security
-  advisory, not a public issue.
+- The maintainer's agent workflows, their labels and gates: [docs/agents.md](docs/agents.md).
+- Security problems: please report them privately, as [SECURITY.md](SECURITY.md)
+  says, not in a public issue.
+
+## AI-assisted contributions
+
+You are the author of what you submit, whatever tool helped: read every line,
+run it, and be able to explain it without the tool. If a tool wrote a
+substantial part, say so in the pull request (the template has a box for it)
+or in an `Assisted-by: <tool>` commit trailer.
+
+Issues and security reports are written and checked by a person. A bug report
+needs steps you ran yourself. A security report needs a proof of concept that
+works, and goes to a private advisory ([SECURITY.md](SECURITY.md)).
+
+Agents that open issues, pull requests or comments on their own are not
+accepted. Please work on `good first issue` items yourself, without an agent:
+they are there for people new to the code. We may close what looks like
+unreviewed tool output without review, and block those who keep sending it.
+
+The maintainer's own agents are the exception: they label what they open
+`agent-created` and follow [AGENTS.md](AGENTS.md); [docs/agents.md](docs/agents.md)
+says how they are started and gated.
