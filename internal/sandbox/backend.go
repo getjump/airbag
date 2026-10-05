@@ -51,7 +51,25 @@ func nativeBackend(platform string) Backend {
 func SelectBackend(name, isolation string) (Backend, error) {
 	b := NativeBackend()
 	if name != "native" {
-		return Backend{}, fmt.Errorf("execution backend %q is unavailable in this build; only native is implemented (no fallback)", name)
+		if runtime.GOOS != "linux" || (name != "gvisor" && name != "microvm") {
+			return Backend{}, fmt.Errorf("execution backend %q is unavailable on %s (no fallback)", name, runtime.GOOS)
+		}
+		b.Name, b.HomeBranch, b.WorkspaceBranch = name, false, "private-copy"
+		b.Readiness = "experimental; runtime preflight required"
+		b.Limitations = []string{
+			"isolated profile requires --no-home; host HOME and agent state passthroughs are unavailable",
+			"workspace secret files, explicit hide rules, TCP forwards and Nix daemon access are rejected",
+			"noninteractive execution only; no terminal resize/job control",
+			"command models remain shim-based; complete filesystem/process audit is unavailable",
+			"credential placeholders have no JIT issuance or TTL; no automatic process kill switch",
+			"trusted rootfs and runtime binaries are supplied by the operator; no image provenance verification",
+		}
+		if name == "gvisor" {
+			b.Isolation, b.Mechanism = "application-kernel", "runsc-systrap+network-none+scoped-unix-sockets"
+		} else {
+			b.Isolation, b.Mechanism = "virtual-machine", "firecracker-kvm+no-nic+scoped-vsock"
+			b.Limitations = append(b.Limitations, "Firecracker jailer and fleet resource management are not integrated")
+		}
 	}
 	if b.Isolation == "unsupported" {
 		return Backend{}, fmt.Errorf("native execution is unsupported on %s", b.Platform)

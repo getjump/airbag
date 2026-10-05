@@ -13,6 +13,7 @@ import (
 func cmdCapabilities(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("capabilities", flag.ContinueOnError)
 	fs.SetOutput(out)
+	backend := fs.String("backend", "native", "backend to describe")
 	jsonOutput := fs.Bool("json", false, "print the compiled backend description as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -20,7 +21,10 @@ func cmdCapabilities(args []string, out io.Writer) error {
 	if len(fs.Args()) != 0 {
 		return fmt.Errorf("usage: airbag capabilities [--json]")
 	}
-	b := sandbox.NativeBackend()
+	b, err := sandbox.SelectBackend(*backend, "any")
+	if err != nil {
+		return err
+	}
 	if *jsonOutput {
 		return json.NewEncoder(out).Encode(b)
 	}

@@ -57,7 +57,7 @@ const usage = `airbag — approve outcomes, not commands
   airbag doctor               check that this machine can run airbag
   airbag capabilities [--json] describe the compiled execution boundary and limits
 
-run: --backend=native; --require-isolation=any|shared-kernel|application-kernel|virtual-machine
+run: --backend=native|gvisor|microvm; --require-isolation=any|shared-kernel|application-kernel|virtual-machine
      unavailable backends and unmet requirements fail before creating a session
 
 ID defaults to the newest open session of the current workspace.
@@ -83,6 +83,9 @@ func main() {
 	if len(os.Args) >= 3 && os.Args[1] == sandbox.InitArg {
 		sandbox.Init(os.Args[2], len(os.Args) > 3 && os.Args[3] == "tty")
 		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == sandbox.GuestArg {
+		os.Exit(sandbox.Guest(os.Args[2:]))
 	}
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
@@ -140,7 +143,10 @@ func cmdRun(args []string) (int, error) {
 		return 1, errors.New("already inside an airbag session")
 	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	backend := fs.String("backend", "native", "execution backend (only native is implemented)")
+	backend := fs.String("backend", "native", "execution backend: native, gvisor or microvm")
+	rootfs := fs.String("runtime-rootfs", "", "trusted root filesystem directory for an optional backend")
+	runtimeBin := fs.String("runtime-bin", "", "operator-supplied runsc or Firecracker executable")
+	kernel := fs.String("runtime-kernel", "", "microVM kernel image")
 	requireIsolation := fs.String("require-isolation", "any", "require an exact isolation boundary; never fall back")
 	var allow stringList
 	fs.Var(&allow, "allow", "extra host to allow, e.g. api.github.com or *.example.com (repeatable)")
@@ -204,12 +210,22 @@ func cmdRun(args []string) (int, error) {
 	if *nixDaemon {
 		fmt.Fprintln(os.Stderr, "airbag: warning: --nix-daemon: Nix builds and substitutes run outside the sandbox and reach the network without the proxy")
 	}
+	runtimeConfig, err := sandbox.PreflightRuntime(execution, session.RuntimeConfig{RootFS: *rootfs, Binary: *runtimeBin, Kernel: *kernel}, ws, !*noHome, *nixDaemon, len(forwards), pol)
+	if err != nil {
+		return 2, err
+	}
 	var s *session.Session
 	if *resume != "" {
 		// Same branch, same outbox and labels; this run's command, plus
 		// whatever this run's flags add.
 		if s, err = session.ResumeChecked(*resume, ws, func(s *session.Session) error {
-			return validateExecution(s, execution, *requireIsolation)
+			if err := validateExecution(s, execution, *requireIsolation); err != nil {
+				return err
+			}
+			if s.Runtime != runtimeConfig {
+				return errors.New("resume requires the same runtime rootfs, binary and kernel")
+			}
+			return nil
 		}); err != nil {
 			return 1, err
 		}
@@ -240,12 +256,15 @@ func cmdRun(args []string) (int, error) {
 		fmt.Fprintf(os.Stderr, "airbag: resuming session %s (run %d) on its branch\n", s.ID, s.Runs)
 	} else {
 		meta := session.Meta{
-			Backend: execution.Name, Isolation: execution.Isolation, RequireIsolation: *requireIsolation,
+			Backend: execution.Name, Isolation: execution.Isolation, RequireIsolation: *requireIsolation, Runtime: runtimeConfig,
 			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
 			Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
 			PassEnv: passEnv, Strict: *strict, Forwards: forwards,
+		}
+		if execution.Name != "native" {
+			meta.OverHome, meta.Clone, meta.Passthrough = false, true, nil
 		}
 		if runtime.GOOS == "darwin" {
 			// The macOS prototype: the workspace branch is a clone, $HOME

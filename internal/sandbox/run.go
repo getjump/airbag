@@ -35,6 +35,11 @@ import (
 )
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
+	if s.Backend != "" && s.Backend != "native" {
+		if err := prepareRuntimeWorkspace(s); err != nil {
+			return 1, err
+		}
+	}
 	gate := policy.NewGate(pol, s.Dir)
 	restoreLabels(gate, s)
 	log, err := effects.Open(s.EffectsPath())
@@ -99,8 +104,21 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		return 1, err
 	}
 	defer func() { _ = box.Close() }()
-	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate, Root: s.Workspace}
+	root := s.Workspace
+	if s.Clone {
+		root = s.CloneDir()
+	}
+	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate, Root: root}
 	go func() { _ = ctl.Serve(cl) }()
+
+	if s.Backend != "" && s.Backend != "native" {
+		code, err := runOptional(s)
+		if err != nil {
+			return code, err
+		}
+		s.Status, s.ExitCode, s.Ended = session.StatusStopped, code, time.Now()
+		return code, s.Save()
+	}
 
 	// Pass-through dirs must exist on the host, or the agent would
 	// create them inside the branch and lose them on discard.

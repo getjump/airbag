@@ -28,22 +28,23 @@ const (
 type Meta struct {
 	// Execution boundary and the user's persisted requirement. Empty fields
 	// identify legacy native sessions, not a stronger isolation guarantee.
-	Backend          string    `json:"backend,omitempty"`
-	Isolation        string    `json:"isolation,omitempty"`
-	RequireIsolation string    `json:"require_isolation,omitempty"`
-	ID               string    `json:"id"`
-	Created          time.Time `json:"created"`
-	Ended            time.Time `json:"ended,omitzero"`
-	Workspace        string    `json:"workspace"`
-	Home             string    `json:"home"`
-	OverHome         bool      `json:"over_home"`
-	UID              int       `json:"uid"`
-	GID              int       `json:"gid"`
-	Argv             []string  `json:"argv"`
-	Cwd              string    `json:"cwd"`
-	Status           string    `json:"status"`
-	ExitCode         int       `json:"exit_code"`
-	Allow            []string  `json:"allow"`
+	Runtime          RuntimeConfig `json:"runtime,omitzero"`
+	Backend          string        `json:"backend,omitempty"`
+	Isolation        string        `json:"isolation,omitempty"`
+	RequireIsolation string        `json:"require_isolation,omitempty"`
+	ID               string        `json:"id"`
+	Created          time.Time     `json:"created"`
+	Ended            time.Time     `json:"ended,omitzero"`
+	Workspace        string        `json:"workspace"`
+	Home             string        `json:"home"`
+	OverHome         bool          `json:"over_home"`
+	UID              int           `json:"uid"`
+	GID              int           `json:"gid"`
+	Argv             []string      `json:"argv"`
+	Cwd              string        `json:"cwd"`
+	Status           string        `json:"status"`
+	ExitCode         int           `json:"exit_code"`
+	Allow            []string      `json:"allow"`
 	// Paths under $HOME that bypass the branch (agent state, logs).
 	Passthrough []string `json:"passthrough"`
 	// Paths under $HOME hidden from the agent (credentials).
@@ -80,6 +81,14 @@ type Meta struct {
 	// branch. The session's start, or the last rollback, which put the
 	// files back as they were.
 	Baseline time.Time `json:"baseline,omitempty"`
+}
+
+// RuntimeConfig persists the exact optional provider configuration for resume.
+// Paths name operator-supplied trusted artifacts; they are never guest requests.
+type RuntimeConfig struct {
+	RootFS string `json:"rootfs,omitempty"`
+	Binary string `json:"binary,omitempty"`
+	Kernel string `json:"kernel,omitempty"`
 }
 
 type Credential struct {
