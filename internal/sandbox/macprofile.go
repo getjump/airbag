@@ -191,25 +191,40 @@ func realMemory(home string) []string {
 	return out
 }
 
-// follow returns where p leads, with the links on the way followed: the
-// last one by what it says, though nothing may be there yet.
+// follow resolves links component by component, including existing ancestors
+// of a missing target. Seatbelt needs the canonical prefix even when the agent
+// could create the remaining directories later (/private/var, not /var).
 func follow(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
 	for range maxMemoryHops {
-		if d, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
-			p = filepath.Join(d, filepath.Base(p))
+		parts := strings.Split(strings.TrimPrefix(filepath.Clean(p), string(filepath.Separator)), string(filepath.Separator))
+		at := string(filepath.Separator)
+		linked := false
+		for i, part := range parts {
+			at = filepath.Join(at, part)
+			fi, err := os.Lstat(at)
+			if err != nil {
+				return filepath.Join(append([]string{at}, parts[i+1:]...)...)
+			}
+			if fi.Mode()&fs.ModeSymlink == 0 {
+				continue
+			}
+			target, err := os.Readlink(at)
+			if err != nil {
+				return filepath.Join(append([]string{at}, parts[i+1:]...)...)
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(at), target)
+			}
+			p = filepath.Join(append([]string{target}, parts[i+1:]...)...)
+			linked = true
+			break
 		}
-		fi, err := os.Lstat(p)
-		if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
-			return p
+		if !linked {
+			return at
 		}
-		t, err := os.Readlink(p)
-		if err != nil {
-			return p
-		}
-		if !filepath.IsAbs(t) {
-			t = filepath.Join(filepath.Dir(p), t)
-		}
-		p = t
 	}
 	return p
 }

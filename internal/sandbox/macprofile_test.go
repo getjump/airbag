@@ -15,6 +15,14 @@ import (
 func TestMacProfile(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	home, ws := t.TempDir(), t.TempDir()
+	// Seatbelt matches canonical paths; macOS's temporary directory uses /var.
+	var err error
+	if home, err = filepath.EvalSymlinks(home); err != nil {
+		t.Fatal(err)
+	}
+	if ws, err = filepath.EvalSymlinks(ws); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(ws, "apps", "web"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +85,33 @@ func TestMacProfile(t *testing.T) {
 	}
 	if !strings.Contains(text, `(remote ip "localhost:51234")`) || strings.Count(text, "network-outbound") != 2 {
 		t.Errorf("network rules:\n%s", text)
+	}
+}
+
+func TestFollowCanonicalizesMissingTargetAncestors(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(alias, "not-yet", "memory")
+	link := filepath.Join(root, "memory-link")
+	if err := os.Symlink(missing, link); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(canonical, "not-yet", "memory")
+	for _, path := range []string{missing, link} {
+		if got := follow(path); got != want {
+			t.Errorf("follow(%q) = %q, want %q", path, got, want)
+		}
 	}
 }
 
