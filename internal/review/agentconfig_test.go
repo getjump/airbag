@@ -982,3 +982,22 @@ func TestWriteBackStampSkipsARacingXattr(t *testing.T) {
 		t.Fatal("a host xattr after the write-back was recorded as airbag's own write")
 	}
 }
+
+// The write-back keeps the config's extended attributes: the
+// replacement is a new inode and is given them before the swap.
+func TestWriteBackKeepsXattrs(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
+	if err := unix.Setxattr(realPath, "user.host", []byte("kept"), 0); err != nil {
+		t.Skipf("no user xattrs here: %v", err)
+	}
+	SnapshotConfigs(s)
+	writeCfg(t, branchPath, `{"userID":"u","numStartups":2}`)
+	WriteBackConfigs(s)
+	if got := readCfg(t, realPath); got["numStartups"] != float64(2) {
+		t.Fatalf("real file = %v, want the counter written back", got)
+	}
+	if v, err := getXattr(realPath, "user.host"); err != nil || string(v) != "kept" {
+		t.Fatalf("xattr after write-back = %q (%v), want it kept", v, err)
+	}
+}

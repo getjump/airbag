@@ -900,6 +900,14 @@ func replaceIf(path string, data, want []byte, existed bool, keepDir string, unc
 	if err != nil {
 		return 0, err
 	}
+	if existed {
+		// The replacement is a new inode: it carries the file's extended
+		// attributes (ACLs, labels, the user's own) or nothing is written.
+		if err := copyXattrs(path, tmp); err != nil {
+			_ = os.Remove(tmp)
+			return 0, fmt.Errorf("%w: its extended attributes cannot be carried over (%w)", errNoAtomic, err)
+		}
+	}
 	f, err := os.Open(tmp) // follows the replacement's inode wherever it is renamed
 	if err != nil {
 		_ = os.Remove(tmp)
@@ -975,8 +983,65 @@ func replaceIf(path string, data, want []byte, existed bool, keepDir string, unc
 	return 0, errChanged
 }
 
-// errNoAtomic: the filesystem cannot swap or create a file atomically.
+// errNoAtomic: the file cannot be replaced atomically and whole.
 var errNoAtomic = errors.New("this filesystem cannot replace it atomically")
+
+// copyXattrs gives to every extended attribute from has, with its
+// value; one that to has already with the same value is left alone
+// (a default security label, say).
+func copyXattrs(from, to string) error {
+	names, err := listXattrs(from)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		v, err := getXattr(from, name)
+		if err != nil {
+			return err
+		}
+		if cur, err := getXattr(to, name); err == nil && bytes.Equal(cur, v) {
+			continue
+		}
+		if err := unix.Lsetxattr(to, name, v, 0); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func listXattrs(path string) ([]string, error) {
+	n, err := unix.Llistxattr(path, nil)
+	if errors.Is(err, unix.ENOTSUP) {
+		return nil, nil // no extended attributes on this filesystem
+	}
+	if err != nil || n == 0 {
+		return nil, err
+	}
+	buf := make([]byte, n)
+	if n, err = unix.Llistxattr(path, buf); err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, name := range bytes.Split(buf[:n], []byte{0}) {
+		if len(name) > 0 {
+			names = append(names, string(name))
+		}
+	}
+	return names, nil
+}
+
+func getXattr(path, name string) ([]byte, error) {
+	n, err := unix.Lgetxattr(path, name, nil)
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, n)
+	n, err = unix.Lgetxattr(path, name, buf)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:n], nil
+}
 
 // keptError reports a host write that a write-back displaced and could
 // not put back, kept at path.
