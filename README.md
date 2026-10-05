@@ -487,13 +487,17 @@ governs the effects any tool has: files, network, processes and secrets.
 ## Install
 
 ```console
-$ curl -fsSL https://raw.githubusercontent.com/getjump/airbag/main/install.sh | sh
+$ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/getjump/airbag/releases/latest/download/install.sh | sh
 $ airbag doctor
 ```
 
 The script installs the latest release for Linux or macOS 13 and later (amd64,
-arm64) into `~/.local/bin` after checking its SHA-256 against the release. Or
-from source, with Go 1.27.1 or newer:
+arm64) into `~/.local/bin`, without sudo. It checks the archive's SHA-256 against
+the release's `checksums.txt`, and when cosign or a logged-in `gh` is installed,
+that the release workflow built it. `| AIRBAG_VERSION=v0.1.0 sh` picks a release,
+and `| AIRBAG_VERIFY=require sh` refuses to install without the second check.
+[docs/verify.md](docs/verify.md) shows how to verify a release by hand or rebuild
+it. Or from source, with Go 1.27.1 or newer:
 `go install github.com/getjump/airbag/cmd/airbag@latest`.
 
 With Nix: `nix run github:getjump/airbag -- doctor`, or add the flake's
