@@ -539,6 +539,7 @@ func (p *Proxy) refuse(w http.ResponseWriter, target, host string, err error) bo
 // connect opens a tunnel. It is registered (f) before the dial, so a
 // cut while it dials closes it too.
 func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string, f *flow) {
+	f.begin() // before the dial: an upstream proxy that never answers CONNECT is quiet
 	up, err := p.dial(r.Context(), f, r.Host, !p.Allow.explicitIP(host))
 	if errors.Is(err, errStopped) {
 		answer(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
@@ -672,6 +673,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 		tr = &http.Transport{Proxy: http.ProxyURL(pu), DialContext: f.dialer((&net.Dialer{Timeout: 15 * time.Second}).DialContext)}
 	}
 	defer tr.CloseIdleConnections()
+	// Not before the holds: until begin only a cut stops the flow, so their
+	// answer, cut, is true. From here a quiet upstream or client stops it
+	// too, and the request fails.
+	f.begin()
 	resp, err := tr.RoundTrip(out)
 	if err != nil {
 		stopped()

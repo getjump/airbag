@@ -83,13 +83,13 @@ func (p *Proxy) limits() Limits {
 // connections that serve it. It is stopped (all of them closed) when it
 // has been quiet for idle, or for drain once one side has finished
 // sending, or when the session cuts it. A timer checks the quiet; no
-// goroutine waits for it.
+// goroutine waits for it. The quiet counts from begin.
 type flow struct {
 	host, target string // for Cut and its log
 	idle, drain  time.Duration
 	now          func() time.Time // the clock quiet is measured by
 	start        time.Time
-	last         atomic.Int64 // time since start when a byte last moved
+	last         atomic.Int64 // time since start when a byte last moved, or begin ran
 
 	mu      sync.Mutex
 	conns   map[io.Closer]bool
@@ -98,19 +98,31 @@ type flow struct {
 	timer   *time.Timer
 }
 
-// newFlow makes a flow that measures quiet by now, the real clock when
-// now is nil.
+// newFlow makes a flow whose idle clock has not started: see begin. It
+// measures quiet by now, the real clock when now is nil.
 func newFlow(idle, drain time.Duration, now func() time.Time) *flow {
 	if now == nil {
 		now = time.Now
 	}
-	f := &flow{idle: idle, drain: drain, now: now, start: now(), conns: map[io.Closer]bool{}}
+	return &flow{idle: idle, drain: drain, now: now, start: now(), conns: map[io.Closer]bool{}}
+}
+
+// begin starts the idle clock; the proxy calls it as it hands the
+// connection on. The time before is the proxy's own: its checks and its
+// log, whose write a slow disk or another writer can hold up past idle.
+// Counted as quiet, it stopped a flow that held nothing yet, and a
+// request to a host that would have answered was refused as cut. Until
+// begin only Cut or Close stops the flow, so that answer is true.
+func (f *flow) begin() {
 	f.mu.Lock() // check waits until f.timer is set
-	if idle > 0 {
-		f.timer = time.AfterFunc(idle, f.check)
+	defer f.mu.Unlock()
+	if f.stopped || f.timer != nil {
+		return
 	}
-	f.mu.Unlock()
-	return f
+	f.touch()
+	if lim := f.limit(); lim > 0 {
+		f.timer = time.AfterFunc(lim, f.check)
+	}
 }
 
 // touch records that a byte moved.
@@ -342,7 +354,9 @@ func (f *flow) pipe(a net.Conn, ar io.Reader, b net.Conn) {
 // sooner when no byte has moved for idle (0: no limit), or, once one
 // side has finished sending, when the other has been quiet for drain.
 func Relay(a, b net.Conn, idle, drain time.Duration) {
-	newFlow(idle, drain, nil).pipe(a, a, b)
+	f := newFlow(idle, drain, nil)
+	f.begin()
+	f.pipe(a, a, b)
 }
 
 // watchedConn marks its flow active on each byte read or written, and
