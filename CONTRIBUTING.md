@@ -31,6 +31,8 @@ user can write, to place a host socket there: `sudo mkdir -m 1777
 /var/lib/airbag-e2e` (or set `AIRBAG_E2E_HOSTDIR`); without it the check is
 skipped.
 
+WSL2 is checked by an informational CI job (`.github/workflows/wsl.yml`).
+
 On macOS, `go build ./cmd/airbag` builds the prototype and `go test ./...` runs
 the unit tests. Of the end-to-end tests, `test/e2e.sh` and
 `test/agent-state-e2e.sh` check what the prototype promises there, and CI runs
