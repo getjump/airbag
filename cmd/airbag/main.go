@@ -294,7 +294,11 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 	}
-	fmt.Fprintf(os.Stderr, "airbag: backend %s · isolation %s · egress %s\n", execution.Name, execution.Isolation, s.Egress)
+	// The default boundary adds no line to run's output; one asked for, or
+	// egress outside the proxy, is stated.
+	if s.Backend != "native" || (s.RequireIsolation != "" && s.RequireIsolation != "any") || s.Egress != sandbox.EgressProxy {
+		fmt.Fprintf(os.Stderr, "airbag: backend %s · isolation %s · egress %s\n", execution.Name, execution.Isolation, s.Egress)
+	}
 	if filepath.Base(argv[0]) == "codex" && !slices.Contains(argv, "--dangerously-bypass-approvals-and-sandbox") && !slices.Contains(argv, "--yolo") {
 		if *strict {
 			fmt.Fprintln(os.Stderr, "airbag: warning: Codex's own sandbox cannot start under --strict (no user namespaces), so its commands will fail; airbag is the sandbox, run codex with --dangerously-bypass-approvals-and-sandbox")

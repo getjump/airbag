@@ -8,7 +8,8 @@ isolation boundary, egress and explicit requirement in session metadata.
 Egress is `allowlist-proxy`, except in a session started with `--nix-daemon`:
 the Nix daemon's builds and substitutes reach the network outside the proxy,
 and the session records `allowlist-proxy+nix-daemon`. That is fixed when the
-session is created; `run` prints it for every run.
+session is created. `run` prints backend, isolation and egress when one of them
+is not the default: another backend, a requirement, or egress outside the proxy.
 
 Only `--backend=native` is implemented. Linux uses namespaces, overlayfs and
 seccomp; macOS uses Seatbelt and a workspace clone. Both share the host
