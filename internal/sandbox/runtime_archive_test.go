@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -99,6 +100,36 @@ func TestSymlinkedWorkspaceExportsItsFiles(t *testing.T) {
 	for _, f := range []string{"keep.txt", "sub/nested.txt"} {
 		if b, err := os.ReadFile(filepath.Join(dst, f)); err != nil || string(b) != f {
 			t.Fatalf("%s through a symlinked workspace: %q %v", f, b, err)
+		}
+	}
+}
+
+// Modes survive the copy whatever the umask: review compares them, and a
+// group-writable file must not show as changed.
+func TestArchiveKeepsModesPastUmask(t *testing.T) {
+	old := syscall.Umask(0o022)
+	defer syscall.Umask(old)
+	source, dst := t.TempDir(), t.TempDir()
+	for name, mode := range map[string]os.FileMode{"group-writable": 0o664, "private": 0o600, "script": 0o775} {
+		p := filepath.Join(source, name)
+		if err := os.WriteFile(p, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var buf bytes.Buffer
+	if _, err := exportWorkspace(source, &buf, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importWorkspace(dst, &buf); err != nil {
+		t.Fatal(err)
+	}
+	for name, mode := range map[string]os.FileMode{"group-writable": 0o664, "private": 0o600, "script": 0o775} {
+		st, err := os.Stat(filepath.Join(dst, name))
+		if err != nil || st.Mode().Perm() != mode {
+			t.Fatalf("%s: %v, want %v (%v)", name, st.Mode().Perm(), mode, err)
 		}
 	}
 }

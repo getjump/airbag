@@ -71,8 +71,14 @@ func importWorkspace(dst string, input io.Reader) (int, error) {
 				return count, fmt.Errorf("workspace exceeds export limit")
 			}
 			total += h.Size
-			f, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fs.FileMode(h.Mode&0o777))
+			mode := fs.FileMode(h.Mode & 0o777)
+			f, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 			if err != nil {
+				return count, err
+			}
+			// The umask masked the mode OpenFile gave; review compares it.
+			if err := f.Chmod(mode); err != nil {
+				_ = f.Close()
 				return count, err
 			}
 			_, err = io.CopyN(f, reader, h.Size)
