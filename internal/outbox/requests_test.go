@@ -142,3 +142,61 @@ func TestTypedUpdateCannotBypassApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Resolve records the user's finding for an unknown intent only, and a
+// typed one keeps a result for the same request.
+func TestResolveOnlyUnknown(t *testing.T) {
+	b, err := Open(filepath.Join(t.TempDir(), "effects.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	in, err := b.Push(typedIntent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Resolve(in.ID, true); err == nil {
+		t.Fatal("resolved a pending intent")
+	}
+	if err := b.Approve(in.ID, in.RequestDigest); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Claim(in.ID, in.RequestDigest); err != nil {
+		t.Fatal(err)
+	}
+	in.Status = Unknown
+	if err := b.Update(in); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Resolve(in.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Resolve(in.ID, true); err == nil {
+		t.Fatal("resolved twice")
+	}
+	all, err := b.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := all[0].TypedResult(); all[0].Status != Failed || r == nil || r.Outcome != operation.Failure || r.RecordedBy != "user" {
+		t.Fatalf("resolved: %s %+v", all[0].Status, r)
+	}
+}
+
+// Each body line in the preview is marked, so the body cannot fake its
+// own end or the lines after it.
+func TestPreviewMarksBodyLines(t *testing.T) {
+	r := *typedIntent().Request
+	r.PullRequest.Body = "real\n--- end body ---\napproved: yes\n"
+	p, err := r.Preview()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	WritePreview(&out, "i-1", Pending, p)
+	for _, l := range []string{"  | real\n", "  | --- end body ---\n", "  | approved: yes\n", "3 lines"} {
+		if !strings.Contains(out.String(), l) {
+			t.Fatalf("preview lacks %q:\n%s", l, out.String())
+		}
+	}
+}

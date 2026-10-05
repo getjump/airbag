@@ -1,0 +1,170 @@
+name: wsl
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # On a pull request only a change to this workflow runs it.
+    paths: [.github/workflows/wsl.yml]
+  schedule:
+    # A new WSL kernel or runner image shows up within a week.
+    - cron: "37 4 * * 3"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+# airbag has no Windows backend: this job runs the Linux one under WSL2
+# (Ubuntu 24.04 on a Windows runner), with WSL's kernel, user namespaces,
+# overlayfs on ext4 and /dev/fuse. It is informational (continue-on-error)
+# until it has a track record. The agent CLIs are not installed, so
+# claude-e2e and codex-e2e do not run here; the Linux job covers them.
+jobs:
+  wsl2:
+    name: wsl2 (informational)
+    runs-on: windows-2025
+    continue-on-error: true
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: keep LF line endings
+        # Git for Windows checks text out with CRLF; the scripts run in Linux.
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: cross-build airbag for Linux
+        shell: pwsh
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build -o "$env:RUNNER_TEMP/airbag" ./cmd/airbag
+      - uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          # What the e2e scripts call. golang-go only fetches the go.mod
+          # toolchain: kernel-e2e and creds-e2e build helpers with it, and
+          # kernel-e2e and mirror-e2e run go inside the sandbox.
+          additional-packages: ca-certificates curl fuse3 git golang-go gpg python3
+          # wsl-bash runs as this regular user; the setup uses -u root.
+          wsl-shell-user: tester
+
+      # WSLENV hands a Windows variable to WSL; /p translates the path.
+      - name: probe WSL2 as the user, before any change
+        continue-on-error: true
+        shell: wsl-bash {0}
+        env:
+          WSLENV: RUNNER_TEMP/p
+        run: |
+          out=$RUNNER_TEMP/wsl-e2e.md
+          row() { printf '| %s | %s |\n' "$1" "$2" | tee -a "$out"; }
+          printf '### WSL2 probe, before any change\n\n| what | value |\n|---|---|\n' > "$out"
+          row distribution "$(sed -n 's/^PRETTY_NAME="\(.*\)"$/\1/p' /etc/os-release)"
+          row kernel "$(uname -r)"
+          row id "$(id)"
+          if msg=$(unshare --user --map-root-user --mount true 2>&1); then v=ok; else v="FAIL: $msg"; fi
+          row "unshare --user --map-root-user --mount true" "$v"
+          if grep -qw overlay /proc/filesystems; then v=yes; else v=no; fi
+          row "overlay in /proc/filesystems" "$v"
+          row /dev/fuse "$(ls -l /dev/fuse 2>&1)"
+          f=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$f" ]; then v=$(cat "$f"); else v=absent; fi
+          row kernel.apparmor_restrict_unprivileged_userns "$v"
+          row "active LSMs" "$(cat /sys/kernel/security/lsm 2>/dev/null || echo unknown)"
+
+      - name: install airbag and Go, prepare the machine (root)
+        shell: wsl-bash -u root {0}
+        env:
+          GO_VERSION: ${{ steps.go.outputs.go-version }}
+          WSLENV: RUNNER_TEMP/p:GO_VERSION
+        run: |
+          install -m 755 "$RUNNER_TEMP/airbag" /usr/local/bin/airbag
+          mkdir -m 1777 /var/lib/airbag-e2e
+          if [ -c /dev/fuse ] && [ "$(stat -c %a /dev/fuse)" != 666 ]; then chmod 666 /dev/fuse; fi
+          f=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$f" ]; then echo 0 > "$f"; fi
+          # The toolchain setup-go installed on Windows, for Linux, from
+          # proxy.golang.org and checked against sum.golang.org.
+          cd /
+          goroot=$(GOTOOLCHAIN="go$GO_VERSION" GOMODCACHE=/opt/go-toolchain go env GOROOT)
+          ln -sf "$goroot/bin/go" "$goroot/bin/gofmt" /usr/local/bin/
+          /usr/local/bin/go version
+
+      - name: copy the repository into the ext4 home
+        shell: wsl-bash {0}
+        env:
+          WSLENV: GITHUB_WORKSPACE/p
+        run: |
+          if [ "$(id -u)" = 0 ]; then echo "::error::the e2e tests must not run as root"; exit 1; fi
+          rm -rf ~/airbag
+          cp -r "$GITHUB_WORKSPACE" ~/airbag
+          if grep -l $'\r' ~/airbag/test/*.sh ~/airbag/test/*.py; then
+            echo "::error::CRLF line endings in the copy; the scripts would break"
+            exit 1
+          fi
+
+      - name: end-to-end tests
+        shell: wsl-bash {0}
+        env:
+          WSLENV: RUNNER_TEMP/p
+        run: |
+          # WSL appends the Windows PATH, whose npm (a shell script) the
+          # e2e scripts would find; use the distribution's own tools.
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          cd ~/airbag
+          out=$RUNNER_TEMP/wsl-e2e.md
+          log=$(mktemp)
+          failed=0
+          printf '\n### WSL2 end-to-end tests\n\n| check | result |\n|---|---|\n' >> "$out"
+          # check NAME CMD...: runs CMD for at most 10 minutes, records the
+          # result and what it skipped, and goes on after a failure.
+          check() {
+            name=$1
+            shift
+            echo "::group::$name"
+            set +e
+            timeout 600 "$@" 2>&1 | tee "$log"
+            status=${PIPESTATUS[0]}
+            set -e
+            echo "::endgroup::"
+            case $status in
+            0) result=PASS ;;
+            124) result="FAIL (timed out)" failed=1 ;;
+            *) result="FAIL (exit $status)" failed=1 ;;
+            esac
+            skipped=$(sed -n -e 's/^SKIP: //p' -e 's/^note: \(.*skipping.*\)/\1/p' "$log" |
+              tr '|' '/' | awk '{ printf "%s%s", (NR > 1 ? "<br>" : ""), $0 }')
+            echo "$name: $result"
+            if [ "$status" != 0 ]; then echo "::warning title=WSL2 e2e::$name: $result"; fi
+            printf '| %s | %s%s |\n' "$name" "$result" "${skipped:+<br>skipped: $skipped}" >> "$out"
+          }
+          check "airbag doctor" airbag doctor
+          for t in test/e2e.sh test/*-e2e.sh; do
+            case $t in
+            test/claude-e2e.sh | test/codex-e2e.sh)
+              printf '| %s | not run: no agent CLI in this job |\n' "$t" >> "$out"
+              continue
+              ;;
+            esac
+            check "$t" sh "$t"
+          done
+          check test/ctrlc.py python3 test/ctrlc.py
+          exit "$failed"
+
+      - name: summary
+        if: always()
+        shell: pwsh
+        run: |
+          $f = Join-Path $env:RUNNER_TEMP 'wsl-e2e.md'
+          if (Test-Path $f) { Get-Content -Raw $f | Add-Content $env:GITHUB_STEP_SUMMARY }

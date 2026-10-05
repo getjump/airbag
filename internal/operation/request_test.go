@@ -121,3 +121,15 @@ func FuzzRequestDigest(f *testing.F) {
 		}
 	})
 }
+
+func TestBodyFitsGitHub(t *testing.T) {
+	r := validRequest()
+	r.PullRequest.Body = strings.Repeat("é", MaxBodyChars)
+	if _, err := r.Digest(); err != nil {
+		t.Fatalf("refused a body GitHub accepts: %v", err)
+	}
+	r.PullRequest.Body += "é"
+	if _, err := r.Digest(); err == nil {
+		t.Fatal("accepted a body GitHub refuses")
+	}
+}

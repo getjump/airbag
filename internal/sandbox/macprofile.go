@@ -195,9 +195,7 @@ func realMemory(home string) []string {
 // last one by what it says, though nothing may be there yet.
 func follow(p string) string {
 	for range maxMemoryHops {
-		if d, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
-			p = filepath.Join(d, filepath.Base(p))
-		}
+		p = filepath.Join(realPrefix(filepath.Dir(p)), filepath.Base(p))
 		fi, err := os.Lstat(p)
 		if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
 			return p
@@ -212,6 +210,23 @@ func follow(p string) string {
 		p = t
 	}
 	return p
+}
+
+// realPrefix resolves the links in the longest part of p that exists
+// and joins the rest on as written: Seatbelt checks the path a write
+// resolves to, so a path that does not exist yet is spelled from its
+// real parent (/private/var for /var on macOS).
+func realPrefix(p string) string {
+	rest := ""
+	for d := p; ; d = filepath.Dir(d) {
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			return filepath.Join(r, rest)
+		}
+		if filepath.Dir(d) == d {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(d), rest)
+	}
 }
 
 // maxMemoryHops bounds the links follow follows, against a loop.

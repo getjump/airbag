@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/getjump/airbag/internal/operation"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/review"
 	"github.com/getjump/airbag/internal/session"
@@ -351,12 +352,25 @@ func gitTouched(cs []review.Change) bool {
 }
 
 func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reader, o Options) error {
+	lock, err := box.LockExecution()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }()
 	intents, err := box.List()
 	if err != nil {
 		return err
 	}
-	failed := "" // after a failure the rest wait: a PR without its push means nothing
+	// After a failure the rest wait (a PR without its push means
+	// nothing), in this run; after an unknown outcome they wait until the
+	// user records what happened with `airbag outbox resolve`. An intent
+	// left pending (--yes, --branch, --trust-git) holds nothing back.
+	failed, unknown := "", ""
 	for _, it := range intents {
+		if it.Status == outbox.Unknown {
+			unknown = it.ID
+			continue
+		}
 		if it.Status == outbox.Running {
 			// A run was recorded but not its end: airbag stopped mid-push.
 			it.Status = outbox.Unknown
@@ -369,9 +383,16 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 				return fmt.Errorf("intent %s: %w", it.ID, err)
 			}
 			fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
+			unknown = it.ID
 			continue
 		}
-		if it.Status != outbox.Pending {
+		if it.Status != outbox.Pending && !(it.Request != nil && it.Status == string(operation.Approved)) {
+			continue
+		}
+		if unknown != "" {
+			fmt.Fprintf(o.Out, "intent %s left pending: the outcome of %s is unknown; check what it did, then record it with "+
+				"`airbag outbox resolve %s done|failed %s`, and `airbag apply %s` runs the rest\n",
+				it.ID, unknown, unknown, s.ID, s.ID)
 			continue
 		}
 		if failed != "" {
@@ -385,14 +406,19 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 			status, err = runPush(s, box, it, risky, in, o)
 		case outbox.KindCmd:
 			status, err = runCmd(s, box, it, risky, in, o)
+		case outbox.KindPullRequest:
+			status, err = runPullRequest(s, box, it, in, o)
 		default:
 			status, err = reject(box, it, "unknown kind "+it.Kind, o)
 		}
 		if err != nil {
 			return err
 		}
-		if status == outbox.Failed {
+		switch status {
+		case outbox.Failed:
 			failed = it.ID
+		case outbox.Unknown:
+			unknown = it.ID
 		}
 	}
 	return nil
@@ -498,7 +524,14 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, i
 	if err != nil {
 		return reject(box, it, fmt.Sprintf("%s: not found on this machine", it.Argv[0]), o)
 	}
-	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, s.Workspace) {
+	// The program's path has its links resolved, so the workspace's is
+	// compared with its links resolved too (a workspace under ~/code ->
+	// /mnt/data/code, or /tmp -> /private/tmp on macOS).
+	ws := s.Workspace
+	if r, err := filepath.EvalSymlinks(ws); err == nil {
+		ws = r
+	}
+	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, ws) || within(abs, s.Workspace) {
 		return reject(box, it, fmt.Sprintf("%s resolves to %s, inside the workspace; deferred commands run only programs from outside it", it.Argv[0], prog), o)
 	}
 	rels := make([]string, 0, len(it.Files))
