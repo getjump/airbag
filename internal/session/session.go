@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -31,19 +32,19 @@ type Meta struct {
 	Ended     time.Time `json:"ended,omitzero"`
 	Workspace string    `json:"workspace"`
 	Home      string    `json:"home"`
-	// WorkspaceReal and HomeReal: where Workspace and Home led, links
-	// resolved, when the session began. Apply writes nothing below one
-	// that leads elsewhere now (the host put a link in its place).
-	WorkspaceReal string   `json:"workspace_real,omitempty"`
-	HomeReal      string   `json:"home_real,omitempty"`
-	OverHome      bool     `json:"over_home"`
-	UID           int      `json:"uid"`
-	GID           int      `json:"gid"`
-	Argv          []string `json:"argv"`
-	Cwd           string   `json:"cwd"`
-	Status        string   `json:"status"`
-	ExitCode      int      `json:"exit_code"`
-	Allow         []string `json:"allow"`
+	// WorkspaceID and HomeID: the directories Workspace and Home were
+	// when the session began. Apply writes nothing below one that is
+	// another directory now.
+	WorkspaceID DirID    `json:"workspace_id,omitzero"`
+	HomeID      DirID    `json:"home_id,omitzero"`
+	OverHome    bool     `json:"over_home"`
+	UID         int      `json:"uid"`
+	GID         int      `json:"gid"`
+	Argv        []string `json:"argv"`
+	Cwd         string   `json:"cwd"`
+	Status      string   `json:"status"`
+	ExitCode    int      `json:"exit_code"`
+	Allow       []string `json:"allow"`
 	// Paths under $HOME that bypass the branch (agent state, logs).
 	Passthrough []string `json:"passthrough"`
 	// BranchHoles: paths under a Passthrough directory that stay in the
@@ -95,6 +96,35 @@ type Meta struct {
 	// Baseline, conflicts: the apply's own write is not a host edit.
 	Applied map[string]time.Time `json:"applied,omitempty"`
 }
+
+// DirID is a directory as a session found it: its path with links
+// resolved, and its device and inode, which tell it from another
+// directory made at the same path.
+type DirID struct {
+	Real string `json:"real"`
+	Dev  uint64 `json:"dev"`
+	Ino  uint64 `json:"ino"`
+}
+
+// DirIDOf is the directory p names now.
+func DirIDOf(p string) (DirID, error) {
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return DirID{}, err
+	}
+	fi, err := os.Stat(real)
+	if err != nil {
+		return DirID{}, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return DirID{}, fmt.Errorf("%s: no device and inode", p)
+	}
+	return DirID{Real: real, Dev: u64(st.Dev), Ino: u64(st.Ino)}, nil
+}
+
+// u64 widens a stat field, whose type differs between Linux and macOS.
+func u64[T int32 | uint32 | int64 | uint64](v T) uint64 { return uint64(v) }
 
 type Credential struct {
 	Name        string   `json:"name"`

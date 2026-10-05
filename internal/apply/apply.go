@@ -956,37 +956,39 @@ func parentsUnlinked(c review.Change, replacing []string) error {
 	return nil
 }
 
-// roots maps the workspace and $HOME, as the session names them, to where
-// they led when it began.
-type roots map[string]string
+// roots maps the workspace and $HOME, as the session names them, to the
+// directories they were when it began.
+type roots map[string]session.DirID
 
 func rootsOf(s *session.Session) roots {
 	r := roots{}
-	if s.WorkspaceReal != "" {
-		r[s.Workspace] = s.WorkspaceReal
+	if s.WorkspaceID.Real != "" {
+		r[s.Workspace] = s.WorkspaceID
 	}
-	if s.HomeReal != "" {
-		r[s.Home] = s.HomeReal
+	if s.HomeID.Real != "" {
+		r[s.Home] = s.HomeID
 	}
 	return r
 }
 
-// check refuses a root that leads elsewhere than when the session began:
-// the host renamed the workspace and put a link in its place, say. Every
-// change below it, a new top-level file included, would land there.
-// A path the session did not record (a session from before roots were
-// recorded) is not checked.
+// check refuses a root that is another directory than when the session
+// began: the host renamed the workspace and put a link or a new
+// directory in its place, say. Every change below it, a new top-level
+// file included, would land there. A path the session did not record
+// (a session from before roots were recorded) is not checked.
 func (r roots) check(root string) error {
 	want, ok := r[root]
 	if !ok {
 		return nil
 	}
-	got, err := filepath.EvalSymlinks(root)
-	if err != nil {
+	got, err := session.DirIDOf(root)
+	switch {
+	case err != nil:
 		return fmt.Errorf("%s, the session's root: %w", root, err)
-	}
-	if got != want {
-		return fmt.Errorf("%s leads to %s now, not to %s as when the session began, so the changes would land there; put the directory back or discard the session", root, got, want)
+	case got.Real != want.Real:
+		return fmt.Errorf("%s leads to %s now, not to %s as when the session began, so the changes would land there; put the directory back or discard the session", root, got.Real, want.Real)
+	case got.Dev != want.Dev || got.Ino != want.Ino:
+		return fmt.Errorf("%s is another directory than when the session began (that one was moved or removed), so the changes would land in this one; put the directory back or discard the session", root)
 	}
 	return nil
 }

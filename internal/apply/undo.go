@@ -204,6 +204,14 @@ func (g *generation) finish() error {
 // and the agent's version returns to the session. It reports the paths
 // it had to leave.
 func (g *generation) rollback(out io.Writer) (left int, err error) {
+	// Through a root that is another directory now, the rollback would
+	// remove and restore there. Every entry is checked before anything
+	// moves, when an apply that failed rolls itself back too.
+	for _, e := range g.Entries {
+		if err := g.roots.held(e.Path, e.Rel); err != nil {
+			return len(g.Entries), fmt.Errorf("nothing rolled back: %w", err)
+		}
+	}
 	dirs := slices.Clone(g.Dirs) // directories the apply created, removed last, deepest first
 	var kept []genEntry
 	keep := func(e genEntry, why string) {
@@ -668,14 +676,7 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// Restoring through a root that leads elsewhere now would write the
-	// saved versions there.
-	rs := rootsOf(s)
-	for _, e := range g.Entries {
-		if err := rs.held(e.Path, e.Rel); err != nil {
-			return fmt.Errorf("nothing rolled back: %w", err)
-		}
-	}
+	g.roots = rootsOf(s)
 	n, partial := len(g.Entries), g.Partial
 	left, err := g.rollback(out)
 	if err != nil {

@@ -571,11 +571,11 @@ func TestCmdNamesSessionStorage(t *testing.T) {
 // than when the session began.
 func TestOutboxWaitsForMovedRoot(t *testing.T) {
 	s, box := testBox(t)
-	real, err := filepath.EvalSymlinks(s.Workspace)
+	id, err := session.DirIDOf(s.Workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.WorkspaceReal = real
+	s.WorkspaceID = id
 	log := tool(t, "pubtool", "0")
 	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "release"}, Cwd: s.Workspace})
 	if err := os.Rename(s.Workspace, s.Workspace+".old"); err != nil {

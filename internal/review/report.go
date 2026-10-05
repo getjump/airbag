@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -118,7 +119,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	if r.Steps == nil {
 		r.Steps = []steps.Step{}
 	}
-	deleted, links := 0, 0
+	deleted := 0
 	for _, c := range cs {
 		typ := "file"
 		switch c.Type {
@@ -126,9 +127,6 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			typ = "dir"
 		case fs.ModeSymlink:
 			typ = "symlink"
-			if c.Kind != Deleted {
-				links++
-			}
 		}
 		r.Changes = append(r.Changes, ReportChange{Layer: c.Layer, Path: filepath.ToSlash(c.Rel), Kind: c.Kind, Type: typ, Flags: c.Flags})
 		if c.Layer == "ws" && c.Kind == Deleted && !strings.HasPrefix(c.Rel, ".git/") {
@@ -191,6 +189,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			Why: fmt.Sprintf("%d refusals not logged: more than %d a second", dropped[kind], effects.RefuseRate)})
 	}
 	secrets := knownSecrets(s.Workspace)
+	out := linksOut(s, cs)
 	for _, in := range intents {
 		r.Outbox = append(r.Outbox, ReportIntent{ID: in.ID, Kind: in.Kind, Argv: in.Argv, Status: in.Status, Files: in.Files, Request: in.Request, RequestDigest: in.RequestDigest, Result: in.TypedResult()})
 		if (in.Status == outbox.Pending || in.Status == string(operation.Approved)) && intentHasSecret(in, secrets) {
@@ -199,10 +198,8 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 		switch in.Status {
 		case outbox.Pending, string(operation.Approved):
 			why := "`" + outbox.Line(in.Argv) + "` waits for apply"
-			if in.Kind == outbox.KindCmd && links > 0 {
-				// Apply holds deferred commands while a link the session
-				// put in the real files leads out of the workspace.
-				why += fmt.Sprintf("; a link out of the workspace among the %d this session adds holds it (`airbag apply --trust-links` runs it anyway)", links)
+			if in.Kind == outbox.KindCmd && out > 0 {
+				why += fmt.Sprintf("; %d links this session adds lead out of the workspace, and apply holds it while one does, unless it leads to an installed program (`airbag apply --trust-links` runs it anyway)", out)
 			}
 			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: why})
 		case outbox.Unknown:
@@ -212,6 +209,35 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	}
 	sort.SliceStable(r.Attention, func(i, j int) bool { return attentionRank(r.Attention[i].What) < attentionRank(r.Attention[j].What) })
 	return r
+}
+
+// linksOut counts the links cs adds whose target, as the agent wrote
+// it, is outside the workspace. Apply holds the session's deferred
+// commands while such a link is in the real files, unless it leads to an
+// installed program; a link review cannot read counts.
+func linksOut(s *session.Session, cs []Change) int {
+	in := func(p, dir string) bool {
+		return dir != "" && (p == dir || strings.HasPrefix(p, dir+string(filepath.Separator)))
+	}
+	n := 0
+	for _, c := range cs {
+		if c.Type != fs.ModeSymlink || c.Kind == Deleted {
+			continue
+		}
+		t, err := os.Readlink(c.Upper)
+		if err != nil {
+			n++
+			continue
+		}
+		if !filepath.IsAbs(t) {
+			t = filepath.Join(filepath.Dir(c.Path), t)
+		}
+		t = filepath.Clean(t)
+		if !in(t, s.Workspace) && !in(t, s.WorkspaceID.Real) {
+			n++
+		}
+	}
+	return n
 }
 
 func attentionRank(what string) int {

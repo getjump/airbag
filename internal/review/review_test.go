@@ -321,13 +321,25 @@ func TestReportDroppedRefusals(t *testing.T) {
 }
 
 // A deferred command's line names --trust-links when the session adds
-// links, since a link out of the workspace holds the command at apply.
+// links that lead out of the workspace, since apply holds the command
+// while one is in the real files; a link inside does not.
 func TestReportNamesTrustLinks(t *testing.T) {
-	s := &session.Session{Meta: session.Meta{ID: "s-1", Workspace: "/w"}}
+	ws := t.TempDir()
+	s := &session.Session{Meta: session.Meta{ID: "s-1", Workspace: ws}}
 	cmd := outbox.Intent{ID: "i-1", Kind: outbox.KindCmd, Argv: []string{"pubtool", "release"}, Status: outbox.Pending}
 	push := outbox.Intent{ID: "i-2", Kind: outbox.KindPush, Argv: []string{"git", "push"}, Status: outbox.Pending}
-	link := Change{Layer: "ws", Rel: "docs", Path: "/w/docs", Kind: Added, Type: fs.ModeSymlink}
-	gone := Change{Layer: "ws", Rel: "old", Path: "/w/old", Kind: Deleted, Type: fs.ModeSymlink}
+	upper := t.TempDir()
+	link := func(name, target string) Change {
+		if err := os.Symlink(target, filepath.Join(upper, name)); err != nil {
+			t.Fatal(err)
+		}
+		return Change{Layer: "ws", Rel: name, Path: filepath.Join(ws, name), Upper: filepath.Join(upper, name), Kind: Added, Type: fs.ModeSymlink}
+	}
+	out := link("docs", "/etc/app")
+	up := link("parent", "../elsewhere")
+	inner := link("latest", "v1")
+	abs := link("abs", filepath.Join(ws, "v2"))
+	gone := Change{Layer: "ws", Rel: "old", Path: filepath.Join(ws, "old"), Kind: Deleted, Type: fs.ModeSymlink}
 	why := func(cs []Change, id string) string {
 		for _, a := range BuildReport(s, cs, nil, []outbox.Intent{cmd, push}, nil).Attention {
 			if a.Target == id {
@@ -337,13 +349,13 @@ func TestReportNamesTrustLinks(t *testing.T) {
 		t.Fatalf("no attention for %s", id)
 		return ""
 	}
-	if w := why([]Change{link}, "i-1"); !strings.Contains(w, "airbag apply --trust-links") || !strings.Contains(w, "among the 1 ") {
-		t.Errorf("the command's line does not name --trust-links: %s", w)
+	if w := why([]Change{out, up, inner}, "i-1"); !strings.Contains(w, "airbag apply --trust-links") || !strings.Contains(w, "2 links") {
+		t.Errorf("the command's line does not name --trust-links for 2 links out: %s", w)
 	}
-	if w := why([]Change{link}, "i-2"); strings.Contains(w, "trust-links") {
+	if w := why([]Change{out}, "i-2"); strings.Contains(w, "trust-links") {
 		t.Errorf("a push names --trust-links, which does not hold it: %s", w)
 	}
-	if w := why([]Change{gone}, "i-1"); strings.Contains(w, "trust-links") {
-		t.Errorf("a removed link holds nothing: %s", w)
+	if w := why([]Change{inner, abs, gone}, "i-1"); strings.Contains(w, "trust-links") {
+		t.Errorf("links inside the workspace, or removed, hold nothing: %s", w)
 	}
 }

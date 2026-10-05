@@ -95,8 +95,8 @@ The command runs on your machine, with your environment and credentials, after
   directories) do not count; links to any directory outside, `/usr` included, or
   to a configuration file anyone may read, do. Remove
   or replace the links, or after inspecting them run `airbag apply --trust-links`;
-  `airbag review --attention` says so on the command's line when the session
-  adds links;
+  `airbag review --attention` says so on the command's line when links the
+  session adds lead out of the workspace;
 - after a failure the rest wait in that apply, since a pull request without its push
   means nothing; after an unknown outcome they wait until you record what happened
   (`airbag outbox resolve`); after `apply --branch` generic commands wait, because the
