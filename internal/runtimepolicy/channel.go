@@ -158,6 +158,9 @@ func ServeWithOptions(c net.Conn, gate *policy.Gate, log *effects.Log, options O
 					if d.Verdict != policy.Allow {
 						reply.Message = policy.Explain(d, id)
 					}
+					// The log names the rule that matched, as the shell's
+					// checks do; its message went to the agent above.
+					d.Message = d.Rule
 				}
 				if options.Profile != nil {
 					options.Profile.Record("runtime.gate."+r.Source+"."+r.Kind, time.Since(gateStart), 1)

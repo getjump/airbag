@@ -347,3 +347,48 @@ func TestOversizedRequestRefusedBeforeSending(t *testing.T) {
 		t.Fatalf("wrong log: %+v %v", events, err)
 	}
 }
+
+// The log names the rule that matched, with or without a message; the
+// message goes to the agent.
+func TestRuntimeDecisionLogsTheRule(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "airbag.yaml"), []byte(`rules:
+  - name: no-tool
+    when: effect.kind == "proc.exec" && effect.target == "/bin/tool"
+    verdict: deny
+    message: run the vendored one instead
+  - name: no-scratch
+    when: effect.kind == "fs.write" && effect.target == "/work/scratch"
+    verdict: deny
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := policy.Load(dir, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "effects.db")
+	log, err := effects.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = log.Close() }()
+	server, peer := net.Pipe()
+	defer peer.Close()
+	go func() { _ = Serve(server, policy.NewGate(p, dir), log) }()
+	client := NewClient(peer)
+	err = client.Check(Request{Source: "seccomp", Kind: "proc.exec", Target: "/bin/tool", PID: 7})
+	if err == nil || !strings.Contains(err.Error(), "run the vendored one instead") {
+		t.Fatalf("the agent is not told the rule's message: %v", err)
+	}
+	if err := client.Check(Request{Source: "fuse", Kind: "fs.write", Target: "/work/scratch", PID: 7}); err == nil {
+		t.Fatal("denied write allowed")
+	}
+	events, err := effects.Read(path)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("events: %+v %v", events, err)
+	}
+	if events[0].Reason != "no-tool" || events[1].Reason != "no-scratch" {
+		t.Fatalf("the log does not name the rules: %q, %q", events[0].Reason, events[1].Reason)
+	}
+}
