@@ -150,7 +150,7 @@ func cmdRun(args []string) (int, error) {
 	requireIsolation := fs.String("require-isolation", "any", "require an exact isolation boundary; never fall back")
 	var allow stringList
 	fs.Var(&allow, "allow", "extra host to allow, e.g. api.github.com or *.example.com (repeatable)")
-	noHome := fs.Bool("no-home", false, "do not branch $HOME (it stays read-only)")
+	noHome := fs.Bool("no-home", false, "native: read-only HOME; optional runtime: private empty HOME")
 	var passEnv stringList
 	fs.Var(&passEnv, "pass-env", "give the agent this credential-like environment variable (repeatable)")
 	strict := fs.Bool("strict", false, "keep the agent from creating user namespaces; breaks the agents' own sandboxes and Chromium's sandbox")

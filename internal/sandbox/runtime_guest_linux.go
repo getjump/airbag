@@ -81,6 +81,11 @@ func guestSetup(c guestConfig, vm bool) error {
 		if err := unix.Mount("/dev/vdb", c.Workspace, "ext4", unix.MS_NOSUID|unix.MS_NODEV, ""); err != nil {
 			return err
 		}
+		if c.GeneratedRecoveryDir {
+			if err := os.Remove(filepath.Join(c.Workspace, "lost+found")); err != nil {
+				return fmt.Errorf("remove generated recovery directory: %w", err)
+			}
+		}
 		work, err := os.OpenRoot(c.Workspace)
 		if err != nil {
 			return err

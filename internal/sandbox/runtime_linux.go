@@ -26,13 +26,14 @@ import (
 const guestConfigPath = "/run/airbag/config.json"
 
 type guestConfig struct {
-	Backend   string   `json:"backend"`
-	Argv      []string `json:"argv"`
-	Env       []string `json:"env"`
-	Cwd       string   `json:"cwd"`
-	Workspace string   `json:"workspace"`
-	UID       int      `json:"uid"`
-	GID       int      `json:"gid"`
+	Backend              string   `json:"backend"`
+	GeneratedRecoveryDir bool     `json:"generated_recovery_dir,omitempty"`
+	Argv                 []string `json:"argv"`
+	Env                  []string `json:"env"`
+	Cwd                  string   `json:"cwd"`
+	Workspace            string   `json:"workspace"`
+	UID                  int      `json:"uid"`
+	GID                  int      `json:"gid"`
 }
 
 func optionalHostReady(backend string) error {
@@ -58,7 +59,10 @@ func optionalHostReady(backend string) error {
 			return fmt.Errorf("microvm requires mkfs.ext4: %w", err)
 		}
 	}
-	if len(session.Root()+"/s-abcdef/v.sock_4002") >= 108 {
+	if !filepath.IsAbs(session.Root()) {
+		return fmt.Errorf("optional runtime requires an absolute AIRBAG_HOME")
+	}
+	if len(session.Root()+"/s-abcdef/run/proxy.sock") >= 108 {
 		return fmt.Errorf("optional runtime session root is too long for Unix sockets; choose a shorter AIRBAG_HOME")
 	}
 	return nil
@@ -167,6 +171,10 @@ func runOptional(s *session.Session) (int, error) {
 		cwd = filepath.Join(cwd, rel)
 	}
 	cfg := guestConfig{Backend: s.Backend, Argv: s.Argv, Env: agentEnvFor(s, ProxyAddr, "/run/airbag/bin", "/tmp", extra), Cwd: cwd, Workspace: s.CloneDir(), UID: uid, GID: gid}
+	if s.Backend == "microvm" {
+		_, err := os.Lstat(filepath.Join(s.CloneDir(), "lost+found"))
+		cfg.GeneratedRecoveryDir = os.IsNotExist(err)
+	}
 	if err := writeJSONFile(r, "run/airbag/config.json", cfg); err != nil {
 		return 1, err
 	}

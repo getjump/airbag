@@ -119,6 +119,7 @@ rules:
                 review = call('review', sid, '--json')
                 (case / 'review.json').write_text(review.stdout)
                 assert review.returncode == 0 and 'result.txt' in review.stdout and 'publisher' in review.stdout
+                assert 'lost+found' not in review.stdout
                 effects = call('log', sid)
                 (case / 'effects.log').write_text(effects.stdout)
                 assert 'runtime-deny-localhost' in effects.stdout

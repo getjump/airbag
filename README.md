@@ -347,6 +347,11 @@ $ airbag doctor
 ```
 
 `airbag capabilities [--json]` describes the compiled execution boundary.
+Linux can also use experimental `--backend=gvisor` or `--backend=microvm`
+with an isolated workspace profile and the same host policy/proxy/outbox.
+See [runtime options](docs/runtime-options.md) for prerequisites, explicit
+unsupported requirements, and real-provider validation. Native remains the default.
+
 The current native backend shares the host kernel; gVisor and microVM are
 not implemented. `run --require-isolation=virtual-machine` refuses to run
 instead of falling back. See [execution boundaries](docs/execution-backends.md).

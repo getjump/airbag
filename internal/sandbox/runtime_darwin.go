@@ -6,4 +6,5 @@ import "fmt"
 
 func Guest([]string) int { fmt.Println("airbag: optional runtime guest requires Linux"); return 125 }
 
-func optionalHostReady(string) error { return fmt.Errorf("optional execution requires Linux") }
+// PreflightRuntime rejects non-Linux providers before reaching host readiness.
+func optionalHostReady(string) error { return nil }

@@ -92,3 +92,27 @@ Raw timings/logs are artifacts, including failures. Timings measure this small
 integration fixture; they are not comparable to the earlier vendored Airbag
 build experiment. Unit tests exercise hostile exports and unsupported profiles;
 regular CI continues native end-to-end, race, lint and Darwin cross-build checks.
+
+## First passing real-provider run
+
+Measured adapter commit: `e8cf0bb667f65b844dee18632e35f85a1f1c4db4`.
+[CI run 37261063714](https://github.com/getjump/airbag/actions/runs/37261063714),
+[raw artifact 11325136010](https://github.com/getjump/airbag/actions/runs/37261063714/artifacts/11325136010).
+Both providers pass all nine guest checks, host-observed credential use (two
+requests each), unchanged source before apply, resume and explicit file apply.
+The result is one trial per backend on one runner:
+
+| Backend | Cold fixture build | Whole initial Airbag run |
+| --- | ---: | ---: |
+| gVisor | 8.078 s | 9.401 s |
+| Firecracker | 5.885 s | 10.141 s |
+
+This compiles a single Go program and its standard library dependencies with a
+fresh private cache, `GOMAXPROCS=1`, `-p=1`, and networking disabled for Go.
+Whole-run time includes CLI setup, workspace/rootfs staging, policy/credential
+checks, execution, result export and shutdown. Firecracker is 1 vCPU/2 GiB; there
+is no matching native trial here. These numbers validate an operating adapter,
+not a performance ranking or a substitute for the full vendored Airbag build
+experiment in #19. Later code removes mkfs's generated `lost+found` before the
+agent starts, preserving a recovery directory already present in source.
+Raw JSON and versions are in `testdata/runtime-options/2026-10-05/`.

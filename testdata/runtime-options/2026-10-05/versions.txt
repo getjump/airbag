@@ -1,0 +1,10 @@
+runsc version release-20260928.0
+spec: 1.2.1
+Firecracker v1.17.0
+
+2026-10-05T03:52:06.793441873 [anonymous-instance:main] Firecracker exiting successfully. exit_code=0
+go version go1.27.1 linux/amd64
+Linux runnervm8df0l 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+d2a818c7c206aa9e65fae8f864fd1d6d277b64d36d04d3271345dfd3da4ea96c  probe
+44c8465ac715ce7a6903412baede35355cc007a28a4ef104d9cdef2c1de7a126  airbag
+e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2  vmlinux
