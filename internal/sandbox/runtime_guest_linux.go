@@ -44,6 +44,13 @@ func Guest(args []string) int {
 	if len(args) == 1 && args[0] == "exec" {
 		return guestExec(c)
 	}
+	// The helper holds the relays, as native's PID 1 does, and is made
+	// non-dumpable as it is: defense in depth against the agent's ptrace
+	// and /proc access.
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		fmt.Fprintln(os.Stderr, "airbag guest: protect helper:", err)
+		return 125
+	}
 	vm := c.Backend == "microvm"
 	code := 125
 	if err := guestSetup(c, vm); err != nil {
@@ -85,6 +92,13 @@ func guestSetup(c guestConfig, vm bool) error {
 		}
 		if err := unix.Mount("/dev/vdb", c.Workspace, "ext4", unix.MS_NOSUID|unix.MS_NODEV, ""); err != nil {
 			return err
+		}
+		// As native hides them: reads into the kernel the filter does not
+		// cover (the kernel log, a userfaultfd without the syscall).
+		for _, p := range []string{"/dev/kmsg", "/dev/userfaultfd"} {
+			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
 		}
 		if c.GeneratedRecoveryDir {
 			if err := os.Remove(filepath.Join(c.Workspace, "lost+found")); err != nil {
@@ -175,6 +189,16 @@ func guestExec(c guestConfig) int {
 	if len(c.Argv) == 0 {
 		return 125
 	}
+	// Core dumps capped at 1 byte and inherited descriptors closed on
+	// exec, as runAgent does; --strict stops the run if the cap fails.
+	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 1, Max: 1}); err != nil {
+		if c.Strict {
+			fmt.Fprintln(os.Stderr, "airbag guest: limit core dumps:", err)
+			return 125
+		}
+		fmt.Fprintf(os.Stderr, "airbag: warning: could not limit core dumps: %v\n", err)
+	}
+	closeInheritedFDs()
 	// --strict adds the strict filter, as for native. Unlike native's
 	// default, a filter that cannot be installed always stops the run.
 	if err := restrictAgent(c.Strict); err != nil {
