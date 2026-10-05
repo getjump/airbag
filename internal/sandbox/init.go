@@ -158,8 +158,13 @@ func buildWorld(s *session.Session) error {
 			}
 			// Nor a file in it with another name: written through the
 			// name here, it would change for real wherever the other is.
-			if f := hardLinked(realhome, p); f != "" {
-				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (~/%s has another hard link); it stays in the branch\n", p, f)
+			linked, full := hardLinks(realhome, p)
+			if len(linked) > 0 {
+				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (~/%s has another hard link); it stays in the branch\n", p, linked[0])
+				continue
+			}
+			if !full {
+				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (it cannot be checked in full for hard links); it stays in the branch\n", p)
 				continue
 			}
 			pass = append(pass, p)

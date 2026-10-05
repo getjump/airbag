@@ -55,12 +55,14 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 	// start, or a later apply that wrote p or a directory above it.
 	since := func(p string) time.Time {
 		t := base
-		for q, at := range s.Applied {
-			if at.After(t) && (p == q || within(p, q)) {
+		for q := p; ; q = filepath.Dir(q) {
+			if at, ok := s.Applied[q]; ok && at.After(t) {
 				t = at
 			}
+			if q == filepath.Dir(q) {
+				return t
+			}
 		}
-		return t
 	}
 	var replaced []string
 	for _, c := range cs {

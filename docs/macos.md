@@ -145,8 +145,8 @@ workspace's project directory before the run. Seatbelt checks the path a write
 resolves to, so a `memory/` that is a link, or lies under a linked project
 directory or a linked `~/.claude/projects`, is denied where it really is too,
 with the directories above that place. Seatbelt rules match paths, not files: a
-passed-through path holding a file with another hard-linked name stays read-only,
-but a memory file that also has a hard-linked name elsewhere under the writable
+file in a passed-through path that has another hard-linked name is denied, but a
+memory file that also has a hard-linked name elsewhere under the writable
 `~/.claude` can be changed through that name (on Linux such a project stays in
 the branch). What it cannot:
 `~/.claude.json` stays writable, so a change to it — including MCP servers,

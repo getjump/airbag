@@ -259,7 +259,7 @@ func TestMacProfileHardLinkedPassthroughReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	h, _ := filepath.EvalSymlinks(home)
-	if slices.Contains(p.WriteFiles, filepath.Join(h, ".claude/.credentials.json")) {
-		t.Errorf("the hard-linked passthrough is writable: %v", p.WriteFiles)
+	if !slices.Contains(p.NoWrite, filepath.Join(h, ".claude/.credentials.json")) {
+		t.Errorf("the hard-linked passthrough is not denied: %v", p.NoWrite)
 	}
 }

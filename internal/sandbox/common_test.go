@@ -176,43 +176,64 @@ func TestAddClaudeProjectStateIgnoresEmptyScaffolding(t *testing.T) {
 // A file with another name keeps the passed-through path it is in out
 // of the passthrough: written through its name there, it would change
 // for real. A memory file in a hole of the path counts too.
-func TestHardLinked(t *testing.T) {
+func TestHardLinks(t *testing.T) {
 	home := t.TempDir()
 	proj, hole := ".claude/projects/x", ".claude/projects/x/memory"
 	if err := os.MkdirAll(filepath.Join(home, hole), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	mem := filepath.Join(home, hole, "MEMORY.md")
-	transcript := filepath.Join(home, proj, "s.jsonl")
-	for _, f := range []string{mem, transcript, filepath.Join(home, ".bashrc"), filepath.Join(home, ".claude/.credentials.json")} {
+	for _, f := range []string{mem, filepath.Join(home, proj, "s.jsonl"), filepath.Join(home, ".bashrc"), filepath.Join(home, ".claude/.credentials.json")} {
 		if err := os.WriteFile(f, []byte("x\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, p := range []string{proj, ".claude/.credentials.json", ".claude/projects/y"} {
-		if got := hardLinked(home, p); got != "" {
-			t.Fatalf("%s, no link: %q", p, got)
+	check := func(p string, want []string) {
+		t.Helper()
+		got, full := hardLinks(home, p)
+		if !full || strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s: %v (full %v), want %v", p, got, full, want)
 		}
 	}
+	check(proj, nil)
+	check(".claude/.credentials.json", nil)
+	check(".claude/projects/y", nil) // not there
 	if err := os.Link(mem, filepath.Join(home, proj, "t.jsonl")); err != nil {
 		t.Fatal(err)
 	}
-	if got := hardLinked(home, proj); got == "" {
-		t.Fatal("a memory file with a transcript-side name")
-	}
+	check(proj, []string{hole + "/MEMORY.md", proj + "/t.jsonl"})
 	if err := os.Remove(filepath.Join(home, proj, "t.jsonl")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Link(filepath.Join(home, ".bashrc"), filepath.Join(home, proj, "b.jsonl")); err != nil {
 		t.Fatal(err)
 	}
-	if got := hardLinked(home, proj); got != proj+"/b.jsonl" {
-		t.Fatalf("a transcript linked to ~/.bashrc: %q", got)
-	}
+	check(proj, []string{proj + "/b.jsonl"})
 	if err := os.Link(filepath.Join(home, ".claude/.credentials.json"), filepath.Join(home, ".claude.json")); err != nil {
 		t.Fatal(err)
 	}
-	if got := hardLinked(home, ".claude/.credentials.json"); got != ".claude/.credentials.json" {
-		t.Fatalf("a passed-through file with another name: %q", got)
+	check(".claude/.credentials.json", []string{".claude/.credentials.json"})
+}
+
+// Past maxPassFiles regular files a path is not known to be free of
+// hard links; directories do not count toward it.
+func TestHardLinksCapped(t *testing.T) {
+	home := t.TempDir()
+	for _, f := range []string{"a/1", "a/2", "a/b/c/3"} {
+		if err := os.MkdirAll(filepath.Join(home, filepath.Dir(f)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, f), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func(n int) { maxPassFiles = n }(maxPassFiles)
+	maxPassFiles = 3
+	if _, full := hardLinks(home, "a"); !full {
+		t.Error("three files and three directories counted past a cap of 3")
+	}
+	maxPassFiles = 2
+	if _, full := hardLinks(home, "a"); full {
+		t.Error("three files under a cap of 2 reported as checked in full")
 	}
 }

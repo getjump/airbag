@@ -68,10 +68,15 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 	}
 	for _, f := range s.Passthrough {
 		// Seatbelt rules match paths, so a file there with another name
-		// elsewhere would be written through this one: not writable.
-		if l := hardLinked(s.Home, strings.TrimSuffix(f, "/")); l != "" {
-			fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s stays read-only (~/%s has another hard link)\n", f, l)
-			continue
+		// elsewhere would be written through this one: each is denied
+		// (the state directories around it are writable as a whole).
+		linked, full := hardLinks(s.Home, strings.TrimSuffix(f, "/"))
+		for _, l := range linked {
+			fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s stays read-only (it has another hard link)\n", l)
+			p.NoWrite = append(p.NoWrite, filepath.Join(home, l))
+		}
+		if !full {
+			fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s could not be checked in full for hard links\n", f)
 		}
 		if strings.HasSuffix(f, "/") {
 			p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(f, "/")))

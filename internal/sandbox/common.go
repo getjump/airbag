@@ -474,40 +474,39 @@ func noSymlinkSoFar(root, rel string) error {
 	return nil
 }
 
-// maxPassEntries bounds the walk of a passed-through path for hard
-// links; a larger one counts as linked.
-const maxPassEntries = 10000
+// maxPassFiles bounds the files checked for hard links in a passed-
+// through path; past it the path counts as one that may hold one.
+var maxPassFiles = 100000
 
-// hardLinked returns the first file at or below p (relative to root)
-// that has more than one name, or "": written through its name here, a
-// file whose other name is in the branch (~/.bashrc), or in a branch
-// hole inside p (the project's memory/), would change for real. A path
-// that cannot be walked in full counts as holding one.
-func hardLinked(root, p string) string {
-	found, n := "", 0
+// hardLinks returns the files at or below p (relative to root) that
+// have more than one name: written through their name here, a file
+// whose other name is in the branch (~/.bashrc), or in a branch hole
+// inside p (the project's memory/), would change for real. full is
+// false when p could not be walked in full (too many files, an
+// unreadable directory): it may hold more.
+func hardLinks(root, p string) (linked []string, full bool) {
+	n := 0
 	err := filepath.WalkDir(filepath.Join(root, p), func(q string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if n++; n > maxPassEntries {
-			found = p
-			return filepath.SkipAll
-		}
 		if !d.Type().IsRegular() {
 			return nil
+		}
+		if n++; n > maxPassFiles {
+			return errTooMany
 		}
 		var st unix.Stat_t
 		if err := unix.Lstat(q, &st); err != nil {
 			return err
 		}
 		if st.Nlink > 1 {
-			found, _ = filepath.Rel(root, q)
-			return filepath.SkipAll
+			rel, _ := filepath.Rel(root, q)
+			linked = append(linked, rel)
 		}
 		return nil
 	})
-	if found == "" && err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return p
-	}
-	return found
+	return linked, err == nil || errors.Is(err, fs.ErrNotExist) && n == 0
 }
+
+var errTooMany = errors.New("too many files")
