@@ -410,7 +410,16 @@ The command runs on your machine, with your environment and credentials, after
 - files it names in the workspace must hold what they held when it was queued,
   and a file outside the workspace is refused when the agent queues the call
   (`/tmp` in the sandbox is not yours); pass text inline or put the file in the
-  workspace; a call that names a secret file (`.env`, a key) is refused;
+  workspace; a call that names a secret file (`.env`, a key) is refused, and so is
+  one that names the session's own storage;
+- while links the session put in your files lead out of the workspace or to a
+  secret file (`notes.md -> .env`, `docs -> ~/.config`, a venv's interpreter in
+  `~/.local`), the commands wait, whatever their arguments say: an argument that
+  is or runs through such a link would read or write there without showing it.
+  Links to installed programs (`/usr/bin/python3`: root's, in root's
+  directories) do not count; links to any directory outside, `/usr` included, or
+  to a configuration file anyone may read, do. Remove
+  or replace the links, or after inspecting them run `airbag apply --trust-links`;
 - after a failure the rest wait in that apply, since a pull request without its push
   means nothing; after an unknown outcome they wait until you record what happened
   (`airbag outbox resolve`); after `apply --branch` generic commands wait, because the

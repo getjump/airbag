@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -151,12 +152,20 @@ func TestControlSocketCapped(t *testing.T) {
 		}
 	}()
 	dial := func() net.Conn {
-		c, err := (&net.Dialer{}).DialContext(t.Context(), "unix", sock)
-		if err != nil {
-			t.Fatal(err)
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			c, err := (&net.Dialer{}).DialContext(t.Context(), "unix", sock)
+			if err == nil {
+				conns = append(conns, c)
+				return c
+			}
+			// macOS refuses a connect while the listen backlog is full,
+			// where Linux waits; the server drains it as it accepts.
+			if !errors.Is(err, syscall.ECONNREFUSED) && !errors.Is(err, syscall.EAGAIN) || time.Now().After(deadline) {
+				t.Fatal(err)
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		conns = append(conns, c)
-		return c
 	}
 	for range MaxConns {
 		dial()
