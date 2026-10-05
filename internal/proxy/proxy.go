@@ -381,6 +381,18 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 		http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
 		return
 	}
+	// A client that stops sending its request body blocks the transport
+	// in a read of that body, and RoundTrip waits for it: neither the
+	// cancel nor closing the upstream ends the read. Stopping the flow
+	// ends it with a read deadline in the past. Only until the handler
+	// returns: a read that failed after that would cancel the context of
+	// the connection's next requests.
+	body := &closer{func() { _ = http.NewResponseController(w).SetReadDeadline(time.Now()) }}
+	if !f.hold(body) {
+		http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
+		return
+	}
+	defer f.release(body)
 	out := r.Clone(ctx)
 	out.RequestURI = ""
 	for _, h := range []string{"Proxy-Connection", "Proxy-Authorization", "Connection", "Keep-Alive", "Te", "Trailer", "Upgrade"} {

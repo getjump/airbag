@@ -475,6 +475,91 @@ func TestForwardClientStopsReading(t *testing.T) {
 	}
 }
 
+// A forwarded request whose client stops sending its body: the
+// transport waits in a read from the client, which closing the upstream
+// as idle does not end. The flow's read deadline does: the client is
+// answered and the slot let go. A body that keeps coming, however
+// slowly, goes on past Idle.
+func TestForwardClientStallsBody(t *testing.T) {
+	target := listenTCP(t, func(c net.Conn) {
+		defer c.Close()
+		req, err := http.ReadRequest(bufio.NewReader(c))
+		if err != nil {
+			return
+		}
+		b, err := io.ReadAll(req.Body) // to the end, or until the proxy closes
+		if err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(b), b)
+	})
+	lim := testLimits
+	lim.Idle = 300 * time.Millisecond
+	p, pa, _ := boundedProxy(t, lim)
+	post := func(t *testing.T, length int) (net.Conn, *bufio.Reader) {
+		t.Helper()
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", pa)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = fmt.Fprintf(c, "POST http://%s/x HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n\r\n", target, target, length)
+		return c, bufio.NewReader(c)
+	}
+	t.Run("stalls", func(t *testing.T) {
+		g0, fd0 := usage()
+		c, br := post(t, 1000000)
+		defer c.Close()
+		_, _ = io.WriteString(c, "abc") // and no more
+		start := time.Now()
+		_ = c.SetReadDeadline(start.Add(5 * time.Second))
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("no answer %v after the body stalled (Idle %v): %v", time.Since(start), lim.Idle, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadGateway || time.Since(start) > 3*time.Second {
+			t.Fatalf("status %d after %v, want 502 after about %v", resp.StatusCode, time.Since(start), lim.Idle)
+		}
+		if n := openFlows(p, 0, 2*time.Second); n != 0 {
+			t.Fatalf("%d flows open, want 0", n)
+		}
+		c.Close()
+		settle(t, g0, fd0, 1, 1, 3*time.Second)
+	})
+	t.Run("progresses", func(t *testing.T) {
+		const n = 12 // a byte each Idle/4: 3×Idle
+		c, br := post(t, n)
+		defer c.Close()
+		start := time.Now()
+		for range n {
+			_, _ = io.WriteString(c, "x")
+			time.Sleep(lim.Idle / 4)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("no answer after %v: %v", time.Since(start), err)
+		}
+		b, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(b) != strings.Repeat("x", n) {
+			t.Fatalf("a body sent slowly for %v: status %d, %q %v", time.Since(start), resp.StatusCode, b, err)
+		}
+		// The read deadline is let go with the request: the connection
+		// serves the next one.
+		_, _ = fmt.Fprintf(c, "POST http://%s/x HTTP/1.1\r\nHost: %s\r\nContent-Length: 2\r\n\r\nok", target, target)
+		resp, err = http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("no answer to the next request: %v", err)
+		}
+		b, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(b) != "ok" {
+			t.Fatalf("the next request on the connection: status %d, %q %v", resp.StatusCode, b, err)
+		}
+	})
+}
+
 // An upstream proxy that takes the CONNECT and never answers it: the
 // tunnel's flow owns that connection from the dial on, so it is closed
 // as idle, or by a cut, and the agent is answered.
