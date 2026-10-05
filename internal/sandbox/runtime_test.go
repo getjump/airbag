@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -28,6 +29,11 @@ func TestOptionalBoundaryNeverFallsBack(t *testing.T) {
 		}
 		if _, err := SelectBackend(name, "shared-kernel"); err == nil {
 			t.Fatal("accepted incompatible isolation")
+		}
+		for _, l := range sharedLimitations {
+			if !slices.Contains(b.Limitations, l) {
+				t.Fatalf("%s drops the shared limit %q", name, l)
+			}
 		}
 		if got := b.ForRun(nil).Egress; got != EgressProxy {
 			t.Fatalf("%s reports egress %s; it mounts no host socket", name, got)

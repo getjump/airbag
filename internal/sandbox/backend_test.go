@@ -43,6 +43,11 @@ func TestNixDaemonEgressIsReported(t *testing.T) {
 			t.Fatal("ForRun changed the compiled report")
 		}
 	}
+	for _, l := range sharedLimitations {
+		if !slices.Contains(nativeBackend("linux").Limitations, l) {
+			t.Fatalf("native drops the shared limit %q", l)
+		}
+	}
 	if got := nativeBackend("plan9").ForRun(nil).Egress; got != "unsupported" {
 		t.Fatalf("unsupported platform reports %s", got)
 	}

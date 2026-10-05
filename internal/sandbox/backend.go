@@ -30,20 +30,25 @@ type Backend struct {
 	Limitations     []string `json:"limitations"`
 }
 
+// sharedLimitations hold for every backend: they come from the host's
+// policy, proxy and credentials, which all backends share.
+var sharedLimitations = []string{
+	"allowed network destinations can receive agent data and perform remote effects",
+	"credential placeholders do not provide JIT issuance, token scope or TTL",
+	"secret taint narrows egress; it is not a general automatic process kill switch",
+}
+
 func NativeBackend() Backend { return nativeBackend(runtime.GOOS) }
 
 func nativeBackend(platform string) Backend {
 	b := Backend{
 		Schema: 1, Name: "native", Platform: platform, Isolation: "shared-kernel",
 		Readiness: "not-probed", Egress: EgressProxy,
-		Limitations: []string{
+		Limitations: append([]string{
 			"agent code shares the host kernel; kernel exploits are outside this boundary",
-			"allowed network destinations can receive agent data and perform remote effects",
 			"--nix-daemon: the Nix daemon's builds and substitutes reach the network outside the proxy; such a session records egress " + EgressProxyNixDaemon,
 			"agent state passthroughs can persist without apply",
-			"credential placeholders do not provide JIT issuance, token scope or TTL",
-			"secret taint narrows egress; it is not a general automatic process kill switch",
-		},
+		}, sharedLimitations...),
 	}
 	switch platform {
 	case "linux":
@@ -78,19 +83,22 @@ func SelectBackend(name, isolation string) (Backend, error) {
 		}
 		b.Name, b.HomeBranch, b.WorkspaceBranch = name, false, "private-copy"
 		b.Readiness = "experimental; runtime preflight required"
-		b.Limitations = []string{
+		b.Limitations = append([]string{
 			"isolated profile requires --no-home; host HOME and agent state passthroughs are unavailable",
 			"workspace secret files, explicit hide rules, TCP forwards and Nix daemon access are rejected",
 			"noninteractive execution only; no terminal resize/job control",
 			"command models remain shim-based; complete filesystem/process audit is unavailable",
-			"credential placeholders have no JIT issuance or TTL; no automatic process kill switch",
 			"trusted rootfs and runtime binaries are supplied by the operator; no image provenance verification",
-		}
+		}, sharedLimitations...)
 		if name == "gvisor" {
 			b.Isolation, b.Mechanism = "application-kernel", "runsc-systrap+network-none+scoped-unix-sockets"
+			b.Limitations = append(b.Limitations,
+				"run as root, runsc is rootful: the sandbox's uid 0 is the host's root for its file access, and the branch's files are owned by root")
 		} else {
 			b.Isolation, b.Mechanism = "virtual-machine", "firecracker-kvm+no-nic+scoped-vsock"
-			b.Limitations = append(b.Limitations, "Firecracker jailer and fleet resource management are not integrated")
+			b.Limitations = append(b.Limitations,
+				"Firecracker runs without its jailer: a VMM escape runs as the invoking user, with their HOME, credentials and unfiltered network, and no chroot, cgroup or uid drop (Firecracker's own seccomp filters still apply)",
+				"fleet resource management is not integrated")
 		}
 	}
 	if b.Isolation == "unsupported" {
