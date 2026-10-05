@@ -129,7 +129,7 @@ func Load(workspace, home string) (*Policy, error) {
 			}
 			r.Source = path
 			if err := p.add(r); err != nil {
-				return nil, fmt.Errorf("%s: rule %s: %w", path, r.Name, err)
+				return nil, fmt.Errorf("%s: %w", path, err) // the error names the rule
 			}
 		}
 	}

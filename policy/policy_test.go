@@ -55,4 +55,22 @@ func TestInvalidAndZeroEngine(t *testing.T) {
 	if d := empty.Decide(policy.Input{}); d.Verdict != policy.Deny {
 		t.Fatal("zero engine granted permission", d)
 	}
+	var none *policy.Engine
+	if d := none.Decide(policy.Input{}); d.Verdict != policy.Deny || d.Rule != policy.FallbackRule || d.Message != "policy engine not compiled" {
+		t.Fatal("nil engine", d)
+	}
+}
+
+// A deny fallback names itself, so the agent is told which rule held it
+// back; an allow fallback names no rule.
+func TestFallbackNamed(t *testing.T) {
+	for fallback, rule := range map[string]string{policy.Deny: policy.FallbackRule, policy.Allow: ""} {
+		engine, err := policy.Compile(nil, fallback)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := engine.Decide(policy.Input{}); d.Verdict != fallback || d.Rule != rule {
+			t.Errorf("fallback %s: %+v", fallback, d)
+		}
+	}
 }

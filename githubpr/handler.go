@@ -93,4 +93,11 @@ func (p *Prepared) Publish(ctx context.Context) operation.Result {
 	return p.result
 }
 
-func (p *Prepared) Digest() string { return p.digest }
+// Digest is the digest of the prepared request; "" when nothing was
+// prepared, which no claim matches.
+func (p *Prepared) Digest() string {
+	if p == nil {
+		return ""
+	}
+	return p.digest
+}

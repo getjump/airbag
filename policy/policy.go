@@ -146,9 +146,18 @@ type Decision struct {
 	Message string `json:"message,omitempty"`
 }
 
+// FallbackRule names the decision of an engine that denies: when no rule
+// matched and its fallback is deny, or when it was never compiled. An
+// allow fallback names no rule.
+const FallbackRule = "fallback"
+
 // Decide evaluates a snapshot without I/O. Deny beats ask beats allow;
-// no matching rule returns the fallback supplied to Compile.
+// no matching rule returns the fallback supplied to Compile. A nil
+// engine, or one not made by Compile, denies.
 func (p *Engine) Decide(in Input) Decision {
+	if p == nil || p.fallback == "" {
+		return Decision{Verdict: Deny, Rule: FallbackRule, Message: "policy engine not compiled"}
+	}
 	argv, labels := in.Argv, in.Labels
 	if argv == nil {
 		argv = []string{}
@@ -162,8 +171,8 @@ func (p *Engine) Decide(in Input) Decision {
 		"session": CELSession{Tainted: in.Tainted, Labels: labels},
 	}
 	best := Decision{Verdict: p.fallback}
-	if best.Verdict == "" {
-		best.Verdict = Deny // an uninitialized engine grants no permission
+	if best.Verdict == Deny {
+		best.Rule, best.Message = FallbackRule, "no rule matched, and this policy denies what none allows"
 	}
 	matched := false
 	rank := map[string]int{Allow: 1, Ask: 2, Deny: 3}
