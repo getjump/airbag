@@ -238,8 +238,27 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		return ""
 	}
 	inside := map[string]int{} // paths left inside each of those directories
+	// The root can change while the rollback runs (while leftWhole walks
+	// a large directory, say), so each entry is checked again before it
+	// moves anything, and the roots before each directory goes. Stopped
+	// there, what is not rolled back yet stays in the journal: the
+	// entries not reached, those kept, and the directories to remove.
+	stop := func(i int, err error) (int, error) {
+		rest := slices.Clone(g.Entries[:i+1])
+		for j := len(kept) - 1; j >= 0; j-- {
+			rest = append(rest, kept[j])
+		}
+		g.Entries, g.Dirs, g.Partial = rest, dirs, true
+		if serr := g.save(); serr != nil {
+			err = errors.Join(err, serr)
+		}
+		return len(rest), fmt.Errorf("rollback stopped: %w; put the directory back, then roll back again: what is not rolled back yet stays in the journal, your versions from before the apply in %s", err, filepath.Join(g.dir, "saved"))
+	}
 	for i := len(g.Entries) - 1; i >= 0; i-- {
 		e := g.Entries[i]
+		if err := g.roots.held(e.Layer, e.Path, e.Rel); err != nil {
+			return stop(i, err)
+		}
 		if d := inWhole(e.Path); d != "" {
 			switch {
 			case !ours(e):
@@ -337,6 +356,9 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
 	var still []string
 	for _, d := range dirs {
+		if err := g.roots.all(); err != nil {
+			return stop(-1, err)
+		}
 		if inWhole(d) == "" {
 			removeEmptyDir(d)
 		}

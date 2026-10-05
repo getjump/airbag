@@ -1888,3 +1888,95 @@ func TestHeldNeedsTheLayersRoot(t *testing.T) {
 		t.Fatalf("an unrecorded $HOME is not checked, as in sessions from before: %v", err)
 	}
 }
+
+// replacesRoot moves ws away and makes a new directory in its place, with
+// files of its own, the first time it is written a line naming a path
+// left as is: while the rollback runs.
+type replacesRoot struct {
+	t    *testing.T
+	ws   string
+	done bool
+	bytes.Buffer
+}
+
+func (r *replacesRoot) Write(p []byte) (int, error) {
+	if !r.done && bytes.Contains(p, []byte("left as is")) {
+		r.done = true
+		if err := os.Rename(r.ws, r.ws+".old"); err != nil {
+			r.t.Error(err)
+		}
+		if err := os.Mkdir(r.ws, 0o755); err != nil {
+			r.t.Error(err)
+		}
+		for _, n := range []string{"a.txt", "b.txt"} {
+			if err := os.WriteFile(filepath.Join(r.ws, n), []byte("theirs\n"), 0o644); err != nil {
+				r.t.Error(err)
+			}
+		}
+	}
+	return r.Buffer.Write(p)
+}
+
+// A root replaced while the rollback runs takes nothing from the next
+// entry on: it stops there, and what it did not reach stays in the
+// journal for the rollback once the directory is back.
+func TestRollbackRechecksRootBetweenEntries(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := t.TempDir()
+	var cs []review.Change
+	for _, n := range []string{"a.txt", "b.txt", "c.txt"} {
+		if err := os.WriteFile(filepath.Join(upper, n), []byte("agent\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs = append(cs, review.Change{Layer: "ws", Rel: n, Path: filepath.Join(ws, n), Upper: filepath.Join(upper, n), Kind: review.Added, Mode: 0o644})
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, cs, box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	// c.txt, rolled back first, is edited since: the rollback leaves it
+	// and says so, and the root is replaced then.
+	if err := os.WriteFile(filepath.Join(ws, "c.txt"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := &replacesRoot{t: t, ws: ws}
+	if err := Rollback(s, nil, w); err == nil || !strings.Contains(err.Error(), "rollback stopped") {
+		t.Fatalf("the rollback went on in a replaced root: %v\n%s", err, w.String())
+	}
+	for _, n := range []string{"a.txt", "b.txt"} {
+		if got := read(t, filepath.Join(ws, n)); got != "theirs\n" {
+			t.Errorf("%s in the replacement: %q", n, got)
+		}
+		if got := read(t, filepath.Join(ws+".old", n)); got != "agent\n" {
+			t.Errorf("%s in the moved workspace: %q", n, got)
+		}
+	}
+	// Back in place, the rollback takes what it did not reach.
+	if err := os.RemoveAll(ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(ws+".old", ws); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("the rollback once the root is back: %v\n%s", err, out.String())
+	}
+	for _, n := range []string{"a.txt", "b.txt"} {
+		if _, err := os.Lstat(filepath.Join(ws, n)); !os.IsNotExist(err) {
+			t.Errorf("%s is not rolled back: %v", n, err)
+		}
+	}
+	if got := read(t, filepath.Join(ws, "c.txt")); got != "edited\n" {
+		t.Errorf("the edit after the apply: %q", got)
+	}
+}

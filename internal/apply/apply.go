@@ -909,6 +909,16 @@ func (r roots) check(layer string) error {
 	return nil
 }
 
+// all checks every recorded root.
+func (r roots) all() error {
+	for _, layer := range []string{"ws", "home"} {
+		if err := r.check(layer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // held checks the root of the layer a change at path is in, found by
 // the layer, not by the spelling of the path the session was given (a
 // trailing slash in $HOME, say); the change must lie below it. A root
