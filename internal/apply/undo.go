@@ -54,6 +54,7 @@ type genEntry struct {
 
 type generation struct {
 	dir      string
+	roots    roots     // checked before each change; not kept in the journal
 	Clone    bool      `json:"clone,omitempty"` // the branch is a full copy, not an upper layer
 	Session  string    `json:"session"`
 	Started  time.Time `json:"started"`
@@ -78,7 +79,7 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	if gs, _ := listGenerations(s); len(gs) > 0 {
 		n = gs[len(gs)-1].n + 1
 	}
-	g := &generation{dir: filepath.Join(root, strconv.Itoa(n)), Session: s.ID, Started: time.Now(), Clone: s.Clone}
+	g := &generation{dir: filepath.Join(root, strconv.Itoa(n)), roots: rootsOf(s), Session: s.ID, Started: time.Now(), Clone: s.Clone}
 	if err := os.MkdirAll(filepath.Join(g.dir, "saved"), 0o700); err != nil {
 		return nil, err
 	}
@@ -161,6 +162,9 @@ func interrupted(s *session.Session) *generation {
 func (g *generation) apply(c review.Change) error {
 	// Checked before the previous version is moved, and again in
 	// applyOne for its own callers.
+	if err := g.roots.held(c.Path, c.Rel); err != nil {
+		return err
+	}
 	if err := parentsUnlinked(c, nil); err != nil {
 		return err
 	}
@@ -663,6 +667,14 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	g, err := loadGeneration(gs[len(gs)-1].dir)
 	if err != nil {
 		return err
+	}
+	// Restoring through a root that leads elsewhere now would write the
+	// saved versions there.
+	rs := rootsOf(s)
+	for _, e := range g.Entries {
+		if err := rs.held(e.Path, e.Rel); err != nil {
+			return fmt.Errorf("nothing rolled back: %w", err)
+		}
 	}
 	n, partial := len(g.Entries), g.Partial
 	left, err := g.rollback(out)

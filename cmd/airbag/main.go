@@ -254,8 +254,15 @@ func cmdRun(args []string) (int, error) {
 		pass := append([]string{}, sandbox.DefaultPassthrough...)
 		projPass, holes := sandbox.ClaudeProjectState(cwd, ws)
 		pass = append(pass, projPass...)
+		var wsReal, homeReal string
+		if wsReal, err = filepath.EvalSymlinks(ws); err != nil {
+			return 1, err
+		}
+		if homeReal, err = filepath.EvalSymlinks(home); err != nil {
+			return 1, err
+		}
 		meta := session.Meta{
-			Workspace: ws, Home: home, OverHome: !*noHome,
+			Workspace: ws, Home: home, WorkspaceReal: wsReal, HomeReal: homeReal, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
 			Passthrough: pass, BranchHoles: holes, Hidden: hidden, HiddenHost: hiddenHost,

@@ -1601,3 +1601,138 @@ func TestApplyRefusesLinkedParentBeforeJournal(t *testing.T) {
 		}
 	}
 }
+
+// moveRoot does what Codex's case describes: the host renames the
+// workspace and puts a link to another directory at its path.
+func moveRoot(t *testing.T, ws string) (elsewhere string) {
+	t.Helper()
+	elsewhere = t.TempDir()
+	if err := os.Rename(ws, ws+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, ws); err != nil {
+		t.Fatal(err)
+	}
+	return elsewhere
+}
+
+func rootSession(t *testing.T, ws string) *session.Session {
+	t.Helper()
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	real, err := filepath.EvalSymlinks(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeReal, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, WorkspaceReal: real, HomeReal: homeReal, Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	return s
+}
+
+// A workspace that leads elsewhere than when the session began takes no
+// change, a new top-level file included: no parent below the root is a
+// link, so only the root itself shows it.
+func TestApplyRefusesMovedRoot(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "new.txt", Path: filepath.Join(ws, "new.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	elsewhere := moveRoot(t, ws)
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("applied through a moved root: %v", err)
+	}
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Branch: "agent", Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("--branch went to a moved root: %v", err)
+	}
+	g, err := beginGeneration(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.apply(c); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("the generation applied through a moved root: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(elsewhere, "new.txt")); err == nil {
+		t.Fatal("the change landed where the link leads")
+	}
+}
+
+// A rollback after the root moved restores nothing there.
+func TestRollbackRefusesMovedRoot(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "new.txt", Path: filepath.Join(ws, "new.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := moveRoot(t, ws)
+	theirs := filepath.Join(elsewhere, "new.txt")
+	if err := os.WriteFile(theirs, []byte("theirs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("rolled back through a moved root: %v", err)
+	}
+	if data, err := os.ReadFile(theirs); err != nil || string(data) != "theirs\n" {
+		t.Fatalf("the rollback removed what the link leads to: %q %v", data, err)
+	}
+}
+
+// A workspace named through a link from the start (/home leading to
+// /var/home, say) applies as usual.
+func TestApplyThroughLinkedRootFromTheStart(t *testing.T) {
+	real := t.TempDir()
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(real, ws); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "new.txt", Path: filepath.Join(ws, "new.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(real, "new.txt")); err != nil || string(data) != "agent\n" {
+		t.Fatalf("not applied: %q %v", data, err)
+	}
+}

@@ -204,7 +204,11 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 			replacing = append(replacing, c.Path)
 		}
 	}
+	rs := rootsOf(s)
 	for _, c := range picked {
+		if err := rs.held(c.Path, c.Rel); err != nil {
+			return fmt.Errorf("nothing applied: %w", err)
+		}
 		if err := parentsUnlinked(c, replacing); err != nil {
 			return fmt.Errorf("nothing applied: %w", err)
 		}
@@ -380,6 +384,12 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	intents, err := box.List()
 	if err != nil {
 		return err
+	}
+	if len(intents) > 0 {
+		// Pushes and deferred commands run in the workspace.
+		if err := rootsOf(s).check(s.Workspace); err != nil {
+			return fmt.Errorf("the session's outbox waits: %w", err)
+		}
 	}
 	// After a failure the rest wait (a PR without its push means
 	// nothing), in this run; after an unknown outcome they wait until the
@@ -944,6 +954,50 @@ func parentsUnlinked(c review.Change, replacing []string) error {
 		}
 	}
 	return nil
+}
+
+// roots maps the workspace and $HOME, as the session names them, to where
+// they led when it began.
+type roots map[string]string
+
+func rootsOf(s *session.Session) roots {
+	r := roots{}
+	if s.WorkspaceReal != "" {
+		r[s.Workspace] = s.WorkspaceReal
+	}
+	if s.HomeReal != "" {
+		r[s.Home] = s.HomeReal
+	}
+	return r
+}
+
+// check refuses a root that leads elsewhere than when the session began:
+// the host renamed the workspace and put a link in its place, say. Every
+// change below it, a new top-level file included, would land there.
+// A path the session did not record (a session from before roots were
+// recorded) is not checked.
+func (r roots) check(root string) error {
+	want, ok := r[root]
+	if !ok {
+		return nil
+	}
+	got, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("%s, the session's root: %w", root, err)
+	}
+	if got != want {
+		return fmt.Errorf("%s leads to %s now, not to %s as when the session began, so the changes would land there; put the directory back or discard the session", root, got, want)
+	}
+	return nil
+}
+
+// held checks the root of the layer a path at rel belongs to.
+func (r roots) held(path, rel string) error {
+	root, ok := strings.CutSuffix(path, string(filepath.Separator)+filepath.FromSlash(rel))
+	if !ok {
+		return fmt.Errorf("%s is not %s in its layer", path, rel)
+	}
+	return r.check(root)
 }
 
 // copyFile replaces dst atomically: write a temp file next to it, then

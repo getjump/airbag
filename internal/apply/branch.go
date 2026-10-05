@@ -35,6 +35,9 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 	if s.Status == session.StatusRunning {
 		return fmt.Errorf("session %s is still running", s.ID)
 	}
+	if err := rootsOf(s).check(ws); err != nil {
+		return fmt.Errorf("nothing applied: %w", err) // the branch would go to that repository
+	}
 	if out, err := git(ws, nil, "rev-parse", "--git-dir"); err != nil || strings.TrimSpace(out) != ".git" {
 		return fmt.Errorf("--branch needs the workspace to be the top of a git repository")
 	}

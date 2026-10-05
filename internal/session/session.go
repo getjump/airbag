@@ -31,14 +31,19 @@ type Meta struct {
 	Ended     time.Time `json:"ended,omitzero"`
 	Workspace string    `json:"workspace"`
 	Home      string    `json:"home"`
-	OverHome  bool      `json:"over_home"`
-	UID       int       `json:"uid"`
-	GID       int       `json:"gid"`
-	Argv      []string  `json:"argv"`
-	Cwd       string    `json:"cwd"`
-	Status    string    `json:"status"`
-	ExitCode  int       `json:"exit_code"`
-	Allow     []string  `json:"allow"`
+	// WorkspaceReal and HomeReal: where Workspace and Home led, links
+	// resolved, when the session began. Apply writes nothing below one
+	// that leads elsewhere now (the host put a link in its place).
+	WorkspaceReal string   `json:"workspace_real,omitempty"`
+	HomeReal      string   `json:"home_real,omitempty"`
+	OverHome      bool     `json:"over_home"`
+	UID           int      `json:"uid"`
+	GID           int      `json:"gid"`
+	Argv          []string `json:"argv"`
+	Cwd           string   `json:"cwd"`
+	Status        string   `json:"status"`
+	ExitCode      int      `json:"exit_code"`
+	Allow         []string `json:"allow"`
 	// Paths under $HOME that bypass the branch (agent state, logs).
 	Passthrough []string `json:"passthrough"`
 	// BranchHoles: paths under a Passthrough directory that stay in the

@@ -566,3 +566,29 @@ func TestCmdNamesSessionStorage(t *testing.T) {
 		t.Fatalf("ran on the session's storage: %q", out.String())
 	}
 }
+
+// Pushes and deferred commands wait while the workspace leads elsewhere
+// than when the session began.
+func TestOutboxWaitsForMovedRoot(t *testing.T) {
+	s, box := testBox(t)
+	real, err := filepath.EvalSymlinks(s.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.WorkspaceReal = real
+	log := tool(t, "pubtool", "0")
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "release"}, Cwd: s.Workspace})
+	if err := os.Rename(s.Workspace, s.Workspace+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), s.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("the outbox ran in a moved workspace: %v", err)
+	}
+	if status(t, box, it.ID) != outbox.Pending || ran(log) != "" {
+		t.Fatalf("ran: %s %q", status(t, box, it.ID), ran(log))
+	}
+}
