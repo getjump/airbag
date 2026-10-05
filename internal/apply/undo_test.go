@@ -130,8 +130,8 @@ func TestApplyIsAllOrNothing(t *testing.T) {
 	if read(t, filepath.Join(ws, "mod.txt")) != "user\n" || read(t, filepath.Join(ws, "del.txt")) != "keep me\n" {
 		t.Fatal("a failed apply left changes behind")
 	}
-	if interrupted(s) != nil {
-		t.Fatal("rolled-back generation still marked as interrupted")
+	if g, err := interrupted(s); err != nil || g != nil {
+		t.Fatalf("rolled-back generation still marked as interrupted: %v", err)
 	}
 }
 
@@ -2061,5 +2061,57 @@ func TestRollbackStoppedBeforeRestoreRestoresLater(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "changed after the apply") {
 		t.Errorf("taken for a host change:\n%s", out.String())
+	}
+}
+
+// An undo journal that cannot be read refuses apply: whether the last
+// apply or a rollback of it finished is not known. The directory a crash
+// leaves before the first journal write, with nothing saved, is no apply.
+func TestApplyRefusesUnreadableJournal(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "a.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "a.txt", Path: filepath.Join(ws, "a.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusApplied
+	gs, err := listGenerations(s)
+	if err != nil || len(gs) != 1 {
+		t.Fatalf("generations: %v %v", gs, err)
+	}
+	journal := filepath.Join(gs[0].dir, "journal.json")
+	good, err := os.ReadFile(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(journal, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []Options{{Yes: true, Out: &out}, {Yes: true, Out: &out, Branch: "agent"}} {
+		if err := Apply(s, nil, box, o); err == nil || !strings.Contains(err.Error(), "undo journal") {
+			t.Fatalf("apply ran with an unreadable journal (branch %q): %v", o.Branch, err)
+		}
+	}
+	if err := os.WriteFile(journal, good, 0o600); err != nil { //nolint:gosec // the session's own journal, under the test's AIRBAG_HOME
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(generationsDir(s), "2", "saved"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatalf("a crash's empty generation refuses apply: %v", err)
 	}
 }

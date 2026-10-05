@@ -149,31 +149,37 @@ func loadGeneration(dir string) (*generation, error) {
 	return g, json.Unmarshal(b, g)
 }
 
-// rollbackStopped returns the last apply of s if its rollback stopped
-// part way: the real files are some rolled back and some not.
-func rollbackStopped(s *session.Session) *generation {
-	gs, _ := listGenerations(s)
+// lastGeneration is the journal of the last apply of s, nil when there
+// is none. One that cannot be read is an error, not none: whether that
+// apply, or a rollback of it, finished is not known. A directory a crash
+// left before its journal was first written, with nothing saved in it,
+// is no apply.
+func lastGeneration(s *session.Session) (*generation, error) {
+	gs, err := listGenerations(s)
+	if err != nil {
+		return nil, fmt.Errorf("read the undo journals: %w", err)
+	}
 	if len(gs) == 0 {
-		return nil
+		return nil, nil
 	}
-	g, err := loadGeneration(gs[len(gs)-1].dir)
-	if err != nil || !g.Stopped {
-		return nil
+	dir := gs[len(gs)-1].dir
+	g, err := loadGeneration(dir)
+	if errors.Is(err, fs.ErrNotExist) && emptyOrAbsent(filepath.Join(dir, "saved")) {
+		return nil, nil
 	}
-	return g
+	if err != nil {
+		return nil, fmt.Errorf("read the undo journal %s: %w", dir, err)
+	}
+	return g, nil
 }
 
 // interrupted returns an apply of s that did not finish, if any.
-func interrupted(s *session.Session) *generation {
-	gs, _ := listGenerations(s)
-	if len(gs) == 0 {
-		return nil
+func interrupted(s *session.Session) (*generation, error) {
+	g, err := lastGeneration(s)
+	if err != nil || g == nil || g.Complete {
+		return nil, err
 	}
-	g, err := loadGeneration(gs[len(gs)-1].dir)
-	if err != nil || g.Complete {
-		return nil
-	}
-	return g
+	return g, nil
 }
 
 // apply changes one real path, journal first.

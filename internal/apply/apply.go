@@ -137,9 +137,13 @@ func changedInside(dir string, since func(string) time.Time) string {
 }
 
 func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) error {
+	last, err := lastGeneration(s)
+	if err != nil {
+		return fmt.Errorf("nothing applied: %w; until it can be read, it is not known whether the last apply or rollback finished", err)
+	}
 	// Some real files rolled back and some not: no change, and no intent
 	// (a push, a command), runs on such a tree.
-	if stopped := rollbackStopped(s); stopped != nil {
+	if last != nil && last.Stopped {
 		return fmt.Errorf("a rollback of session %s stopped part way; put the directory back and run `airbag rollback %s` to finish it, then apply again", s.ID, s.ID)
 	}
 	if o.Branch != "" {
@@ -148,9 +152,9 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
 	}
-	if g := interrupted(s); g != nil {
+	if last != nil && !last.Complete {
 		return fmt.Errorf("an apply of session %s started %s did not finish; run `airbag rollback %s` to undo its part, then apply again",
-			s.ID, g.Started.Format("15:04:05"), s.ID)
+			s.ID, last.Started.Format("15:04:05"), s.ID)
 	}
 	if s.Status == session.StatusApplied {
 		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
