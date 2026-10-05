@@ -2,8 +2,11 @@
 # End-to-end check: an "agent" wrecks a repo, writes to ~, commits,
 # pushes and calls the network. Nothing may reach the real world until
 # `airbag apply`. Run as a regular user on a machine where
-# `airbag doctor` passes.
+# `airbag doctor` passes. On macOS (the prototype in docs/macos.md) ~ is
+# read-only rather than a branch and secret files are unreadable, and
+# those are checked instead.
 set -eu
+mac=; [ "$(uname)" = Darwin ] && mac=1
 
 AIRBAG=${AIRBAG:-airbag}
 T=$(mktemp -d "$HOME/.airbag-e2e.XXXXXX")
@@ -15,6 +18,9 @@ mkdir "$T/proj" && cd "$T/proj"
 git init -q -b main
 git config user.email e2e@example.com && git config user.name e2e
 echo hello > README.md && echo bye > old.txt
+if [ -n "$mac" ]; then
+	echo TOKEN=e2e > .env && echo .env > .gitignore
+fi
 git add -A && git commit -qm init
 git remote add origin "$T/remote.git" && git push -q origin main
 before=$(git -C "$T/remote.git" rev-parse main)
@@ -29,10 +35,31 @@ printf '#!/bin/sh\n' > .git/hooks/post-checkout && chmod +x .git/hooks/post-chec
 printf '#!/bin/sh\ntouch hook-ran\n' > .git/hooks/pre-push && chmod +x .git/hooks/pre-push
 git add -A && git commit -qm "agent work"
 git push origin main
-curl -s --unix-socket /run/airbag/ctl.sock -d '{"kind":"git.push","argv":["rm","-rf","/"]}' http://x/intent | grep -q "only" || echo "LEAK: forged intent accepted"
+curl -s --unix-socket "${AIRBAG_CONTROL:-/run/airbag/ctl.sock}" -d '{"kind":"git.push","argv":["rm","-rf","/"]}' http://x/intent | grep -q "only" || echo "LEAK: forged intent accepted"
 git push --receive-pack='touch /tmp/pwn' origin main 2>&1 | grep -q "not allowed" || echo "LEAK: --receive-pack accepted"
 curl -s -o /dev/null --max-time 10 https://example.com && echo "LEAK: example.com reachable"
-ls /run | grep -q airbag || echo "LEAK: host /run visible"
+if [ "$(uname)" = Darwin ]; then
+	cat .env >/dev/null 2>&1 && echo "LEAK: secret file readable"
+	# Every project's memory/ is denied (airbag makes this workspace's
+	# project directory before the run); what a failed check made is
+	# removed again.
+	for d in "$HOME"/.claude/projects/*/; do
+		[ -d "$d" ] || continue
+		made=
+		[ -d "$d/memory" ] || { mkdir "$d/memory" 2>/dev/null && made=1; }
+		if echo x > "$d/memory/airbag-e2e-probe.md" 2>/dev/null; then
+			rm -f "$d/memory/airbag-e2e-probe.md"
+			echo "LEAK: memory writable in $d"
+		fi
+		if [ -n "$made" ]; then
+			rmdir "$d/memory"
+			echo "LEAK: memory/ creatable in $d"
+		fi
+	done
+	ls -d "$HOME"/.claude/projects/*/ >/dev/null 2>&1 || echo "LEAK: no project directory to check memory/ in"
+else
+	ls /run | grep -q airbag || echo "LEAK: host /run visible"
+fi
 exit 0
 EOF
 
@@ -48,20 +75,25 @@ echo "$out" | grep -q "queued as intent i-1" || fail "git push was not queued: $
 
 rev=$("$AIRBAG" review)
 # shellcheck disable=SC2088 # "~/" as the review prints it
-for want in "~ README.md" "+ new.txt" "- old.txt" ".git/hooks/post-checkout  persist" "~/.airbag-e2e-rc" "denied: example.com:443" "git push origin main"; do
+home_change="~/.airbag-e2e-rc"
+if [ -n "$mac" ]; then
+	echo "$out" | grep -q "airbag-e2e-rc: Operation not permitted" || fail "~ was writable on macOS: $out"
+	home_change="+ new.txt" # no branch of ~ to show
+fi
+for want in "~ README.md" "+ new.txt" "- old.txt" ".git/hooks/post-checkout  persist" "$home_change" "denied: example.com:443" "git push origin main"; do
 	echo "$rev" | grep -qF -- "$want" || fail "review lacks '$want':
 $rev"
 done
 
 # The same review as data, and as a short list of decisions.
-"$AIRBAG" review --json | python3 -c '
-import json, sys
+"$AIRBAG" review --json | MAC="$mac" python3 -c '
+import json, os, sys
 r = json.load(sys.stdin)
 assert r["schema"] == "airbag.review/v1", r["schema"]
 att = {(a["what"], a["target"]) for a in r["attention"]}
 for want in [("change", ".git/hooks/post-checkout"), ("change", ".git/hooks/pre-push"), ("intent", "i-1")]:
     assert want in att, (want, att)
-assert any(c["layer"] == "home" and c["path"] == ".airbag-e2e-rc" for c in r["changes"])
+assert os.environ["MAC"] or any(c["layer"] == "home" and c["path"] == ".airbag-e2e-rc" for c in r["changes"])
 assert any(c["path"] == "README.md" and c["kind"] == "modified" for c in r["changes"])
 assert r["network"]["denied"].get("example.com:443"), r["network"]
 ' || fail "review --json"
@@ -82,7 +114,11 @@ applied=$("$AIRBAG" apply --yes)
 echo "$applied" | grep -q "left pending" || fail "intent ran under --yes although the agent added a git hook: $applied"
 [ "$(cat README.md)" = changed ] || fail "README not applied"
 [ ! -f old.txt ] || fail "old.txt not deleted"
-grep -q evil "$HOME/.airbag-e2e-rc" || fail "~ change not applied"
+if [ -n "$mac" ]; then
+	[ ! -s "$HOME/.airbag-e2e-rc" ] || fail "~ changed on macOS"
+else
+	grep -q evil "$HOME/.airbag-e2e-rc" || fail "~ change not applied"
+fi
 [ "$(git -C "$T/remote.git" rev-parse main)" = "$before" ] || fail "remote changed before the intent was confirmed"
 # A later apply keeps the session's pushes untrusted: they wait for --trust-git.
 again=$(printf 'y\n' | "$AIRBAG" apply)

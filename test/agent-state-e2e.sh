@@ -10,6 +10,12 @@
 # the other agent e2e tests share.
 set -eu
 AIRBAG=${AIRBAG:-airbag}
+if [ "$(uname)" = Darwin ]; then
+	# No branch of $HOME there: agent state is written in place and
+	# memory/ is denied (docs/macos.md); e2e.sh checks the denial.
+	echo "SKIP: macOS has no branch of \$HOME"
+	exit 0
+fi
 # Base under the current HOME (not /tmp or /var/tmp, which airbag
 # replaces with a private tmpfs inside the sandbox), then run with a
 # fresh HOME of our own so we never touch the shared ~/.claude.json.
