@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -168,10 +169,14 @@ func guestExec(c guestConfig) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 125
 	}
-	path, err := lookPath(c.Argv[0], c.Env)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 127
+	path := c.Argv[0]
+	if !strings.Contains(path, "/") {
+		resolved, err := lookPath(path, c.Env)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 127
+		}
+		path = resolved
 	}
 	if err := syscall.Exec(path, c.Argv, c.Env); err != nil { //nolint:gosec // user command inside selected execution boundary
 		fmt.Fprintln(os.Stderr, err)

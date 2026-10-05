@@ -190,7 +190,7 @@ func runGVisor(s *session.Session, dir, root string) (int, error) {
 		cmd := exec.CommandContext(context.Background(), s.Runtime.Binary, append(common, "delete", "--force", s.ID)...) //nolint:gosec // trusted runsc, fixed runtime operation
 		_ = cmd.Run()
 	}()
-	args := append(append([]string{}, common...), "--platform=systrap", "--network=none", "--host-uds=open", "--file-access=shared", "run", "--bundle="+dir, s.ID)
+	args := append(append([]string{}, common...), "--platform=systrap", "--network=none", "--host-uds=open", "--file-access=shared", "--overlay2=none", "run", "--bundle="+dir, s.ID)
 	return executeProvider(s.Runtime.Binary, args)
 }
 
