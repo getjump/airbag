@@ -90,6 +90,74 @@ jobs:
           airbag doctor
           for t in test/e2e.sh test/*-e2e.sh; do echo "== $t"; sh "$t"; done
           python3 test/ctrlc.py
+      - name: runtime policy build cost (diagnostic)
+        run: sh test/runtime-policy-bench.sh
+
+  # Diagnostic cost of the opt-in runtime policies (docs/runtime-performance.md):
+  # paired builds of a fixed source snapshot with the binary before and after
+  # them, and the audit storage benchmarks on the same runner.
+  runtime-build-bench:
+    if: github.event_name != 'schedule'
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        parallelism: [1, 2]
+    env:
+      BENCH_BEFORE_SHA: 182ddaf0c4f8849aa7d314674a5a473c795396a4
+      BENCH_SOURCE_SHA: 543fe189b85a0e85870ee9d92244eb2d89385280
+      PARALLELISM: ${{ matrix.parallelism }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: build paired binaries and fixed source snapshot
+        run: |
+          mkdir "$RUNNER_TEMP/airbag-bench-source"
+          git archive "$BENCH_SOURCE_SHA" | tar -x -C "$RUNNER_TEMP/airbag-bench-source"
+          mkdir "$RUNNER_TEMP/airbag-bench-before"
+          git archive "$BENCH_BEFORE_SHA" | tar -x -C "$RUNNER_TEMP/airbag-bench-before"
+          (cd "$RUNNER_TEMP/airbag-bench-before" && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag-before" ./cmd/airbag)
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag-after" ./cmd/airbag
+          CGO_ENABLED=0 go build -tags=airbag_bench -o "$RUNNER_TEMP/airbag-diagnostic" ./cmd/airbag
+          sudo install -m 755 "$RUNNER_TEMP/airbag-after" /usr/local/bin/airbag
+          go mod download
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo chmod 666 /dev/fuse
+      - name: cold, unchanged, and incremental builds (paired)
+        run: |
+          diagnostic=()
+          if [ "$PARALLELISM" = 2 ]; then
+            diagnostic=(--diagnostic "$RUNNER_TEMP/airbag-diagnostic")
+          fi
+          python3 test/runtime-build-bench.py "${diagnostic[@]}" \
+            --before "$RUNNER_TEMP/airbag-before" --after "$RUNNER_TEMP/airbag-after" \
+            --source "$RUNNER_TEMP/airbag-bench-source" \
+            --parallelism "$PARALLELISM" --trials 2 \
+            --output "$RUNNER_TEMP/build-bench-p$PARALLELISM.jsonl"
+      - name: audit storage benchmarks (same runner)
+        if: matrix.parallelism == 2
+        run: |
+          CGO_ENABLED=0 go test ./internal/effects -run '^$' -bench '^BenchmarkAuditStorage$' \
+            -benchtime=8192x -count=3 -timeout=10m \
+            | tee "$RUNNER_TEMP/audit-storage-bench.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: runtime-build-p${{ matrix.parallelism }}
+          path: |
+            ${{ runner.temp }}/build-bench-p${{ matrix.parallelism }}.jsonl
+            ${{ runner.temp }}/audit-storage-bench.txt
+          if-no-files-found: ignore
 
   # The macOS prototype on macOS 15 and 26 on Apple silicon, on the newest
   # macOS (macos-latest: 26 now, the next one when GitHub moves the label),

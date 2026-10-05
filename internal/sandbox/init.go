@@ -22,6 +22,9 @@ import (
 
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/control"
+	"github.com/getjump/airbag/internal/diagnostic"
+	"github.com/getjump/airbag/internal/policyfs"
+	"github.com/getjump/airbag/internal/runtimepolicy"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/shim"
@@ -48,8 +51,9 @@ func Init(dir string, tty bool) {
 		fatal("load session", err)
 	}
 	// PID 1 is the supervisor: it holds the raw proxy, control and
-	// forward sockets and the FUSE backing fds. The agent cannot ptrace
-	// it or read /proc/1/mem mainly because the agent's own user
+	// forward sockets, the FUSE backing fds and, with a runtime policy,
+	// the private runtime channel and the exec listener. The agent cannot
+	// ptrace it or read /proc/1/mem mainly because the agent's own user
 	// namespace has no CAP_SYS_PTRACE over PID 1, which lives in the
 	// parent namespace. Setting PR_SET_DUMPABLE=0 is defense in depth:
 	// it also blocks the same access where the agent shares the user
@@ -57,7 +61,18 @@ func Init(dir string, tty bool) {
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		fatal("protect supervisor", err)
 	}
-	if err := buildWorld(s); err != nil {
+	// The channel exists only for the opt-in runtime options (run.go).
+	var client *runtimepolicy.Client
+	var profile *runtimepolicy.Profile
+	if runtimeOn(s) {
+		if s.RuntimeProfile {
+			profile = &runtimepolicy.Profile{}
+		}
+		if client, err = runtimeClient(profile); err != nil {
+			fatal("runtime channel", err)
+		}
+	}
+	if err := buildWorld(s, client, profile); err != nil {
 		fatal("build sandbox", err)
 	}
 	if err := loopbackUp(); err != nil {
@@ -74,7 +89,14 @@ func Init(dir string, tty bool) {
 		syscall.CloseOnExec(ttyCtlFd)
 		ctl = os.NewFile(ttyCtlFd, "tty-ctl")
 	}
-	os.Exit(runAgent(s, ctl))
+	code := runAgent(s, ctl, client)
+	if profile != nil {
+		if err := client.ReportProfile(profile.Snapshot()); err != nil {
+			fmt.Fprintf(os.Stderr, "airbag: report runtime profile: %v\n", err)
+			code = 125
+		}
+	}
+	os.Exit(code)
 }
 
 func fatal(what string, err error) {
@@ -88,7 +110,7 @@ func fatal(what string, err error) {
 //   - agent state in $HOME passes through, credentials are hidden;
 //   - /run, /tmp, /var/tmp and /dev/shm are private, so host sockets
 //     (docker.sock, D-Bus, ssh-agent, X11, Wayland) are out of reach.
-func buildWorld(s *session.Session) error {
+func buildWorld(s *session.Session, client *runtimepolicy.Client, profile *runtimepolicy.Profile) error {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("make mounts private: %w", err)
 	}
@@ -294,6 +316,66 @@ func buildWorld(s *session.Session) error {
 			fmt.Fprintf(os.Stderr, "airbag: warning: %d secret files are hidden from the agent: reads cannot be tracked (%v)\n", len(secrets), err)
 		}
 	}
+	if s.FilePolicy {
+		if os.Getenv("AIRBAG_NO_FUSE") != "" {
+			return errors.New("--fs-policy requires FUSE; AIRBAG_NO_FUSE is set")
+		}
+		report := secretReadReporter(func(name, exe string, pid uint32) error {
+			return client.Check(runtimepolicy.Request{Source: "fuse", Kind: "secret.read", Target: name, Detail: exe, PID: pid, Secret: true})
+		})
+		// Match the actual opened backing inode, not just its name: renaming a
+		// parent or linking an alias must not lose the original secret's taint.
+		type identity struct{ dev, ino uint64 }
+		secretInodes := map[identity]string{}
+		for _, f := range secrets {
+			var st syscall.Stat_t
+			if err := syscall.Stat(filepath.Join(s.Workspace, f.Rel), &st); err != nil {
+				return err
+			}
+			secretInodes[identity{st.Dev, st.Ino}] = f.Rel
+		}
+		beforeRead := func(_ string, pid uint32, fd int) error {
+			var st syscall.Stat_t
+			if err := syscall.Fstat(fd, &st); err != nil {
+				return err
+			}
+			if rel, ok := secretInodes[identity{st.Dev, st.Ino}]; ok {
+				return report(rel, pid)
+			}
+			return nil
+		}
+		// Capture BOTH ready views before overmounting either. In particular,
+		// workspace commonly lives under HOME. HOME first, workspace last.
+		var views []*policyfs.View
+		check := client.CheckBatch
+		if diagnostic.Config().SkipFileGate {
+			check = func([]runtimepolicy.Request) error { return nil }
+		}
+		options := policyfs.Options{DataCache: policyfs.CacheMode(s.FileCache)}
+		if profile != nil {
+			options.Observe = func(stat policyfs.OperationStats) {
+				profile.Record("fuse."+stat.Operation, stat.Duration, uint64(stat.Requests)) //nolint:gosec // a count, never negative
+				if stat.Errno != 0 {
+					profile.Record("fuse.error."+stat.Operation, 0, 1)
+				}
+				if stat.CacheReason != "" {
+					profile.Record("cache."+stat.CacheReason, 0, 1)
+				}
+			}
+		}
+		for _, path := range []string{s.Home, s.Workspace} {
+			view, err := policyfs.CaptureWithOptions(path, check, beforeRead, options)
+			if err != nil {
+				return fmt.Errorf("capture policy view %s: %w", path, err)
+			}
+			views = append(views, view)
+		}
+		for _, view := range views {
+			if _, err := view.Mount(); err != nil {
+				return fmt.Errorf("mount file policy: %w", err)
+			}
+		}
+	}
 	for _, d := range []string{"/tmp", "/var/tmp", "/dev/shm"} {
 		if _, err := os.Stat(d); err == nil {
 			if err := unix.Mount("tmpfs", d, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777"); err != nil {
@@ -374,29 +456,9 @@ func serveSecrets(s *session.Session, files []secretfs.File) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	self, _ := os.Stat("/proc/self/exe")
-	// The open waits until the host has recorded the taint and cut the
-	// connections a tainted session may not keep. Reads by one program
-	// are reported once; the lock keeps a second reader from slipping
-	// through while the first report is in flight.
-	var mu sync.Mutex
-	reported := map[string]bool{}
-	onRead := func(name string, pid uint32) error {
-		exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
-		if st, err := os.Stat(fmt.Sprintf("/proc/%d/exe", pid)); err == nil && self != nil && os.SameFile(st, self) {
-			return nil // the shell shim reads values to mask them
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if reported[name+exe] {
-			return nil
-		}
-		if err := control.ReportTaint(control.Taint{File: name, Exe: exe}); err != nil {
-			return err
-		}
-		reported[name+exe] = true
-		return nil
-	}
+	onRead := secretReadReporter(func(name, exe string, _ uint32) error {
+		return control.ReportTaint(control.Taint{File: name, Exe: exe})
+	})
 	if _, err := secretfs.Mount(dir, files, onRead); err != nil {
 		return err
 	}
@@ -406,6 +468,32 @@ func serveSecrets(s *session.Session, files []secretfs.File) error {
 		}
 	}
 	return nil
+}
+
+func secretReadReporter(report func(string, string, uint32) error) secretfs.OnRead {
+	self, _ := os.Stat("/proc/self/exe")
+	// The open waits until the host has recorded the taint and cut the
+	// connections a tainted session may not keep. Reads by one program
+	// are reported once; the lock keeps a second reader from slipping
+	// through while the first report is in flight.
+	var mu sync.Mutex
+	reported := map[string]bool{}
+	return func(name string, pid uint32) error {
+		exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+		if st, err := os.Stat(fmt.Sprintf("/proc/%d/exe", pid)); err == nil && self != nil && os.SameFile(st, self) {
+			return nil // the shell shim reads values to mask them
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if reported[name+exe] {
+			return nil
+		}
+		if err := report(name, exe, pid); err != nil {
+			return err
+		}
+		reported[name+exe] = true
+		return nil
+	}
 }
 
 // privateRun mounts an empty /run with airbag's sockets and shims.
@@ -637,7 +725,7 @@ func startForwards(s *session.Session) error {
 //
 // The agent leads a process group of its own, the foreground one on its
 // pseudo-terminal, so Ctrl-C and Ctrl-Z reach it and not PID 1.
-func runAgent(s *session.Session, ctl *os.File) int {
+func runAgent(s *session.Session, ctl *os.File, client *runtimepolicy.Client) int {
 	if s.Strict {
 		// The limit is what --strict asks for, so failing to set it stops
 		// the run, as a failed filter install does below.
@@ -657,6 +745,23 @@ func runAgent(s *session.Session, ctl *os.File) int {
 	}
 	cmd := exec.CommandContext(context.Background(), path, s.Argv[1:]...) //nolint:gosec // the command the user asked to run in the sandbox
 	cmd.Args[0] = s.Argv[0]
+	// --exec-policy: airbag's exec helper installs the notifying filter
+	// in the agent's own process, sends its listener back over fd 3 and
+	// execs the agent; PID 1 answers every execve after that.
+	var execHost, execChild *os.File
+	if s.ExecPolicy {
+		var err error
+		execHost, execChild, err = socketPair()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "airbag: exec controller:", err)
+			return 125
+		}
+		defer func() { _ = execHost.Close() }()
+		defer func() { _ = execChild.Close() }()
+		cmd = exec.CommandContext(context.Background(), airbagBinInside, append([]string{ExecInitArg, path}, s.Argv...)...) //nolint:gosec // airbag's exec helper, then the command the user asked to run
+		// fd 3: the private startup channel.
+		cmd.ExtraFiles = []*os.File{execChild}
+	}
 	cmd.Env = env
 	cmd.Dir = s.Cwd
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -703,7 +808,9 @@ func runAgent(s *session.Session, ctl *os.File) int {
 	// sockets and the FUSE fd (it never exec()s again), while the agent,
 	// which does exec, loses all of them. The ones airbag passes on
 	// purpose are stdio (0,1,2) and, under tty, the control fd, which is
-	// already close-on-exec; the agent inherits none of them.
+	// already close-on-exec; the agent inherits none of them. With
+	// --exec-policy the exec helper gets its startup channel as fd 3 and
+	// closes it before it execs the agent.
 	closeInheritedFDs()
 	if err := restrictAgent(s.Strict); err != nil {
 		// In --strict mode the filter is part of what the user asked for,
@@ -719,6 +826,40 @@ func runAgent(s *session.Session, ctl *os.File) int {
 		return 126
 	}
 	pgrp := -cmd.Process.Pid
+	if s.ExecPolicy {
+		_ = execChild.Close()
+		listener, err := receiveListener(execHost)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "airbag: exec controller:", err)
+			_ = syscall.Kill(pgrp, syscall.SIGKILL)
+			return 125
+		}
+		var stop [2]int
+		if err := unix.Pipe2(stop[:], unix.O_CLOEXEC); err != nil {
+			_ = unix.Close(listener)
+			fmt.Fprintln(os.Stderr, "airbag: exec controller:", err)
+			_ = syscall.Kill(pgrp, syscall.SIGKILL)
+			return 125
+		}
+		served := make(chan struct{})
+		// Once the agent is gone the server stops and is waited for; the
+		// listener closes last, so a straggler's execve gets ENOSYS.
+		defer func() {
+			_ = unix.Close(stop[1])
+			<-served
+			_ = unix.Close(stop[0])
+			_ = unix.Close(listener)
+		}()
+		go func() {
+			defer close(served)
+			// Past an error no execve could be answered, so the agent stops
+			// rather than run unchecked.
+			if err := serveExec(listener, stop[0], client.Check); err != nil {
+				fmt.Fprintln(os.Stderr, "airbag: exec controller stopped:", err)
+				_ = syscall.Kill(pgrp, syscall.SIGKILL)
+			}
+		}()
+	}
 	// Signals airbag forwards from outside go to the agent's group, as
 	// a terminal would send them.
 	sigs := make(chan os.Signal, 8)
