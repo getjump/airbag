@@ -1,7 +1,7 @@
 # Verifying a release
 
-airbag runs with your files and your credentials, so you should be able to
-check what you install. Every release is built by
+airbag stands between a coding agent and your machine, so you should be able
+to check what you install. Every release is built by
 [.github/workflows/release.yml](../.github/workflows/release.yml) from a tag on
 `main`, on GitHub's runners, and then published as an immutable release: once
 it is out, its tag and its files cannot change.
@@ -48,7 +48,7 @@ and the attestations below show that.
 
 ## cosign: the release workflow signed it
 
-With cosign 3 (cosign 2.4 or later needs `--new-bundle-format`):
+With cosign 3 (a recent cosign 2 reads the bundle with `--new-bundle-format`):
 
 ```console
 $ cosign verify-blob --bundle checksums.txt.sigstore.json \
