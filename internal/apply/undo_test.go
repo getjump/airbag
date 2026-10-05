@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1510,5 +1511,38 @@ func TestApplyNewDirectoryOfLinks(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(ws, "node_modules")); err == nil {
 		t.Fatal("rollback left the directories it made")
+	}
+}
+
+// A directory the host turned into a link while the session ran does
+// not carry the agent's changes out: nothing is written or removed where
+// it leads.
+func TestApplyRefusesLinkedParent(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	upper := t.TempDir()
+	if err := os.WriteFile(filepath.Join(upper, "f"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../tool/cli.js", filepath.Join(upper, "l")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "keep"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "dir")); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []review.Change{
+		{Layer: "ws", Rel: "dir/f", Path: filepath.Join(root, "dir/f"), Upper: filepath.Join(upper, "f"), Kind: review.Added, Mode: 0o644},
+		{Layer: "ws", Rel: "dir/sub/l", Path: filepath.Join(root, "dir/sub/l"), Upper: filepath.Join(upper, "l"), Kind: review.Added, Type: fs.ModeSymlink},
+		{Layer: "ws", Rel: "dir/keep", Path: filepath.Join(root, "dir/keep"), Kind: review.Deleted},
+	} {
+		if err := applyOne(c); err == nil || !strings.Contains(err.Error(), "became a link") {
+			t.Errorf("%s %s: %v", c.Kind, c.Rel, err)
+		}
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 1 || entries[0].Name() != "keep" {
+		t.Fatalf("changed what the link leads to: %v", entries)
 	}
 }

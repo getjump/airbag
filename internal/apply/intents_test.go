@@ -269,6 +269,11 @@ func TestCmdWaitsForLinksOut(t *testing.T) {
 		{"nowhere, into home", func(ws, home string) (string, error) {
 			return filepath.Join(ws, "out.txt"), os.Symlink(filepath.Join(home, ".bashrc"), filepath.Join(ws, "out.txt"))
 		}, false},
+		{"nowhere, where the user cannot create anything", func(ws, _ string) (string, error) {
+			// What appears there later, a process's files among them,
+			// is not known now.
+			return filepath.Join(ws, "notes.md"), os.Symlink("/proc/999999999/environ", filepath.Join(ws, "notes.md"))
+		}, false},
 		{"in a loop of links", func(ws, _ string) (string, error) {
 			_ = os.Symlink("b", filepath.Join(ws, "a"))
 			return filepath.Join(ws, "notes.md"), os.Symlink("a/x", filepath.Join(ws, "notes.md"))

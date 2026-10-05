@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -671,17 +672,10 @@ func inside(p string, root os.FileInfo) bool {
 // a machine's configuration can carry credentials, and a file root wrote
 // into a user's folder can be the user's data. A directory never is: what
 // lies below it is not known, and on macOS firmlinks join user data into
-// /usr and /System. Something that does not exist yet is public only if
-// the user cannot create it.
+// /usr and /System. Something that does not exist is not public either:
+// what appears there later, a process's files under /proc among them, is
+// not known now.
 func public(p string) bool {
-	var st unix.Stat_t
-	if unix.Stat(p, &st) != nil {
-		d := p
-		for unix.Stat(d, &st) != nil && filepath.Dir(d) != d {
-			d = filepath.Dir(d)
-		}
-		return unix.Access(d, unix.W_OK) != nil
-	}
 	file, ok := placeOf(p)
 	if !ok {
 		return false
@@ -834,6 +828,9 @@ func confirm(in *bufio.Reader, o Options, q string) bool {
 }
 
 func applyOne(c review.Change) error {
+	if err := parentsUnlinked(c); err != nil {
+		return err
+	}
 	switch c.Kind {
 	case review.Deleted:
 		return os.RemoveAll(c.Path)
@@ -864,6 +861,38 @@ func applyOne(c review.Change) error {
 	default:
 		return copyFile(c.Upper, c.Path, c.Mode)
 	}
+}
+
+// parentsUnlinked refuses a change when a directory on its way down from
+// its layer's root is a link on the host now. In the session that place
+// was a directory (the branch holds an entry below it), so the link is
+// the host's, made while the session ran, and only the entry itself was
+// checked for a conflict: writing or removing through it would land
+// outside the workspace or $HOME.
+func parentsUnlinked(c review.Change) error {
+	rel := filepath.FromSlash(c.Rel)
+	root, ok := strings.CutSuffix(c.Path, string(filepath.Separator)+rel)
+	if !ok {
+		return fmt.Errorf("%s is not %s in its layer", c.Path, c.Rel)
+	}
+	d := root
+	for _, part := range strings.Split(filepath.Dir(rel), string(filepath.Separator)) {
+		if part == "." {
+			break
+		}
+		d = filepath.Join(d, part)
+		fi, err := os.Lstat(d)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // made below, as a directory
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s became a link on the host, so %s would land where it leads; remove the link or leave the change out", d, c.Rel)
+		}
+	}
+	return nil
 }
 
 // copyFile replaces dst atomically: write a temp file next to it, then
