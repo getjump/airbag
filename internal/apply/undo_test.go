@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1471,5 +1472,132 @@ func TestPartialApplyThenRunAgain(t *testing.T) {
 	cf := Conflicts(s, mustScan(t, s))
 	if len(cf) != 1 || cf[0].Path != real {
 		t.Fatalf("a host edit after the apply: conflicts %v", cf)
+	}
+}
+
+// A new directory that holds only links (node_modules/.bin) is applied:
+// it is made along with its links, as with files.
+func TestApplyNewDirectoryOfLinks(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	if err := os.MkdirAll(filepath.Join(s.CloneDir(), "node_modules/.bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../tool/cli.js", filepath.Join(s.CloneDir(), "node_modules/.bin/tool")); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if target, err := os.Readlink(filepath.Join(ws, "node_modules/.bin/tool")); err != nil || target != "../tool/cli.js" {
+		t.Fatalf("link not applied: %q %v", target, err)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "node_modules")); err == nil {
+		t.Fatal("rollback left the directories it made")
+	}
+}
+
+// A directory the host turned into a link while the session ran does
+// not carry the agent's changes out: nothing is written or removed where
+// it leads.
+func TestApplyRefusesLinkedParent(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	upper := t.TempDir()
+	if err := os.WriteFile(filepath.Join(upper, "f"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../tool/cli.js", filepath.Join(upper, "l")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "keep"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "dir")); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []review.Change{
+		{Layer: "ws", Rel: "dir/f", Path: filepath.Join(root, "dir/f"), Upper: filepath.Join(upper, "f"), Kind: review.Added, Mode: 0o644},
+		{Layer: "ws", Rel: "dir/sub/l", Path: filepath.Join(root, "dir/sub/l"), Upper: filepath.Join(upper, "l"), Kind: review.Added, Type: fs.ModeSymlink},
+		{Layer: "ws", Rel: "dir/keep", Path: filepath.Join(root, "dir/keep"), Kind: review.Deleted},
+	} {
+		if err := applyOne(c); err == nil || !strings.Contains(err.Error(), "became a link") {
+			t.Errorf("%s %s: %v", c.Kind, c.Rel, err)
+		}
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 1 || entries[0].Name() != "keep" {
+		t.Fatalf("changed what the link leads to: %v", entries)
+	}
+}
+
+// The check comes before the undo journal moves the previous version
+// away: through Apply nothing is applied, and through a generation the
+// file the link leads to never leaves its place.
+func TestApplyRefusesLinkedParentBeforeJournal(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	outside := t.TempDir()
+	keep := filepath.Join(outside, "keep")
+	if err := os.WriteFile(keep, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, "dir")); err != nil {
+		t.Fatal(err)
+	}
+	upper := filepath.Join(t.TempDir(), "keep")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs := []review.Change{
+		{Layer: "ws", Rel: "dir/keep", Path: filepath.Join(ws, "dir/keep"), Upper: upper, Kind: review.Modified, Mode: 0o644},
+		{Layer: "ws", Rel: "dir/keep", Path: filepath.Join(ws, "dir/keep"), Kind: review.Deleted},
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	for _, c := range cs {
+		if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "became a link") {
+			t.Fatalf("%s applied through a linked parent: %v", c.Kind, err)
+		}
+	}
+	g, err := beginGeneration(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if err := g.apply(c); err == nil {
+			t.Fatalf("%s: the generation applied through a linked parent", c.Kind)
+		}
+		if data, err := os.ReadFile(keep); err != nil || string(data) != "mine\n" {
+			t.Fatalf("%s: the file the link leads to moved: %q %v", c.Kind, data, err)
+		}
 	}
 }
