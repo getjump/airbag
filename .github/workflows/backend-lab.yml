@@ -64,11 +64,13 @@ jobs:
           curl -fSL --retry 3 -o vmlinux \
             https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155
           echo 'e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2  vmlinux' | sha256sum -c -
-          ./runsc --version > versions.txt
-          ./firecracker --version >> versions.txt
-          go version >> versions.txt
-          uname -a >> versions.txt
-          sha256sum probe airbag vmlinux >> versions.txt
+          {
+            ./runsc --version
+            ./firecracker --version
+            go version
+            uname -a
+            sha256sum probe airbag vmlinux
+          } > versions.txt
       - name: compare two rotated trials
         run: |
           python3 test/backend-lab.py \

@@ -35,7 +35,7 @@ class VerdictTest(unittest.TestCase):
                 lab.parse_result(text)
 
     def test_invalid_duration_is_not_a_measurement(self):
-        for value in [float("nan"), float("inf"), -1, "0.1"]:
+        for value in [float("nan"), float("inf"), -1, "0.1", True]:
             record = self.record()
             record["phases_seconds"]["cold_build"] = value
             self.assertFalse(lab.valid_result(record))

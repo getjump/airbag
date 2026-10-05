@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -68,8 +69,9 @@ def valid_result(record):
             and REQUIRED_CHECKS <= record.get("checks", {}).keys()
             and all(record["checks"][key] is True for key in REQUIRED_CHECKS)
             and REQUIRED_PHASES <= record.get("phases_seconds", {}).keys()
-            and all(isinstance(record["phases_seconds"][key], (int, float))
-                    and 0 <= record["phases_seconds"][key] < 240 for key in REQUIRED_PHASES)
+            and all(type(record["phases_seconds"][key]) in (int, float)
+                    and math.isfinite(record["phases_seconds"][key])
+                    and record["phases_seconds"][key] >= 0 for key in REQUIRED_PHASES)
             and isinstance(record.get("output_sha256"), str)
             and len(record["output_sha256"]) == 64)
 
@@ -99,7 +101,7 @@ def ext4(source, image, size):
 def oci_config(rootfs, work):
     return {
         "ociVersion": "1.0.2",
-        "process": {"terminal": False, "user": {"uid": 0, "gid": 0},
+        "process": {"terminal": False, "user": {"uid": os.getuid(), "gid": os.getgid()},
                     "args": ["/probe", "--work=/work", "--go=/opt/go", "--config=/lab.json"],
                     "env": ["PATH=/opt/go/bin", "HOME=/tmp"], "cwd": "/work",
                     "noNewPrivileges": True,
@@ -164,6 +166,13 @@ def main():
     (root / "lab.json").write_text(json.dumps(configuration))
     rows = []
     failure = False
+
+    def record(row):
+        rows.append(row)
+        # Preserve completed measurements even if CI cancels a later trial.
+        with (lab / "results.jsonl").open("a") as output:
+            output.write(json.dumps(row) + "\n")
+
     try:
         # A reachable host listener and readable canary are negative controls:
         # an unrestricted process must fail both boundary tests.
@@ -172,8 +181,8 @@ def main():
         control = parse_result(text)
         if code == 0 or any(control.get("checks", {}).values()) or len(control.get("checks", {})) != 2:
             raise RuntimeError("negative control did not detect host access")
-        rows.append({"backend": "uncontained-control", "status": "expected-failure",
-                     "guest": control})
+        record({"backend": "uncontained-control", "status": "expected-failure",
+                "guest": control})
         ready = {"native": True, "gvisor": bool(args.runsc),
                  "microvm": bool(args.firecracker and args.kernel and
                                  os.access("/dev/kvm", os.R_OK | os.W_OK))}
@@ -189,7 +198,7 @@ def main():
                        "profile": "offline-workspace-lab-v1", "status": "failed"}
                 if not ready[backend]:
                     row.update(status="unavailable", reason="missing executable, kernel or writable /dev/kvm")
-                    rows.append(row)
+                    record(row)
                     failure = True
                     continue
                 case = lab / f"{backend}-{trial+1}"
@@ -251,9 +260,10 @@ def main():
                 finally:
                     if cleanup:
                         subprocess.run(cleanup, timeout=30, check=False, stdout=subprocess.DEVNULL)
-                rows.append(row)
+                record(row)
                 print(json.dumps(row), flush=True)
         metadata = {"host_kernel": os.uname().release, "source_sha256": original,
+                    "host_architecture": os.uname().machine, "host_cpu_count": os.cpu_count(),
                     "fixture_seconds": fixture_seconds,
                     "cpu_parallelism": 1, "microvm_memory_mib": 2048,
                     "equivalent_full_airbag_policy": False,

@@ -53,7 +53,7 @@ func main() {
 	}
 	fmt.Println("AIRBAG_RESULT " + string(b))
 	if vm {
-		poweroff()
+		stopVM()
 	}
 	os.Exit(code)
 }
@@ -126,9 +126,11 @@ func run(r *result, vm bool) error {
 	}
 	r.GoVersion = strings.TrimSpace(string(out))
 	phase := func(name string, fn func() error) error {
+		fmt.Println("AIRBAG_PHASE_START " + name)
 		start := time.Now()
 		err := fn()
 		r.Phases[name] = time.Since(start).Seconds()
+		fmt.Printf("AIRBAG_PHASE_DONE %s %.6f\n", name, r.Phases[name])
 		return err
 	}
 	build := func() error {

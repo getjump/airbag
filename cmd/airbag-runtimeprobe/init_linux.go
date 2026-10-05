@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -20,16 +21,23 @@ func prepareVM() error {
 		{"/dev/vdb", "/work", "ext4"},
 	} {
 		if err := syscall.Mount(m[0], m[1], m[2], 0, ""); err != nil {
+			// This kernel mounts devtmpfs before starting PID 1. Other mount
+			// failures still fail the experiment rather than hide guest setup errors.
+			if m[1] == "/dev" && errors.Is(err, syscall.EBUSY) {
+				continue
+			}
 			return fmt.Errorf("mount %s: %w", m[1], err)
 		}
 	}
 	return nil
 }
 
-func poweroff() {
+func stopVM() {
 	syscall.Sync()
-	if err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_POWER_OFF); err != nil {
-		fmt.Fprintln(os.Stderr, "poweroff:", err)
+	// Firecracker detects the keyboard reboot (reboot=k); POWER_OFF merely
+	// halts this guest while leaving the host VMM running.
+	if err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART); err != nil {
+		fmt.Fprintln(os.Stderr, "stop VM:", err)
 		os.Exit(1)
 	}
 }
