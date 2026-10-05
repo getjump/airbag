@@ -1156,3 +1156,39 @@ func TestConflictLinkedConfigRemovedOnHost(t *testing.T) {
 		t.Fatal("no conflict for a linked config's target the host removed")
 	}
 }
+
+// A config linked into the workspace (a dotfiles repository the agent
+// works in): the target the host removes during the session is a
+// conflict too.
+func TestConflictConfigLinkedIntoWorkspace(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	target := filepath.Join(ws, "claude.json")
+	if err := os.WriteFile(target, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(home, ".claude.json")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review.NoteHostConfigs(s)
+	if err := os.MkdirAll(s.WSUpper(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.WSUpper(), "claude.json"), []byte(`{"mcpServers":{"x":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, c := range Conflicts(s, mustScan(t, s)) {
+		found = found || c.Path == target && c.Reason == "deleted on the host during the session"
+	}
+	if !found {
+		t.Fatal("no conflict for a config's workspace target the host removed")
+	}
+}

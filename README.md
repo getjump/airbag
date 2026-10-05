@@ -245,11 +245,12 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   is reviewed the same way, and a new one, which the CLI reads instead of
   `~/.claude.json`, is flagged. If the host
   rewrote or removed the file during the session, apply reports it as a conflict; leave
-  it out with `apply -i` or `--only`. Dotfiles kept as links into a directory inside
-  `$HOME` (`~/.bashrc`, `~/.claude` or `~/.claude.json` pointing into `~/dotfiles`) are
-  followed: a change written through the link is found at the link's target and
-  classified as the path it stands for (apply writes a regular file in place of a link
-  it replaces). On the macOS prototype,
+  it out with `apply -i` or `--only`. Dotfiles kept as links (`~/.bashrc`, `~/.claude`,
+  `~/.claude.json` or a file deep in `~/.config/nvim` pointing into `~/dotfiles`, or into
+  the workspace when that is your dotfiles repository) are followed, through chains and
+  to targets that do not exist yet: a change found at a link's target is classified as
+  the path it stands for (apply writes a regular file in place of a link it replaces).
+  A link deeper than 5000 entries into a watched directory is not looked for. On the macOS prototype,
   which has no branch of `$HOME`, this narrowing is only partial; see
   [docs/macos.md](docs/macos.md).
 

@@ -46,6 +46,12 @@ const InitArg = "__airbag_init"
 //     so unlike Claude Code's they cannot be narrowed to this workspace;
 //     a discard keeps every project's Codex transcripts (docs/macos.md).
 //
+// Review reads the real $HOME as the host's own (it follows links there
+// to classify changes, review.homeAliases, and reads the real configs
+// through them), so a passthrough path, which the agent writes in the
+// real $HOME, must never lie at or above a path review watches or a
+// config's directory.
+//
 // What used to pass through and now goes through the branch: the whole
 // .claude/projects/ tree (only the current workspace's dir passes now),
 // .claude/sessions/, file-history/, session-env/, shell-snapshots/,

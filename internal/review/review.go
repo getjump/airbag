@@ -38,6 +38,8 @@ type Change struct {
 	Type  fs.FileMode // fs.ModeDir, fs.ModeSymlink or 0 for files
 	Mode  fs.FileMode
 	Flags []string
+	// cfg: the agent config a change is through a link (classify).
+	cfg *jsonConfig
 }
 
 func (c Change) IsDir() bool { return c.Type == fs.ModeDir }
@@ -183,7 +185,7 @@ func classify(s *session.Session, cs []Change) {
 	secrets := knownSecrets(s.Workspace)
 	var aliases []homeAlias
 	if s.OverHome {
-		aliases = homeAliases(s.Home)
+		aliases = homeAliases(s.Home, []string{s.Home, s.Workspace})
 	}
 	for i := range cs {
 		c := &cs[i]
@@ -192,25 +194,33 @@ func classify(s *session.Session, cs []Change) {
 			rel += "/"
 		}
 		table := persistWSTable
-		// The names the change stands for: its own, and in $HOME the
-		// watched paths whose link leads to it (homeAliases).
-		names := []string{rel}
 		if c.Layer == "home" {
 			table = persistHomeTable
 			c.Flags = append(c.Flags, "outside workspace")
-			for _, a := range aliasRels(aliases, c.Path) {
-				if c.IsDir() {
-					a += "/"
-				}
-				names = append(names, a)
+		}
+		// The $HOME paths the change stands for: its own in $HOME, and
+		// in either layer the watched paths whose link leads to it (a
+		// dotfiles repository as the workspace, say; homeAliases).
+		var names []string
+		if c.Layer == "home" {
+			names = append(names, rel)
+		}
+		for _, a := range aliasRels(aliases, c.Path) {
+			if c.IsDir() {
+				a += "/"
+			}
+			names = append(names, a)
+			if cf := configFor(strings.TrimSuffix(a, "/")); cf != nil {
+				c.cfg = cf
 			}
 		}
-		if slices.ContainsFunc(names, func(n string) bool {
-			return (persistReason(n, table) != "" || slices.Contains(persistNames, path.Base(n))) && !strings.HasSuffix(n, ".sample")
-		}) {
+		persists := func(n string, t []persistence) bool {
+			return (persistReason(n, t) != "" || slices.Contains(persistNames, path.Base(n))) && !strings.HasSuffix(n, ".sample")
+		}
+		if persists(rel, table) || slices.ContainsFunc(names, func(n string) bool { return persists(n, persistHomeTable) }) {
 			c.Flags = append(c.Flags, "persist")
 		}
-		if c.Layer == "home" {
+		if len(names) > 0 {
 			// A config file (~/.claude.json) is shown by its changed
 			// keys, by class: "persist" only when one of them runs code
 			// or changes trust, unknown keys listed plainly, and benign

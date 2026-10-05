@@ -135,8 +135,9 @@ func NoteHostConfigs(s *session.Session) {
 	}
 	for i := range jsonConfigs {
 		note(filepath.Join(s.Home, jsonConfigs[i].path))
-		// A config that is a link: the agent's write lands on its target.
-		if t, ok := resolveInHome(s.Home, jsonConfigs[i].path); ok {
+		// A config that is a link: the agent's write lands on its target,
+		// in $HOME or the workspace.
+		if t, ok := resolveIn(s.Home, jsonConfigs[i].path, []string{s.Home, s.Workspace}); ok {
 			note(t)
 		}
 	}
@@ -277,6 +278,12 @@ func (cf *jsonConfig) defaultFor(path []string) (string, bool) {
 // to inside $HOME (a dotfiles directory, say), which the agent's CLI
 // writes through the link (resolveInHome). nil when it is neither.
 func configAt(c Change) *jsonConfig {
+	if c.cfg != nil {
+		return c.cfg
+	}
+	if c.Layer != "home" {
+		return nil
+	}
 	if cf := configFor(filepath.ToSlash(c.Rel)); cf != nil {
 		return cf
 	}
@@ -297,9 +304,6 @@ func configAt(c Change) *jsonConfig {
 // readable is false when either side is not a readable regular JSON file
 // (a directory where the config was is not).
 func configChanges(c Change) (changes []keyChange, readable, ok bool) {
-	if c.Layer != "home" {
-		return nil, false, false
-	}
 	cf := configAt(c)
 	if cf == nil {
 		return nil, false, false
