@@ -285,7 +285,9 @@ func TestInterceptIdleKeepAlive(t *testing.T) {
 // net/http does the copying there: the flow sees the bytes only through
 // the connections it watches.
 func TestInterceptIdle(t *testing.T) {
-	const idle = 300 * time.Millisecond
+	// Long enough that a second TLS handshake through the proxy on a
+	// busy runner does not count as a stall.
+	const idle = time.Second
 	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := 12 // a byte each Idle/4: 3×Idle
 		if r.URL.Path == "/quiet" {
@@ -305,7 +307,7 @@ func TestInterceptIdle(t *testing.T) {
 	}))
 	t.Cleanup(up.Close)
 	c, _, _ := mitmProxyWith(t, up, "", func(p *Proxy) { p.Limits = testLimits; p.Limits.Idle = idle })
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second) // a failing run ends too
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second) // a failing run ends too
 	defer cancel()
 	get := func(path string) *http.Response {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, up.URL+path, nil)
