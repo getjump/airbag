@@ -141,7 +141,7 @@ func TestRuntimeDeletionThroughLinkedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	var out bytes.Buffer
 	if err := apply.Apply(s, cs, box, apply.Options{Yes: true, Out: &out}); err != nil {
 		t.Fatal(err, out.String())
