@@ -278,6 +278,55 @@ func TestInterceptIdleKeepAlive(t *testing.T) {
 	}
 }
 
+// An intercepted request on which nothing moves for Idle (a host that
+// stalls) is closed; one whose response keeps coming past Idle is not.
+// net/http does the copying there: the flow sees the bytes only through
+// the connections it watches.
+func TestInterceptIdle(t *testing.T) {
+	const idle = 300 * time.Millisecond
+	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := 12 // a byte each Idle/4: 3×Idle
+		if r.URL.Path == "/quiet" {
+			n = 1
+		}
+		rc := http.NewResponseController(w)
+		for i := range n {
+			if i > 0 {
+				time.Sleep(idle / 4)
+			}
+			_, _ = io.WriteString(w, "x")
+			_ = rc.Flush()
+		}
+		if r.URL.Path == "/quiet" {
+			<-r.Context().Done() // until the proxy closes the connection
+		}
+	}))
+	t.Cleanup(up.Close)
+	c, _, _ := mitmProxyWith(t, up, "", func(p *Proxy) { p.Limits = testLimits; p.Limits.Idle = idle })
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second) // a failing run ends too
+	defer cancel()
+	get := func(path string) *http.Response {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, up.URL+path, nil)
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	quiet := get("/quiet")
+	defer quiet.Body.Close()
+	start := time.Now()
+	busy := get("/busy")
+	b, err := io.ReadAll(busy.Body)
+	busy.Body.Close()
+	if err != nil || string(b) != strings.Repeat("x", 12) {
+		t.Fatalf("the busy intercepted connection broke after %v: %q %v", time.Since(start), b, err)
+	}
+	if b, err := io.ReadAll(quiet.Body); err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the quiet intercepted connection is still open after %v: %q %v", time.Since(start), b, err)
+	}
+}
+
 // A plain forwarded request's connection, idle between requests, is
 // closed after KeepAlive.
 func TestForwardIdleKeepAlive(t *testing.T) {
