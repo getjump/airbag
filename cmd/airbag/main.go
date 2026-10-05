@@ -259,9 +259,12 @@ func cmdRun(args []string) (int, error) {
 		s.Argv, s.Cwd = argv, cwd
 		// A session from an older airbag may have stored a wider
 		// passthrough; keep only today's. This run's directory may have
-		// its own transcript directory.
-		sandbox.NarrowPassthrough(s)
-		sandbox.AddClaudeProjectState(s, cwd)
+		// its own transcript directory. An optional runtime has a private
+		// HOME and passes nothing through, as when it was created.
+		if execution.Name == "native" {
+			sandbox.NarrowPassthrough(s)
+			sandbox.AddClaudeProjectState(s, cwd)
+		}
 		for _, h := range allow {
 			if !slices.Contains(s.Allow, h) {
 				s.Allow = append(s.Allow, h)
@@ -297,7 +300,7 @@ func cmdRun(args []string) (int, error) {
 			PassEnv: passEnv, Strict: *strict, Forwards: forwards,
 		}
 		if execution.Name != "native" {
-			meta.OverHome, meta.Clone, meta.Passthrough = false, true, nil
+			meta.OverHome, meta.Clone, meta.Passthrough, meta.BranchHoles = false, true, nil, nil
 		}
 		if runtime.GOOS == "darwin" {
 			// The macOS prototype: the workspace branch is a clone, $HOME
