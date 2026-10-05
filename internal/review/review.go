@@ -198,7 +198,8 @@ func classify(s *session.Session, cs []Change) {
 		if c.Layer == "home" {
 			// A config file (~/.claude.json) is shown by its changed
 			// keys, by class: "persist" only when one of them runs code
-			// or changes trust, unknown keys listed plainly.
+			// or changes trust, unknown keys listed plainly, and benign
+			// counters with no flag, so they need no decision.
 			c.Flags = append(c.Flags, configFlags(*c)...)
 			// Project memory is loaded into later sessions.
 			if agentMemory(rel) || (c.Kind == Deleted || c.Kind == Replaced) && holdsMemory(c.Path, rel) {

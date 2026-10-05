@@ -49,7 +49,7 @@ const InitArg = "__airbag_init"
 // .claude/projects/ tree (only the current workspace's dir passes now),
 // .claude/sessions/, file-history/, session-env/, shell-snapshots/,
 // todos/, statsig/, backups/, debug/, ide/, plans/, and .claude.json
-// (see agentconfig.go for its key-level write-back).
+// (review shows its changed keys by class, see agentconfig.go).
 var DefaultPassthrough = []string{
 	".claude/.credentials.json",
 	".codex/sessions/", ".codex/log/", ".codex/auth.json",

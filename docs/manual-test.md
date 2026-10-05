@@ -9,8 +9,9 @@ own Linux machine before a release.
 1. `airbag doctor` passes. On Ubuntu 23.10+ install the AppArmor profile it prints.
 2. Log in to Claude Code outside airbag once (`claude`, then `/login`). The
    OAuth callback listens on localhost, which the sandbox cannot reach, so the
-   first login happens outside. Inside, `~/.claude/.credentials.json` and
-   `~/.claude.json` pass through, so token refreshes are kept.
+   first login happens outside. Inside, `~/.claude/.credentials.json` passes
+   through, so token refreshes are kept; `~/.claude.json` goes through the
+   branch and shows in review by key name.
 
 ## Session
 

@@ -1,15 +1,12 @@
 package review
 
 import (
-	"encoding/json"
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -41,122 +38,260 @@ func writeCfg(t *testing.T, path, content string) {
 	}
 }
 
-func readCfg(t *testing.T, path string) map[string]any {
+// scanConfig scans s and returns its ~/.claude.json change.
+func scanConfig(t *testing.T, s *session.Session) (Change, []Change) {
 	t.Helper()
-	b, err := os.ReadFile(path)
+	cs, err := Scan(s)
 	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+		t.Fatal(err)
 	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("parse %s: %v (%s)", path, err, b)
+	for _, c := range cs {
+		if c.Layer == "home" && c.Rel == ".claude.json" {
+			return c, cs
+		}
 	}
-	return m
+	t.Fatalf("no ~/.claude.json change in %+v", cs)
+	return Change{}, nil
 }
 
-func TestWriteBackAllowlistedOnly(t *testing.T) {
+func diffOf(c Change) string {
+	var b strings.Builder
+	Diff(&b, c)
+	return b.String()
+}
+
+// An ordinary interactive run, as observed: counters change at the top
+// level and under the current project's entry, and one is removed. All of
+// it is benign: review lists the keys, by name, and asks for no decision.
+// Nothing reaches the real file before apply.
+func TestBenignConfigChangeNeedsNoDecision(t *testing.T) {
 	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":1,"userID":"u"}`)
-	writeCfg(t, branchPath, `{"numStartups":2,"userID":"u"}`)
+	real := `{"numStartups":1,"tipsHistory":{"x":1},"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.1,"lastSessionId":"a"}}}`
+	writeCfg(t, realPath, real)
+	writeCfg(t, branchPath, `{"numStartups":2,"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.2,"lastSessionId":"secret-b","lastDuration":5}}}`)
 
-	msgs := WriteBackConfigs(s)
-	if len(msgs) != 1 {
-		t.Fatalf("messages = %v, want one", msgs)
+	c, cs := scanConfig(t, s)
+	if att := Attention(cs); len(att) != 0 {
+		t.Errorf("a benign-only change needs a decision: %+v", att)
 	}
-	if got := readCfg(t, realPath)["numStartups"]; got != float64(2) {
-		t.Errorf("real numStartups = %v, want 2", got)
+	for _, f := range c.Flags {
+		if f != "outside workspace" {
+			t.Errorf("benign-only change flagged %q", f)
+		}
 	}
-	// Only benign keys differed, so the branch copy is dropped and review
-	// shows nothing for the file.
-	if _, err := os.Stat(branchPath); !os.IsNotExist(err) {
-		t.Errorf("branch copy not dropped: err=%v", err)
+	d := diffOf(c)
+	for _, want := range []string{"numStartups", "tipsHistory", `projects["/home/me/api"].lastCost`, `projects["/home/me/api"].lastDuration`, `projects["/home/me/api"].lastSessionId`} {
+		if !strings.Contains(d, want) {
+			t.Errorf("diff %q lacks %s", d, want)
+		}
+	}
+	if !strings.Contains(d, "benign key(s): ") || strings.Contains(d, "secret-b") {
+		t.Errorf("diff %q: want benign key names, no values", d)
+	}
+	if b, _ := os.ReadFile(realPath); string(b) != real {
+		t.Errorf("the real file changed before apply: %s", b)
 	}
 }
 
-func TestWriteBackMixedChangeKeepsSensitiveInBranch(t *testing.T) {
+// Next to counters, the agent planted an MCP server: the change is
+// persistence, named by key, and the counters ride along with no flag.
+func TestMixedConfigChangeIsPersist(t *testing.T) {
 	s, realPath, branchPath := cfgSession(t)
 	writeCfg(t, realPath, `{"numStartups":1}`)
 	writeCfg(t, branchPath, `{"numStartups":2,"mcpServers":{"x":{"command":"evil"}}}`)
 
-	WriteBackConfigs(s)
+	c, cs := scanConfig(t, s)
+	if att := Attention(cs); len(att) != 1 || att[0].Rel != ".claude.json" {
+		t.Fatalf("attention = %+v, want ~/.claude.json", att)
+	}
+	for _, want := range []string{"persist", "persist key(s): mcpServers"} {
+		if !slices.Contains(c.Flags, want) {
+			t.Errorf("flags %v lack %q", c.Flags, want)
+		}
+	}
+	for _, f := range c.Flags {
+		if strings.Contains(f, "numStartups") {
+			t.Errorf("a benign key is a flag: %v", c.Flags)
+		}
+	}
+	d := diffOf(c)
+	if !strings.Contains(d, "persist key(s): mcpServers") || !strings.Contains(d, "benign key(s): numStartups") || strings.Contains(d, "evil") {
+		t.Errorf("diff = %q", d)
+	}
+}
 
-	real := readCfg(t, realPath)
-	if real["numStartups"] != float64(2) {
-		t.Errorf("benign key not written back: %v", real["numStartups"])
+// A real file that does not exist yet compares as an empty object: the
+// whole new file is shown by key, each in its class.
+func TestNewConfigFileComparedToEmpty(t *testing.T) {
+	s, _, branchPath := cfgSession(t)
+	writeCfg(t, branchPath, `{"numStartups":1,"hooks":{}}`)
+	c, _ := scanConfig(t, s)
+	if !slices.Contains(c.Flags, "persist key(s): hooks") || slices.ContainsFunc(c.Flags, func(f string) bool { return strings.Contains(f, "numStartups") }) {
+		t.Errorf("flags = %v", c.Flags)
 	}
-	if _, ok := real["mcpServers"]; ok {
-		t.Error("mcpServers reached the real file")
-	}
-	if _, err := os.Stat(branchPath); err != nil {
-		t.Errorf("branch copy dropped although a non-benign key changed: %v", err)
-	}
+}
+
+// Next to the counters, the session granted a tool and wrote a sub-key
+// the table does not know: each is named, in its class.
+func TestProjectPersistAndUnknownSubKeys(t *testing.T) {
+	_, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.1}}}`)
+	writeCfg(t, branchPath, `{"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":["Bash(*)"],"lastCost":0.2,"somethingNew":1}}}`)
+
 	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-	keys, persist, ok := configKeyChange(c)
-	if !ok || !persist || !slices.Contains(keys, "mcpServers") {
-		t.Errorf("review of config: keys=%v persist=%v ok=%v, want mcpServers persist", keys, persist, ok)
+	changes, readable, ok := configChanges(c)
+	if !ok || !readable {
+		t.Fatalf("configChanges ok=%v readable=%v", ok, readable)
 	}
-	if slices.Contains(keys, "numStartups") {
-		t.Error("a written-back key still shows as changed in review")
+	got := map[string]keyClass{}
+	for _, ch := range changes {
+		got[ch.String()] = ch.class
 	}
-}
-
-func TestWriteBackKeepsConcurrentHostEdit(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	// The branch was taken from a real file with theme "dark"; while the
-	// session ran, the host changed theme to "light". Write-back must set
-	// the benign counter without reverting the host's theme.
-	writeCfg(t, branchPath, `{"numStartups":2,"theme":"dark"}`)
-	writeCfg(t, realPath, `{"numStartups":1,"theme":"light"}`)
-
-	WriteBackConfigs(s)
-
-	real := readCfg(t, realPath)
-	if real["theme"] != "light" {
-		t.Errorf("host edit clobbered: theme = %v, want light", real["theme"])
+	want := map[string]keyClass{
+		`projects["/home/me/api"].allowedTools`: classPersist,
+		`projects["/home/me/api"].lastCost`:     classBenign,
+		`projects["/home/me/api"].somethingNew`: classUnknown,
 	}
-	if real["numStartups"] != float64(2) {
-		t.Errorf("benign key not written back: %v", real["numStartups"])
+	if len(got) != len(want) {
+		t.Errorf("changes = %v, want %v", got, want)
+	}
+	for k, c := range want {
+		if got[k] != c {
+			t.Errorf("%s: class %v, want %v (all: %v)", k, got[k], c, got)
+		}
 	}
 }
 
-func TestWriteBackMalformedBranchLeavesRealAlone(t *testing.T) {
+// A session in a new project: its counters are benign, its trust
+// decision is not.
+func TestNewProjectEntryTrustIsPersist(t *testing.T) {
+	_, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":3}`)
+	writeCfg(t, branchPath, `{"numStartups":3,"projects":{"/home/me/new":{"hasTrustDialogAccepted":true,"lastCost":0.3}}}`)
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+	want := []string{"persist", `persist key(s): projects["/home/me/new"].hasTrustDialogAccepted`}
+	if got := configFlags(c); !slices.Equal(got, want) {
+		t.Errorf("flags = %q, want %q", got, want)
+	}
+}
+
+func TestKeyPathString(t *testing.T) {
+	for path, want := range map[string]string{
+		"mcpServers":                           "mcpServers",
+		"projects\x00/home/me/a.b\x00lastCost": `projects["/home/me/a.b"].lastCost`,
+		"tipsHistory\x00new-user-warmup":       "tipsHistory.new-user-warmup",
+	} {
+		if got := (keyChange{path: strings.Split(path, "\x00")}).String(); got != want {
+			t.Errorf("%q: %q, want %q", path, got, want)
+		}
+	}
+}
+
+// A changed key the table does not know is not persistence: review lists
+// it plainly under attention, by name.
+func TestReviewListsUnknownKeys(t *testing.T) {
 	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1,"theme":"dark"}`)
+	writeCfg(t, branchPath, `{"numStartups":2,"theme":"light"}`)
+
+	_, cs := scanConfig(t, s)
+	att := Attention(cs)
+	if len(att) != 1 || att[0].Rel != ".claude.json" {
+		t.Fatalf("attention = %+v, want ~/.claude.json", att)
+	}
+	fl := att[0].Flags
+	if !slices.Contains(fl, "unknown key(s): theme") {
+		t.Errorf("flags %v lack the unknown key", fl)
+	}
+	if slices.Contains(fl, "persist") {
+		t.Errorf("an unknown key was flagged as persistence: %v", fl)
+	}
+	var b strings.Builder
+	WriteAttention(&b, BuildReport(s, cs, nil, nil, nil))
+	if !strings.Contains(b.String(), "unknown key(s): theme") || strings.Contains(b.String(), "light") || strings.Contains(b.String(), "numStartups") {
+		t.Errorf("attention output: %q", b.String())
+	}
+
+	// Mixed with a persist key, both are named, each in its class.
+	writeCfg(t, branchPath, `{"numStartups":2,"theme":"light","mcpServers":{"x":{}}}`)
+	_, cs = scanConfig(t, s)
+	fl = Attention(cs)[0].Flags
+	for _, want := range []string{"persist", "persist key(s): mcpServers", "unknown key(s): theme"} {
+		if !slices.Contains(fl, want) {
+			t.Errorf("mixed flags %v lack %q", fl, want)
+		}
+	}
+}
+
+// A null where an object was is not a deletion of every key in it, which
+// would read as benign: it is one change of the whole subtree, and needs
+// a decision.
+func TestNullIsOneChange(t *testing.T) {
+	for branch, want := range map[string]string{
+		`null`: "not a readable regular JSON file",
+		`{"numStartups":1,"userID":"u","projects":null}`:        "unknown key(s): projects",
+		`{"numStartups":1,"userID":"u","projects":{"/w":null}}`: `unknown key(s): projects["/w"]`,
+	} {
+		_, realPath, branchPath := cfgSession(t)
+		writeCfg(t, realPath, `{"numStartups":1,"userID":"u","projects":{"/w":{"lastCost":1,"allowedTools":[]}}}`)
+		writeCfg(t, branchPath, branch)
+		c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+		if flags := configFlags(c); !slices.Contains(flags, want) {
+			t.Errorf("%s: flags = %q, want %q", branch, flags, want)
+		}
+	}
+}
+
+// The account a login recorded decides which account and organization
+// the host's next session uses, so a change to it is persistence.
+func TestAccountChangeIsReviewed(t *testing.T) {
+	_, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"oauthAccount":{"emailAddress":"me@example.com"}}`)
+	writeCfg(t, branchPath, `{"oauthAccount":{"emailAddress":"other@example.com"}}`)
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+	if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "persist key(s): oauthAccount") {
+		t.Fatalf("flags = %q, want the account flagged", flags)
+	}
+}
+
+// Text Go's decoder would alter, and files over the limit, are not read
+// as configs: they are flagged as unreadable, the worst case.
+func TestConfigTextIsRead(t *testing.T) {
+	for name, body := range map[string]string{
+		"malformed":        `{not valid json`,
+		"surrogate escape": `{"numStartups":2,"k\ud800":1}`,
+		"invalid utf-8":    "{\"numStartups\":2,\"k\xff\":1}",
+		"oversize":         `{"numStartups":2,"pad":"` + strings.Repeat("x", maxConfig) + `"}`,
+	} {
+		_, realPath, branchPath := cfgSession(t)
+		writeCfg(t, realPath, `{"numStartups":1}`)
+		writeCfg(t, branchPath, body)
+		c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+		if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "persist") {
+			t.Errorf("%s: flags = %q, want persist", name, flags)
+		}
+	}
+}
+
+// The agent replaces its copy with a symlink to some other JSON file on
+// the host: review does not read through it, and shows the link.
+func TestConfigSymlinkIsNotRead(t *testing.T) {
+	_, realPath, branchPath := cfgSession(t)
 	writeCfg(t, realPath, `{"numStartups":1}`)
-	writeCfg(t, branchPath, `{not valid json`)
-
-	WriteBackConfigs(s)
-
-	if got := readCfg(t, realPath)["numStartups"]; got != float64(1) {
-		t.Errorf("real file changed despite malformed branch: %v", got)
-	}
-	if _, err := os.Stat(branchPath); err != nil {
-		t.Errorf("malformed branch copy removed: %v", err)
-	}
-}
-
-func TestWriteBackMalformedRealNeverCorrupts(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{corrupt`)
-	writeCfg(t, branchPath, `{"numStartups":2}`)
-
-	WriteBackConfigs(s)
-
-	b, err := os.ReadFile(realPath)
-	if err != nil || string(b) != `{corrupt` {
-		t.Errorf("real file was modified: %q (%v)", b, err)
-	}
-}
-
-func TestWriteBackNoHomeBranch(t *testing.T) {
-	t.Setenv("AIRBAG_HOME", t.TempDir())
-	home := t.TempDir()
-	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: false})
-	if err != nil {
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	writeCfg(t, target, `{"numStartups":99,"userID":"from-elsewhere"}`)
+	if err := os.MkdirAll(filepath.Dir(branchPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCfg(t, filepath.Join(s.HomeUpper(), ".claude.json"), `{"numStartups":2}`)
-	if msgs := WriteBackConfigs(s); msgs != nil {
-		t.Errorf("wrote back without a $HOME branch: %v", msgs)
+	if err := os.Symlink(target, branchPath); err != nil {
+		t.Fatal(err)
+	}
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath, Type: fs.ModeSymlink}
+	if flags := configFlags(c); !slices.Contains(flags, "not a readable regular JSON file") {
+		t.Errorf("flags = %q, want unreadable", flags)
+	}
+	if d := diffOf(c); strings.Contains(d, "from-elsewhere") || !strings.Contains(d, "symlink -> "+target) {
+		t.Errorf("diff of a symlink: %q", d)
 	}
 }
 
@@ -174,700 +309,6 @@ func TestAgentMemory(t *testing.T) {
 	}
 }
 
-func TestWriteBackRefusesBranchSymlink(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":1}`)
-	// The agent replaces its copy with a symlink to some other JSON file
-	// on the host that happens to hold an allowlisted key.
-	target := filepath.Join(t.TempDir(), "elsewhere.json")
-	writeCfg(t, target, `{"numStartups":99,"userID":"from-elsewhere"}`)
-	if err := os.MkdirAll(filepath.Dir(branchPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, branchPath); err != nil {
-		t.Fatal(err)
-	}
-
-	if msgs := WriteBackConfigs(s); len(msgs) != 0 {
-		t.Errorf("wrote back through a symlink: %v", msgs)
-	}
-	real := readCfg(t, realPath)
-	if real["numStartups"] != float64(1) || real["userID"] != nil {
-		t.Errorf("real file took values through the symlink: %v", real)
-	}
-	if _, err := os.Lstat(branchPath); err != nil {
-		t.Errorf("branch symlink removed: %v", err)
-	}
-	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath, Type: fs.ModeSymlink}
-	if keys, _, ok := configKeyChange(c); !ok || len(keys) != 0 {
-		t.Errorf("review read through the symlink: keys=%v ok=%v", keys, ok)
-	}
-	var b strings.Builder
-	Diff(&b, c)
-	if strings.Contains(b.String(), "from-elsewhere") || !strings.Contains(b.String(), "symlink -> "+target) {
-		t.Errorf("diff of a symlink: %q", b.String())
-	}
-}
-
-func TestWriteBackRefusesRealSymlink(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	target := filepath.Join(t.TempDir(), "dotfiles.json")
-	writeCfg(t, target, `{"numStartups":1}`)
-	if err := os.Symlink(target, realPath); err != nil {
-		t.Fatal(err)
-	}
-	writeCfg(t, branchPath, `{"numStartups":2}`)
-	WriteBackConfigs(s)
-	if got := readCfg(t, target)["numStartups"]; got != float64(1) {
-		t.Errorf("wrote through the real file's symlink: %v", got)
-	}
-	if fi, err := os.Lstat(realPath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Errorf("real symlink replaced: %v", err)
-	}
-}
-
-// An ordinary interactive run, as observed: counters change at the top
-// level and under the current project's entry. All of it is benign, so
-// all of it is written back and nothing is left for review.
-func TestWriteBackProjectCounters(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":1,"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.1,"lastSessionId":"a"}}}`)
-	writeCfg(t, branchPath, `{"numStartups":2,"tipsHistory":{"x":1},"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.2,"lastSessionId":"b","lastDuration":5}}}`)
-
-	WriteBackConfigs(s)
-
-	real := readCfg(t, realPath)
-	p := real["projects"].(map[string]any)["/home/me/api"].(map[string]any)
-	if real["numStartups"] != float64(2) || p["lastCost"] != 0.2 || p["lastSessionId"] != "b" || p["lastDuration"] != float64(5) {
-		t.Errorf("counters not written back: %v", real)
-	}
-	if p["hasTrustDialogAccepted"] != true {
-		t.Errorf("trust lost: %v", p)
-	}
-	if _, err := os.Stat(branchPath); !os.IsNotExist(err) {
-		t.Errorf("an ordinary run left the config in review: %v", err)
-	}
-}
-
-// Next to the counters, the session granted a tool and wrote a sub-key
-// the table does not know: those stay in the branch, by name.
-func TestProjectPersistAndUnknownSubKeys(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.1}}}`)
-	writeCfg(t, branchPath, `{"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":["Bash(*)"],"lastCost":0.2,"somethingNew":1}}}`)
-
-	WriteBackConfigs(s)
-
-	p := readCfg(t, realPath)["projects"].(map[string]any)["/home/me/api"].(map[string]any)
-	if p["lastCost"] != 0.2 {
-		t.Errorf("benign sub-key not written back: %v", p)
-	}
-	if len(p["allowedTools"].([]any)) != 0 || p["somethingNew"] != nil {
-		t.Errorf("non-benign sub-keys reached the real file: %v", p)
-	}
-	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-	changes, readable, ok := configChanges(c)
-	if !ok || !readable {
-		t.Fatalf("configChanges ok=%v readable=%v", ok, readable)
-	}
-	got := map[string]keyClass{}
-	for _, ch := range changes {
-		got[ch.String()] = ch.class
-	}
-	want := map[string]keyClass{
-		`projects["/home/me/api"].allowedTools`: classPersist,
-		`projects["/home/me/api"].somethingNew`: classUnknown,
-	}
-	if len(got) != len(want) {
-		t.Errorf("changes = %v, want %v", got, want)
-	}
-	for k, c := range want {
-		if got[k] != c {
-			t.Errorf("%s: class %v, want %v (all: %v)", k, got[k], c, got)
-		}
-	}
-}
-
-// A session in a new project: its counters may go back, its trust
-// decision may not.
-func TestNewProjectEntryKeepsTrustInBranch(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":3}`)
-	writeCfg(t, branchPath, `{"numStartups":3,"projects":{"/home/me/new":{"hasTrustDialogAccepted":true,"lastCost":0.3}}}`)
-
-	WriteBackConfigs(s)
-
-	p := readCfg(t, realPath)["projects"].(map[string]any)["/home/me/new"].(map[string]any)
-	if p["lastCost"] != 0.3 || p["hasTrustDialogAccepted"] != nil {
-		t.Errorf("real project entry = %v, want only the counter", p)
-	}
-	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-	keys, persist, _ := configKeyChange(c)
-	if !persist || !slices.Equal(keys, []string{`projects["/home/me/new"].hasTrustDialogAccepted`}) {
-		t.Errorf("review: keys=%v persist=%v", keys, persist)
-	}
-}
-
-func TestKeyPathString(t *testing.T) {
-	for path, want := range map[string]string{
-		"mcpServers":                           "mcpServers",
-		"projects\x00/home/me/a.b\x00lastCost": `projects["/home/me/a.b"].lastCost`,
-		"tipsHistory\x00new-user-warmup":       "tipsHistory.new-user-warmup",
-	} {
-		if got := (keyChange{path: strings.Split(path, "\x00")}).String(); got != want {
-			t.Errorf("%q: %q, want %q", path, got, want)
-		}
-	}
-}
-
-// A changed key the table does not know is neither written back nor
-// persistence: review lists it plainly under attention, by name.
-func TestReviewListsUnknownKeys(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":1,"theme":"dark"}`)
-	writeCfg(t, branchPath, `{"numStartups":2,"theme":"light"}`)
-	WriteBackConfigs(s)
-
-	cs, err := Scan(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	att := Attention(cs)
-	if len(att) != 1 || att[0].Rel != ".claude.json" {
-		t.Fatalf("attention = %+v, want ~/.claude.json", att)
-	}
-	fl := att[0].Flags
-	if !slices.Contains(fl, "unknown key(s): theme") {
-		t.Errorf("flags %v lack the unknown key", fl)
-	}
-	if slices.Contains(fl, "persist") {
-		t.Errorf("an unknown key was flagged as persistence: %v", fl)
-	}
-	var b strings.Builder
-	WriteAttention(&b, BuildReport(s, cs, nil, nil, nil))
-	if !strings.Contains(b.String(), "unknown key(s): theme") || strings.Contains(b.String(), "light") {
-		t.Errorf("attention output: %q", b.String())
-	}
-
-	// Mixed with a persist key, both are named, each in its class.
-	writeCfg(t, branchPath, `{"numStartups":2,"theme":"light","mcpServers":{"x":{}}}`)
-	cs, _ = Scan(s)
-	fl = Attention(cs)[0].Flags
-	for _, want := range []string{"persist", "persist key(s): mcpServers", "unknown key(s): theme"} {
-		if !slices.Contains(fl, want) {
-			t.Errorf("mixed flags %v lack %q", fl, want)
-		}
-	}
-}
-
-// A null where an object was is not a deletion of every key in it: the
-// whole subtree is one change, left in the branch, and nothing is
-// written back from it.
-func TestWriteBackNullStaysInBranch(t *testing.T) {
-	for _, branch := range []string{
-		`null`,
-		`{"numStartups":1,"userID":"u","projects":null}`,
-		`{"numStartups":1,"userID":"u","projects":{"/w":null}}`,
-	} {
-		s, realPath, branchPath := cfgSession(t)
-		real := `{"numStartups":1,"userID":"u","projects":{"/w":{"lastCost":1,"allowedTools":[]}}}`
-		writeCfg(t, realPath, real)
-		writeCfg(t, branchPath, branch)
-		if msgs := WriteBackConfigs(s); len(msgs) != 0 {
-			t.Errorf("%s: wrote back %v", branch, msgs)
-		}
-		if b, _ := os.ReadFile(realPath); string(b) != real {
-			t.Errorf("%s: real file changed to %s", branch, b)
-		}
-		if _, err := os.Stat(branchPath); err != nil {
-			t.Errorf("%s: branch copy dropped: %v", branch, err)
-		}
-		c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-		if flags := configFlags(c); len(flags) == 0 {
-			t.Errorf("%s: review shows nothing", branch)
-		}
-	}
-}
-
-// A benign key the agent removed is not removed from the real file: it
-// stays a change for review.
-func TestWriteBackNeverWritesDeletion(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":1,"tipsHistory":{"x":1}}`)
-	writeCfg(t, branchPath, `{"numStartups":2}`)
-	WriteBackConfigs(s)
-	got := readCfg(t, realPath)
-	if got["numStartups"] != float64(2) || got["tipsHistory"] == nil {
-		t.Fatalf("real file = %v, want the counter written and the removed key kept", got)
-	}
-	if _, err := os.Stat(branchPath); err != nil {
-		t.Fatalf("branch copy dropped: %v", err)
-	}
-	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-	if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "benign key(s): tipsHistory") {
-		t.Fatalf("flags = %q, want the removed key listed", flags)
-	}
-}
-
-// The account a login recorded decides which account and organization
-// the host's next session uses, so a change to it is reviewed.
-func TestAccountChangeIsReviewed(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"oauthAccount":{"emailAddress":"me@example.com"}}`)
-	writeCfg(t, branchPath, `{"oauthAccount":{"emailAddress":"other@example.com"}}`)
-	WriteBackConfigs(s)
-	if got := readCfg(t, realPath); got["oauthAccount"].(map[string]any)["emailAddress"] != "me@example.com" {
-		t.Fatalf("the account change was written back: %v", got)
-	}
-	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-	if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "persist key(s): oauthAccount") {
-		t.Fatalf("flags = %q, want the account flagged", flags)
-	}
-}
-
-// A host edit during the session counts as one even when the editor kept
-// an old modification time (cp -p, sync tools): it is the change time
-// that tells, so the write-back is not recorded as airbag's own.
-func TestHostEditWithOldMtimeIsNotOwnWrite(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":1,"theme":"dark"}`)
-	old := time.Now().Add(-24 * time.Hour)
-	if err := os.Chtimes(realPath, old, old); err != nil {
-		t.Fatal(err)
-	}
-	writeCfg(t, branchPath, `{"numStartups":2,"theme":"dark","mcpServers":{}}`)
-	WriteBackConfigs(s)
-	if OwnWrite(s, realPath) {
-		t.Fatal("a host edit with an old mtime was recorded as airbag's write")
-	}
-}
-
-// writeAtomic replaces nothing when the file changed since it was read.
-func TestWriteAtomicRefusesChangedFile(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "c.json")
-	writeCfg(t, p, `{"a":1}`)
-	if err := writeAtomic(p, []byte(`{"a":2}`), func() bool { return false }); !errors.Is(err, errChanged) {
-		t.Fatalf("err = %v, want errChanged", err)
-	}
-	if b, _ := os.ReadFile(p); string(b) != `{"a":1}` {
-		t.Fatalf("file = %s, want it untouched", b)
-	}
-	if ents, _ := os.ReadDir(filepath.Dir(p)); len(ents) != 1 {
-		t.Fatalf("left %v behind", ents)
-	}
-}
-
-// Text Go's decoder would alter, and files over the limit, are not read
-// as configs: they stay in the branch, flagged as unreadable.
-func TestConfigTextIsRead(t *testing.T) {
-	for name, body := range map[string]string{
-		"surrogate escape": `{"numStartups":2,"k\ud800":1}`,
-		"invalid utf-8":    "{\"numStartups\":2,\"k\xff\":1}",
-		"oversize":         `{"numStartups":2,"pad":"` + strings.Repeat("x", maxConfig) + `"}`,
-	} {
-		s, realPath, branchPath := cfgSession(t)
-		writeCfg(t, realPath, `{"numStartups":1}`)
-		writeCfg(t, branchPath, body)
-		if msgs := WriteBackConfigs(s); len(msgs) != 0 {
-			t.Errorf("%s: wrote back %v", name, msgs)
-		}
-		c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-		if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "persist") {
-			t.Errorf("%s: flags = %q, want persist", name, flags)
-		}
-	}
-}
-
-// After a write-back, the real file's new change time is airbag's own,
-// until the host edits it again; when the host had edited it during the
-// session, nothing is recorded, so apply still reports the conflict.
-func TestOwnWriteRecordsOnlyAirbagsWrite(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":1}`)
-	s.Created = time.Now() // the real file predates the session
-	writeCfg(t, branchPath, `{"numStartups":2,"mcpServers":{"x":{"command":"/bin/true"}}}`)
-	WriteBackConfigs(s)
-	if !OwnWrite(s, realPath) {
-		t.Fatal("airbag's own write-back is not recognized")
-	}
-	if re, err := session.Load(s.Dir); err != nil || !OwnWrite(re, realPath) {
-		t.Fatalf("the record is not saved with the session: %v", err)
-	}
-	if err := os.Chmod(realPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if OwnWrite(s, realPath) {
-		t.Fatal("a later host chmod counts as airbag's write")
-	}
-	writeCfg(t, realPath, `{"numStartups":3}`)
-	if OwnWrite(s, realPath) {
-		t.Fatal("a later host edit counts as airbag's write")
-	}
-
-	s2, realPath2, branchPath2 := cfgSession(t)
-	writeCfg(t, realPath2, `{"numStartups":1,"theme":"dark"}`) // a host edit during the session
-	writeCfg(t, branchPath2, `{"numStartups":2,"mcpServers":{}}`)
-	WriteBackConfigs(s2)
-	if OwnWrite(s2, realPath2) {
-		t.Fatal("a file the host also edited is recorded as airbag's write")
-	}
-}
-
-// A benign key the host changed during the session and the agent did not
-// keeps the host's value: the write-back merges three ways, from the base
-// taken before the run.
-func TestWriteBackKeepsHostChangeToUntouchedKey(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":1,"tipsHistory":{"a":1}}`)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"numStartups":2,"tipsHistory":{"a":1}}`) // the agent's copy
-	writeCfg(t, realPath, `{"numStartups":1,"tipsHistory":{"a":5}}`)   // a host session meanwhile
-	WriteBackConfigs(s)
-	got := readCfg(t, realPath)
-	if got["numStartups"] != float64(2) || got["tipsHistory"].(map[string]any)["a"] != float64(5) {
-		t.Fatalf("real file = %v, want the agent's counter and the host's tips", got)
-	}
-	if _, err := os.Stat(branchPath); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("branch copy kept (%v), want it dropped: nothing is left to review", err)
-	}
-	// A later run takes neither value for the agent's change again.
-	writeCfg(t, branchPath, `{"numStartups":2,"tipsHistory":{"a":5}}`)
-	writeCfg(t, realPath, `{"numStartups":7,"tipsHistory":{"a":5}}`)
-	WriteBackConfigs(s)
-	if got := readCfg(t, realPath); got["numStartups"] != float64(7) {
-		t.Fatalf("real file = %v, the host's newer counter was overwritten", got)
-	}
-}
-
-// When both changed a benign key, the agent's value is not written over
-// the host's: it waits in the branch for review.
-func TestWriteBackBothChangedWaitsForReview(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"numStartups":1}`)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"numStartups":2}`)
-	writeCfg(t, realPath, `{"numStartups":3}`)
-	WriteBackConfigs(s)
-	if got := readCfg(t, realPath); got["numStartups"] != float64(3) {
-		t.Fatalf("real file = %v, want the host's value kept", got)
-	}
-	if _, err := os.Stat(branchPath); err != nil {
-		t.Fatalf("branch copy dropped: %v", err)
-	}
-}
-
-// With no real file at the start of the run, the base is empty: a file the
-// host creates meanwhile keeps its values where the agent's differ.
-func TestWriteBackBaseWhenNoRealFile(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"numStartups":1,"userID":"u"}`)
-	writeCfg(t, realPath, `{"numStartups":5}`) // a host session created it meanwhile
-	WriteBackConfigs(s)
-	got := readCfg(t, realPath)
-	if got["numStartups"] != float64(5) || got["userID"] != "u" {
-		t.Fatalf("real file = %v, want the host's counter kept and the agent's new id written", got)
-	}
-}
-
-// A benign key the host added during the run, absent from the base and
-// the branch, is not an agent's deletion: the branch copy takes it, so
-// review shows only what the agent changed.
-func TestWriteBackHostAddedKeyIsNotADeletion(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"userID":"u"}`)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"userID":"u","mcpServers":{}}`) // the agent's change
-	writeCfg(t, realPath, `{"userID":"u","numStartups":4}`)   // a host session added a counter
-	WriteBackConfigs(s)
-	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-	flags := strings.Join(configFlags(c), "; ")
-	if strings.Contains(flags, "numStartups") || !strings.Contains(flags, "mcpServers") {
-		t.Fatalf("flags = %q, want only the agent's mcpServers change", flags)
-	}
-	if got := readCfg(t, realPath); got["numStartups"] != float64(4) {
-		t.Fatalf("real file = %v, want the host's counter kept", got)
-	}
-}
-
-// A host-only change copied into the branch moves the base too: when
-// the host changes the key again in a later run, the branch takes that
-// as well, and the key never shows as the agent's change.
-func TestWriteBackRebaseMovesTheBase(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"userID":"u","numStartups":1,"mcpServers":{}}`) // the agent's change
-	writeCfg(t, realPath, `{"userID":"u","numStartups":2}`)                   // a host session
-	WriteBackConfigs(s)
-	// A resumed run: the branch keeps its copy and the base.
-	SnapshotConfigs(s)
-	writeCfg(t, realPath, `{"userID":"u","numStartups":3}`)
-	WriteBackConfigs(s)
-	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-	flags := strings.Join(configFlags(c), "; ")
-	if strings.Contains(flags, "numStartups") || !strings.Contains(flags, "mcpServers") {
-		t.Fatalf("flags = %q, want only the agent's mcpServers change", flags)
-	}
-	if got := readCfg(t, branchPath); got["numStartups"] != float64(3) {
-		t.Fatalf("branch = %v, want the host's latest counter", got)
-	}
-}
-
-// A benign key the host removed during the run, which the agent left
-// as it was, is removed from the branch copy too: it is not the
-// agent's addition.
-func TestWriteBackHostRemovedKeyLeavesTheBranch(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"userID":"u","numStartups":1,"mcpServers":{}}`) // the agent's change
-	writeCfg(t, realPath, `{"userID":"u"}`)                                   // a host process removed the counter
-	WriteBackConfigs(s)
-	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
-	flags := strings.Join(configFlags(c), "; ")
-	if strings.Contains(flags, "numStartups") || !strings.Contains(flags, "mcpServers") {
-		t.Fatalf("flags = %q, want only the agent's mcpServers change", flags)
-	}
-	if got := readCfg(t, branchPath); got["numStartups"] != nil {
-		t.Fatalf("branch = %v, want the host's removal taken", got)
-	}
-	if got := readCfg(t, realPath); got["numStartups"] != nil {
-		t.Fatalf("real file = %v, want the counter still removed", got)
-	}
-}
-
-func TestDeletePathNested(t *testing.T) {
-	m, _ := topLevel([]byte(`{"projects":{"/a":{"x":1,"y":2}},"k":3}`))
-	deletePath(m, []string{"projects", "/a", "x"})
-	deletePath(m, []string{"projects", "/b", "x"}) // absent: no change
-	deletePath(m, []string{"k", "z"})              // through a non-object: no change
-	out, _ := marshalJSON(m, "")
-	if want := `{"k":3,"projects":{"/a":{"y":2}}}`; canon(out) != canon([]byte(want)) {
-		t.Fatalf("got %s, want %s", out, want)
-	}
-}
-
-// A config the host removed during the run is not recreated by the
-// write-back, even for a benign key the agent added: the removal is a
-// host edit, and the branch copy waits for review.
-func TestWriteBackHostRemovedFile(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"userID":"u","mcpServers":{"x":{}}}`)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"userID":"u","mcpServers":{"x":{}},"numStartups":1}`) // the agent adds a counter
-	if err := os.Remove(realPath); err != nil {                                     // the host removes the file
-		t.Fatal(err)
-	}
-	WriteBackConfigs(s)
-	if _, err := os.Lstat(realPath); !os.IsNotExist(err) {
-		t.Fatalf("the write-back recreated a config the host removed (err %v)", err)
-	}
-	if _, ok := s.WroteBack[realPath]; ok {
-		t.Fatal("a write-back was recorded as airbag's own")
-	}
-	if _, err := os.Stat(branchPath); err != nil {
-		t.Fatalf("the branch copy is gone: %v", err)
-	}
-}
-
-// An empty config that existed at the start and that the host removed
-// is told apart from one that never existed: it is not recreated
-// either, and apply sees the removal.
-func TestWriteBackHostRemovedEmptyFile(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{}`)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"numStartups":1}`)
-	if err := os.Remove(realPath); err != nil {
-		t.Fatal(err)
-	}
-	WriteBackConfigs(s)
-	if _, err := os.Lstat(realPath); !os.IsNotExist(err) {
-		t.Fatalf("the write-back recreated a config the host removed (err %v)", err)
-	}
-	if !RemovedOnHost(s, realPath) {
-		t.Fatal("RemovedOnHost = false for a config the host removed")
-	}
-}
-
-// A config absent at the start is not "removed on the host".
-func TestRemovedOnHostNotForANewFile(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"mcpServers":{}}`)
-	if RemovedOnHost(s, realPath) {
-		t.Fatal("RemovedOnHost = true for a config that never existed")
-	}
-}
-
-// With no real config at the start or at write-back, the agent's
-// benign keys still create it: that is the first run, not a removal.
-func TestWriteBackCreatesConfigWhenAbsent(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"numStartups":1}`)
-	WriteBackConfigs(s)
-	if got := readCfg(t, realPath); got["numStartups"] != float64(1) {
-		t.Fatalf("real file = %v, want the agent's counter written", got)
-	}
-}
-
-// A zero-byte config that existed at the start is not taken for an
-// absent one: the host removing it is a removal, not a first run.
-func TestWriteBackHostRemovedZeroByteFile(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, ``)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"numStartups":1}`)
-	if err := os.Remove(realPath); err != nil {
-		t.Fatal(err)
-	}
-	WriteBackConfigs(s)
-	if _, err := os.Lstat(realPath); !os.IsNotExist(err) {
-		t.Fatalf("the write-back recreated a config the host removed (err %v)", err)
-	}
-	if !RemovedOnHost(s, realPath) {
-		t.Fatal("RemovedOnHost = false for a zero-byte config the host removed")
-	}
-}
-
-// A host write that lands between the last check and the replacement
-// is not overwritten: the swap is undone and the attempt retried.
-func TestReplaceIfKeepsARacingHostWrite(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "cfg.json")
-	writeCfg(t, p, `{"a":1}`)
-	hostWrite := func() bool { // the host replaces the file just after the check
-		writeCfg(t, p+".host", `{"a":"host"}`)
-		if err := os.Rename(p+".host", p); err != nil {
-			t.Fatal(err)
-		}
-		return true
-	}
-	if _, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), hostWrite); !errors.Is(err, errChanged) {
-		t.Fatalf("err = %v, want errChanged", err)
-	}
-	if got := readCfg(t, p); got["a"] != "host" {
-		t.Fatalf("file = %v, want the host's write kept", got)
-	}
-	// Absent at the start, created by the host meanwhile: not replaced.
-	q := filepath.Join(dir, "new.json")
-	hostCreate := func() bool { writeCfg(t, q, `{"b":"host"}`); return true }
-	if _, err := replaceIf(q, []byte(`{"b":2}`), nil, false, filepath.Join(dir, "kept"), hostCreate); !errors.Is(err, errChanged) {
-		t.Fatalf("err = %v, want errChanged", err)
-	}
-	if got := readCfg(t, q); got["b"] != "host" {
-		t.Fatalf("file = %v, want the host's file kept", got)
-	}
-	// Unchanged: replaced, and no scratch file is left.
-	if _, err := replaceIf(p, []byte(`{"a":3}`), []byte(`{"a":"host"}`), true, filepath.Join(dir, "kept"), func() bool { return true }); err != nil {
-		t.Fatal(err)
-	}
-	if got := readCfg(t, p); got["a"] != float64(3) {
-		t.Fatalf("file = %v, want the replacement", got)
-	}
-	if es, _ := os.ReadDir(dir); len(es) != 2 {
-		t.Fatalf("scratch files left: %v", es)
-	}
-}
-
-// A host chmod after the check is a change too: the swap is undone and
-// the host's mode stays.
-func TestReplaceIfKeepsARacingChmod(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "cfg.json")
-	writeCfg(t, p, `{"a":1}`)
-	chmod := func() bool {
-		if err := os.Chmod(p, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return true
-	}
-	if _, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), chmod); !errors.Is(err, errChanged) {
-		t.Fatalf("err = %v, want errChanged", err)
-	}
-	fi, err := os.Stat(p)
-	if err != nil || fi.Mode().Perm() != 0o644 || readCfg(t, p)["a"] != float64(1) {
-		t.Fatalf("file mode %v content %v, want the host's chmod and content kept", fi.Mode(), readCfg(t, p))
-	}
-}
-
-// Undoing the swap does not bury a host write that replaced airbag's
-// file in the meantime: the newest host write stays.
-func TestReplaceIfUndoKeepsTheNewestHostWrite(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "cfg.json")
-	writeCfg(t, p, `{"a":1}`)
-	replace := func(v string) {
-		writeCfg(t, p+".host", v)
-		if err := os.Rename(p+".host", p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	afterSwap = func() { replace(`{"a":"second"}`) }
-	t.Cleanup(func() { afterSwap = func() {} })
-	first := func() bool { replace(`{"a":"first"}`); return true }
-	_, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), first)
-	var kept *keptError
-	if !errors.As(err, &kept) {
-		t.Fatalf("err = %v, want the displaced host write reported as kept", err)
-	}
-	if got := readCfg(t, p); got["a"] != "second" {
-		t.Fatalf("file = %v, want the newest host write", got)
-	}
-	// The older host write is not deleted: it is kept aside.
-	if got := readCfg(t, kept.path); got["a"] != "first" {
-		t.Fatalf("kept = %v, want the older host write", got)
-	}
-}
-
-// Where the filesystem cannot swap atomically, nothing is written: the
-// changes stay in the branch rather than racing the host.
-func TestReplaceIfRefusesWithoutAtomicSwap(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "cfg.json")
-	writeCfg(t, p, `{"a":1}`)
-	saved, savedNR := renameExchange, renameNoReplace
-	t.Cleanup(func() { renameExchange, renameNoReplace = saved, savedNR })
-	renameExchange = func(string, string) error { return unix.ENOTSUP }
-	renameNoReplace = func(string, string) error { return unix.EINVAL }
-	if _, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), func() bool { return true }); !errors.Is(err, errNoAtomic) {
-		t.Fatalf("err = %v, want errNoAtomic", err)
-	}
-	if got := readCfg(t, p); got["a"] != float64(1) {
-		t.Fatalf("file = %v, want it untouched", got)
-	}
-	q := filepath.Join(dir, "new.json")
-	if _, err := replaceIf(q, []byte(`{"b":1}`), nil, false, filepath.Join(dir, "kept"), func() bool { return true }); !errors.Is(err, errNoAtomic) {
-		t.Fatalf("err = %v, want errNoAtomic", err)
-	}
-	if _, err := os.Lstat(q); !os.IsNotExist(err) {
-		t.Fatalf("a file was created without an atomic create (err %v)", err)
-	}
-	if es, _ := os.ReadDir(dir); len(es) != 1 {
-		t.Fatalf("scratch files left: %v", es)
-	}
-}
-
-// apply's write of an agent config is recorded as airbag's own.
-func TestRecordOwnWrite(t *testing.T) {
-	s, realPath, _ := cfgSession(t)
-	writeCfg(t, realPath, `{"a":1}`)
-	RecordOwnWrite(s, realPath)
-	if !OwnWrite(s, realPath) {
-		t.Fatal("an apply-written config is not recorded as airbag's own")
-	}
-	other := filepath.Join(s.Home, "other.json")
-	writeCfg(t, other, `{}`)
-	RecordOwnWrite(s, other)
-	if _, ok := s.WroteBack[other]; ok {
-		t.Fatal("a file that is not an agent config was recorded")
-	}
-}
-
-// Deleting a whole project directory deletes its memory/ too: the
-// deletion is flagged as agent instructions, not folded into agent state.
 func TestProjectDirDeletionFlagsMemory(t *testing.T) {
 	s, _, _ := cfgSession(t)
 	writeCfg(t, filepath.Join(s.Home, ".claude/projects/-x/memory/M.md"), "remember")
@@ -897,135 +338,6 @@ func TestProjectDirDeletionFlagsMemory(t *testing.T) {
 	}
 }
 
-// A config whose keys are unchanged but whose mode the agent changed is
-// still a change: the branch copy stays for review.
-func TestModeOnlyConfigChangeStays(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"userID":"u"}`)
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"userID":"u"}`)
-	if err := os.Chmod(branchPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	WriteBackConfigs(s)
-	if _, err := os.Lstat(branchPath); err != nil {
-		t.Fatalf("a mode-only change was dropped: %v", err)
-	}
-}
-
-// When the displaced host write cannot be moved to the session (another
-// filesystem, say), it stays beside the config rather than being lost.
-func TestReplaceIfKeepsBesideWhenKeepDirFails(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "cfg.json")
-	writeCfg(t, p, `{"a":1}`)
-	blocked := filepath.Join(dir, "blocked")
-	writeCfg(t, blocked, "a file where the keep dir would be")
-	replace := func(v string) {
-		writeCfg(t, p+".host", v)
-		if err := os.Rename(p+".host", p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	afterSwap = func() { replace(`{"a":"second"}`) }
-	t.Cleanup(func() { afterSwap = func() {} })
-	_, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(blocked, "kept"), func() bool { replace(`{"a":"first"}`); return true })
-	var kept *keptError
-	if !errors.As(err, &kept) {
-		t.Fatalf("err = %v, want a keptError", err)
-	}
-	if filepath.Dir(kept.path) != dir || readCfg(t, kept.path)["a"] != "first" {
-		t.Fatalf("kept at %s, want the older host write beside the config", kept.path)
-	}
-}
-
-// A host chmod between the write-back and its record is not recorded
-// as airbag's own write, so apply still sees it.
-func TestWriteBackStampSkipsARacingChmod(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
-	s.Created = time.Now() // the real file predates the session
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"userID":"u","numStartups":2,"mcpServers":{}}`)
-	beforeStamp = func() {
-		if err := os.Chmod(realPath, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Cleanup(func() { beforeStamp = func() {} })
-	WriteBackConfigs(s)
-	if got := readCfg(t, realPath); got["numStartups"] != float64(2) {
-		t.Fatalf("real file = %v, want the counter written back", got)
-	}
-	if OwnWrite(s, realPath) {
-		t.Fatal("a host chmod after the write-back was recorded as airbag's own write")
-	}
-}
-
-// A host xattr (or any other metadata change) after the write-back
-// moves the change time past the record, so it is not airbag's own.
-func TestWriteBackStampSkipsARacingXattr(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
-	s.Created = time.Now() // the real file predates the session
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"userID":"u","numStartups":2,"mcpServers":{}}`)
-	beforeStamp = func() {
-		time.Sleep(2 * time.Millisecond) // a change time the filesystem can tell apart
-		if err := unix.Setxattr(realPath, "user.host", []byte("1"), 0); err != nil {
-			t.Skipf("no user xattrs here: %v", err)
-		}
-	}
-	t.Cleanup(func() { beforeStamp = func() {} })
-	WriteBackConfigs(s)
-	if OwnWrite(s, realPath) {
-		t.Fatal("a host xattr after the write-back was recorded as airbag's own write")
-	}
-}
-
-// The write-back keeps the config's extended attributes: the
-// replacement is a new inode and is given them before the swap.
-func TestWriteBackKeepsXattrs(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
-	if err := unix.Setxattr(realPath, "user.host", []byte("kept"), 0); err != nil {
-		t.Skipf("no user xattrs here: %v", err)
-	}
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"userID":"u","numStartups":2}`)
-	WriteBackConfigs(s)
-	if got := readCfg(t, realPath); got["numStartups"] != float64(2) {
-		t.Fatalf("real file = %v, want the counter written back", got)
-	}
-	if v, err := getXattr(realPath, "user.host"); err != nil || string(v) != "kept" {
-		t.Fatalf("xattr after write-back = %q (%v), want it kept", v, err)
-	}
-}
-
-// A host xattr change between the check and the swap undoes the swap:
-// the displaced file's attributes must be the ones carried over.
-func TestReplaceIfKeepsARacingXattr(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "cfg.json")
-	writeCfg(t, p, `{"a":1}`)
-	if err := unix.Setxattr(p, "user.host", []byte("old"), 0); err != nil {
-		t.Skipf("no user xattrs here: %v", err)
-	}
-	set := func() bool {
-		if err := unix.Setxattr(p, "user.host", []byte("new"), 0); err != nil {
-			t.Fatal(err)
-		}
-		return true
-	}
-	if _, err := replaceIf(p, []byte(`{"a":2}`), []byte(`{"a":1}`), true, filepath.Join(dir, "kept"), set); !errors.Is(err, errChanged) {
-		t.Fatalf("err = %v, want errChanged", err)
-	}
-	if v, err := getXattr(p, "user.host"); err != nil || string(v) != "new" || readCfg(t, p)["a"] != float64(1) {
-		t.Fatalf("file xattr %q (%v) content %v, want the host's file and xattr kept", v, err, readCfg(t, p))
-	}
-}
-
-// Integers above 2^53 keep their exact value when compared.
 func TestCanonKeepsBigIntegers(t *testing.T) {
 	if canon([]byte(`{"a":9007199254740992}`)) == canon([]byte(`{"a":9007199254740993}`)) {
 		t.Fatal("two different large integers compare equal")
@@ -1073,40 +385,6 @@ func TestKeyNamesStayOneLine(t *testing.T) {
 		if got := (keyChange{path: []string{path}}).String(); got != want {
 			t.Errorf("top-level key %q renders as %q, want %q", path, got, want)
 		}
-	}
-}
-
-// The write-back keeps the config's group: the replacement is a new
-// inode and is given the original owner and group.
-func TestWriteBackKeepsGroup(t *testing.T) {
-	s, realPath, branchPath := cfgSession(t)
-	writeCfg(t, realPath, `{"userID":"u","numStartups":1}`)
-	groups, _ := os.Getgroups()
-	var other int = -1
-	for _, g := range groups {
-		if g != os.Getgid() {
-			other = g
-			break
-		}
-	}
-	if other < 0 {
-		if os.Geteuid() != 0 {
-			t.Skip("no second group to test with")
-		}
-		other = 12345 // root may give any group
-	}
-	if err := os.Lchown(realPath, -1, other); err != nil {
-		t.Skipf("cannot change the group: %v", err)
-	}
-	SnapshotConfigs(s)
-	writeCfg(t, branchPath, `{"userID":"u","numStartups":2}`)
-	WriteBackConfigs(s)
-	if got := readCfg(t, realPath); got["numStartups"] != float64(2) {
-		t.Fatalf("real file = %v, want the counter written back", got)
-	}
-	var st unix.Stat_t
-	if err := unix.Lstat(realPath, &st); err != nil || int(st.Gid) != other {
-		t.Fatalf("group after write-back = %d (%v), want %d", st.Gid, err, other)
 	}
 }
 

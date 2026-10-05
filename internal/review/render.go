@@ -496,9 +496,9 @@ func Diff(w io.Writer, c Change) {
 	}
 	// A config file is shown by the names of the keys that changed, by
 	// class, never their values, which may carry tokens.
-	if fl := configFlags(c); fl != nil {
+	if notes, ok := configNotes(c); ok {
 		var parts []string
-		for _, f := range fl {
+		for _, f := range notes {
 			if f != "persist" {
 				parts = append(parts, f)
 			}

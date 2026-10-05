@@ -45,11 +45,6 @@ type Meta struct {
 	// branch anyway (so they are reviewed and dropped on discard), e.g.
 	// the memory/ sub-directory of a passed-through transcript directory.
 	BranchHoles []string `json:"branch_holes,omitempty"`
-	// WroteBack: config files airbag itself rewrote at session end (the
-	// benign keys copied back), by real path, with what it wrote and the
-	// file's change time right after, so apply does not take airbag's own
-	// write for a host edit, and still sees any later one, a chmod too.
-	WroteBack map[string]WriteStamp `json:"wrote_back,omitempty"`
 	// Paths under $HOME hidden from the agent (credentials).
 	Hidden []string `json:"hidden"`
 	// Host paths hidden from the agent (daemon sockets outside /run).
@@ -153,13 +148,6 @@ func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "ru
 func (s *Session) CloneDir() string            { return filepath.Join(s.Dir, "ws", "clone") }
 func (s *Session) ForwardSock(i int) string {
 	return filepath.Join(s.RunDir(), fmt.Sprintf("fwd-%d.sock", i))
-}
-
-// WriteStamp identifies a file airbag wrote: the SHA-256 of its content
-// and its change time (ns) right after the write.
-type WriteStamp struct {
-	SHA256 string `json:"sha256"`
-	Ctime  int64  `json:"ctime"`
 }
 
 // Forward is one tcp:// entry: the agent connects to 127.0.0.1:Port in

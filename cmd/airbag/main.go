@@ -278,19 +278,9 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 	}
-	// The base of the config write-back's three-way merge (agentconfig.go).
-	review.SnapshotConfigs(s)
 	code, err := sandbox.Run(s, proxy.Allowlist(s.Allow), pol)
 	if err != nil {
 		return code, err
-	}
-	// Copy the agent's benign changes to allowlisted keys of config files
-	// (e.g. ~/.claude.json counters and login metadata) back to the real
-	// files; any other key stays in the branch for review.
-	if msgs := review.WriteBackConfigs(s); len(msgs) > 0 {
-		for _, m := range msgs {
-			fmt.Fprintf(os.Stderr, "airbag: %s\n", term.String(m)) // key names the agent chose
-		}
 	}
 	cs, _ := review.Scan(s)
 	intents := listIntents(s)

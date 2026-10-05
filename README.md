@@ -173,13 +173,13 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   todos, caches — goes through the branch: review folds it into one `agent state`
   line and a discard drops it. A project's `memory/` (instructions loaded into later
   sessions) stays in the branch too, flagged `agent instructions`, so you see it and
-  a discard drops it. `~/.claude.json` also goes through the branch; at session end
-  airbag copies back only an allowlist of benign keys it rewrites every run (counters,
-  ids, migration markers) and leaves any other change — an MCP server, a tool
-  permission, a trust decision, the logged-in account — in the branch, shown in review
-  by key name (never value) and flagged `persist` when it can run code or change
-  trust; airbag's own write-back is not taken for a host edit at apply, any later
-  host edit is. On the macOS prototype,
+  a discard drops it. `~/.claude.json` goes through the branch too, the whole file:
+  nothing in it reaches the real file before apply, Claude Code's own counters
+  included. Review shows it by key name, never value: keys the CLI rewrites every
+  run (counters, ids, migration markers) as `benign key(s)`, which need no decision;
+  an MCP server, a tool permission, a trust decision or the logged-in account flagged
+  `persist`; any other key as `unknown key(s)`. If Claude Code on the host rewrote the
+  file during the session, apply reports it as a conflict. On the macOS prototype,
   which has no branch of `$HOME`, this narrowing is only partial; see
   [docs/macos.md](docs/macos.md).
 

@@ -22,9 +22,10 @@ var stateDirs = []string{".claude/", ".codex/"}
 
 // macStateWriteFiles: single files in $HOME the agent may write on
 // macOS although they go through the branch on Linux. The macOS
-// prototype has no branch of $HOME, so ~/.claude.json cannot get the
-// key-level write-back the Linux path applies (agentconfig.go); it is
-// left writable and persists in full, a residual noted in docs/macos.md.
+// prototype has no branch of $HOME, so ~/.claude.json cannot go through
+// the branch and the key-level review the Linux path gives it
+// (agentconfig.go); it is left writable and persists in full, a residual
+// noted in docs/macos.md.
 var macStateWriteFiles = []string{".claude.json"}
 
 var stateReadOnly = []string{

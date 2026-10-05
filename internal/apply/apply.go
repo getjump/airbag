@@ -66,13 +66,8 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 		exists := err == nil
 		switch c.Kind {
 		case review.Added:
-			switch {
-			case exists && !(c.IsDir() && st.IsDir()):
+			if exists && !(c.IsDir() && st.IsDir()) {
 				out = append(out, Conflict{c.Path, "created on the host during the session"})
-			case !exists && review.RemovedOnHost(s, c.Path):
-				// An agent config the host removed: the branch copy
-				// reads as new, but applying it would undo the removal.
-				out = append(out, Conflict{c.Path, "deleted on the host during the session"})
 			}
 		default:
 			if !exists {
@@ -85,9 +80,7 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 				if p := changedInside(c.Path, since); p != "" {
 					out = append(out, Conflict{p, "changed on the host during the session, inside a directory the agent removed"})
 				}
-			} else if !st.IsDir() && changedAfter(c.Path, since) && !review.OwnWrite(s, c.Path) {
-				// A config file airbag itself wrote benign keys back to
-				// is not a host edit while it holds exactly that write.
+			} else if !st.IsDir() && changedAfter(c.Path, since) {
 				out = append(out, Conflict{c.Path, "changed on the host during the session"})
 			}
 		}
@@ -163,9 +156,6 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 		if err := gen.finish(); err != nil {
 			return err
-		}
-		for _, c := range picked {
-			review.RecordOwnWrite(s, c.Path) // an agent config written now is not a later host edit
 		}
 	}
 	if !s.Clone {

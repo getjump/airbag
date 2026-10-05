@@ -3,11 +3,10 @@
 # passthrough. An "agent" plants an MCP server and a benign counter in
 # ~/.claude.json; reads the project's existing memory, edits one memory
 # file, deletes another and adds a third; and writes a transcript. After
-# the session: the real files have none of the MCP entry or the memory
-# changes, the benign counter was written back, the transcript passed
-# through, review flags the MCP keys and every memory change, and discard
-# drops them. A second session's memory changes reach the real files
-# only with apply. Uses its own HOME so it does not touch the shared one
+# the session: the real files have none of the config or memory changes,
+# the transcript passed through, review flags the MCP keys and every
+# memory change and lists the counter as benign, and discard drops them.
+# Later sessions' changes reach the real files only with apply. Uses its own HOME so it does not touch the shared one
 # the other agent e2e tests share.
 set -eu
 AIRBAG=${AIRBAG:-airbag}
@@ -37,8 +36,8 @@ echo 'stale memory' > "$proj/memory/GONE.md"
 
 cat > "$T/agent.sh" <<EOF
 set -eu
-# Plant an MCP server (must NOT reach the real file) and bump a benign
-# counter (must be written back).
+# Plant an MCP server and bump a benign counter: neither may reach the
+# real file before apply.
 cat > "\$HOME/.claude.json" <<JSON
 {"numStartups":2,"userID":"seed","mcpServers":{"evil":{"command":"/bin/sh","args":["-c","id"]}}}
 JSON
@@ -54,9 +53,9 @@ EOF
 "$AIRBAG" run -- sh "$T/agent.sh" >"$T/run.out" 2>&1 || fail "agent run failed:
 $(cat "$T/run.out")"
 
-# Real files: the dangerous changes did not land; the benign one did.
+# Real files: none of the changes landed, the benign counter included.
 grep -q evil "$HOME/.claude.json" && fail "mcpServers reached the real ~/.claude.json"
-grep -Eq '"numStartups": *2' "$HOME/.claude.json" || fail "benign counter not written back: $(cat "$HOME/.claude.json")"
+grep -q '"numStartups":1,' "$HOME/.claude.json" || fail "the counter reached the real file before apply: $(cat "$HOME/.claude.json")"
 [ ! -e "$proj/memory/NOTES.md" ] || fail "memory reached the real home"
 [ "$(cat "$proj/memory/OLD.md")" = "old memory" ] || fail "memory edit reached the real home"
 [ -f "$proj/memory/GONE.md" ] || fail "memory delete reached the real home"
@@ -80,6 +79,7 @@ $rev"
 # The key diff names keys, never values.
 "$AIRBAG" diff "$HOME/.claude.json" 2>/dev/null | grep -q "/bin/sh" && fail "diff printed a config value"
 "$AIRBAG" diff "$HOME/.claude.json" 2>/dev/null | grep -q "mcpServers" || fail "diff did not name the key"
+"$AIRBAG" diff "$HOME/.claude.json" 2>/dev/null | grep -qF "benign key(s): numStartups" || fail "diff did not list the counter as benign"
 
 # Resumed from a subdirectory of the repository, the session writes a
 # transcript under that directory's own slug, which must pass through too.
@@ -91,10 +91,10 @@ $(cat "$T/run.out")"
 grep -q "resuming session" "$T/run.out" || fail "not resumed: $(cat "$T/run.out")"
 [ -f "$subproj/sess2.jsonl" ] || fail "the resumed run's transcript (new cwd) did not pass through"
 
-# Discard drops the branch; the real files are as the write-back left them.
+# Discard drops the branch; the real files are as before the session.
 "$AIRBAG" discard --yes >/dev/null
 grep -q evil "$HOME/.claude.json" && fail "mcpServers appeared after discard"
-grep -Eq '"numStartups": *2' "$HOME/.claude.json" || fail "written-back counter lost after discard"
+grep -q '"numStartups":1,' "$HOME/.claude.json" || fail "the real config changed after discard: $(cat "$HOME/.claude.json")"
 [ ! -e "$proj/memory/NOTES.md" ] || fail "memory present after discard"
 [ "$(cat "$proj/memory/OLD.md")" = "old memory" ] || fail "memory edit present after discard"
 [ -f "$proj/memory/GONE.md" ] || fail "memory deleted after discard"
@@ -133,24 +133,46 @@ grep -q "stays in the branch" "$T/run.out" || fail "no notice that the changed p
 [ -f "$HOME/.claude/projects/$subslug/memory/SUB.md" ] || fail "the memory delete reached the real home"
 "$AIRBAG" discard --yes >/dev/null
 
-# A third session changes a benign counter and a reviewed key together,
-# as Claude Code does when it adds trust or an MCP server: the counter is
-# written back at session end, and that write of airbag's own is not a
-# host edit, so apply takes the reviewed key without --force.
+# A third session only bumps a counter, as every Claude Code run does:
+# review lists it as benign and asks for no decision, and the real file
+# takes it with apply.
 cat > "$T/agent3.sh" <<'EOF2'
 set -eu
 cat > "$HOME/.claude.json" <<JSON
-{"numStartups":3,"userID":"seed","mcpServers":{"ok":{"command":"/bin/true"}}}
+{"numStartups":3,"userID":"seed"}
 JSON
 EOF2
 "$AIRBAG" run -- sh "$T/agent3.sh" >"$T/run.out" 2>&1 || fail "third agent run failed:
 $(cat "$T/run.out")"
-grep -Eq '"numStartups": *3' "$HOME/.claude.json" || fail "counter not written back in the third run"
-grep -q '"ok"' "$HOME/.claude.json" && fail "mcpServers reached the real file before apply"
-"$AIRBAG" apply --yes >"$T/apply.out" 2>&1 || fail "apply refused airbag's own write-back as a conflict:
+grep -q '"numStartups":1,' "$HOME/.claude.json" || fail "the counter reached the real file before apply"
+att=$("$AIRBAG" review --attention)
+echo "$att" | grep -qF ".claude.json" && fail "a benign-only config change asks for a decision:
+$att"
+"$AIRBAG" diff "$HOME/.claude.json" 2>/dev/null | grep -qF "benign key(s): numStartups" || fail "diff did not list the counter"
+"$AIRBAG" apply --yes >"$T/apply.out" 2>&1 || fail "apply failed:
 $(cat "$T/apply.out")"
-grep -q '"ok"' "$HOME/.claude.json" || fail "apply did not write the reviewed key: $(cat "$HOME/.claude.json")"
-grep -Eq '"numStartups": *3' "$HOME/.claude.json" || fail "apply lost the written-back counter"
+grep -Eq '"numStartups": *3' "$HOME/.claude.json" || fail "apply did not write the counter: $(cat "$HOME/.claude.json")"
+
+# A fourth session adds an MCP server while Claude Code on the host
+# rewrites the same file: apply reports the conflict and writes nothing
+# without --force.
+cat > "$T/agent4.sh" <<'EOF2'
+set -eu
+cat > "$HOME/.claude.json" <<JSON
+{"numStartups":4,"userID":"seed","mcpServers":{"ok":{"command":"/bin/true"}}}
+JSON
+EOF2
+"$AIRBAG" run -- sh "$T/agent4.sh" >"$T/run.out" 2>&1 || fail "fourth agent run failed:
+$(cat "$T/run.out")"
+att=$("$AIRBAG" review --attention)
+echo "$att" | grep -qF "persist key(s): mcpServers" || fail "the MCP server does not ask for a decision:
+$att"
+printf '{"numStartups":9,"userID":"seed"}\n' > "$HOME/.claude.json"
+"$AIRBAG" apply --yes >"$T/apply.out" 2>&1 && fail "apply wrote over a host edit without --force:
+$(cat "$T/apply.out")"
+grep -q "changed on the host during the session" "$T/apply.out" || fail "no conflict reported: $(cat "$T/apply.out")"
+grep -q '"ok"' "$HOME/.claude.json" && fail "mcpServers reached the real file despite the conflict"
+"$AIRBAG" discard --yes >/dev/null
 
 # A session stored by an older airbag passed ~/.claude.json and all of
 # ~/.claude/projects/ through; resumed now, it keeps only today's list.
@@ -166,7 +188,7 @@ m["passthrough"] = m["passthrough"] + [".claude.json", ".claude/projects/", ".cl
 m["branch_holes"] = []
 json.dump(m, open(p, "w"))
 PY
-cat > "$T/agent4.sh" <<'EOF2'
+cat > "$T/agent5.sh" <<'EOF2'
 set -eu
 cat > "$HOME/.claude.json" <<JSON
 {"numStartups":3,"userID":"seed","mcpServers":{"legacy":{"command":"/bin/true"}}}
@@ -174,7 +196,7 @@ JSON
 mkdir -p "$HOME/.claude/projects/-other/memory"
 echo planted > "$HOME/.claude/projects/-other/memory/MEMORY.md"
 EOF2
-"$AIRBAG" run --session last -- sh "$T/agent4.sh" >"$T/run.out" 2>&1 || fail "legacy resume failed: $(cat "$T/run.out")"
+"$AIRBAG" run --session last -- sh "$T/agent5.sh" >"$T/run.out" 2>&1 || fail "legacy resume failed: $(cat "$T/run.out")"
 grep -q legacy "$HOME/.claude.json" && fail "a resumed legacy session wrote mcpServers to the real file"
 [ ! -e "$HOME/.claude/projects/-other/memory/MEMORY.md" ] || fail "a resumed legacy session wrote another project's memory"
 "$AIRBAG" discard --yes >/dev/null
