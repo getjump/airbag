@@ -64,6 +64,17 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 		if noSymlinkSoFar(s.Home, d) == nil {
 			_ = os.MkdirAll(filepath.Join(s.Home, d), 0o700)
 		}
+		// A protected file in it (memory, settings, hooks) with another
+		// name there would be written through that name, which a deny
+		// on its path does not cover: the directory stays read-only.
+		if l, full := protectedLinks(s.Home, d); l != "" || !full {
+			why := "its protected files could not be checked in full for hard links"
+			if l != "" {
+				why = "~/" + l + " has another hard link"
+			}
+			fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s stays read-only (%s)\n", strings.TrimSuffix(d, "/"), why)
+			continue
+		}
 		p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(d, "/")))
 	}
 	for _, f := range s.Passthrough {
@@ -203,3 +214,31 @@ func follow(p string) string {
 
 // maxMemoryHops bounds the links follow follows, against a loop.
 const maxMemoryHops = 40
+
+// protectedLinks returns the first file the profile protects inside
+// state directory d (every project's memory, the read-only state)
+// that has more than one name, and whether all of them were checked.
+func protectedLinks(home, d string) (string, bool) {
+	var paths []string
+	for _, f := range stateReadOnly {
+		if strings.HasPrefix(f, d) {
+			paths = append(paths, f)
+		}
+	}
+	if d == ".claude/" {
+		ents, _ := os.ReadDir(filepath.Join(home, ".claude/projects"))
+		for _, e := range ents {
+			paths = append(paths, ".claude/projects/"+e.Name()+"/memory")
+		}
+	}
+	for _, p := range paths {
+		linked, full := hardLinks(home, p)
+		if len(linked) > 0 {
+			return linked[0], true
+		}
+		if !full {
+			return "", false
+		}
+	}
+	return "", true
+}

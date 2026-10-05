@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/getjump/airbag/internal/seatbelt"
 	"github.com/getjump/airbag/internal/session"
 )
 
@@ -291,5 +292,44 @@ func TestMacProfileUncheckedPassthroughReadOnly(t *testing.T) {
 	h, _ := filepath.EvalSymlinks(home)
 	if !slices.Contains(p.NoWrite, filepath.Join(h, ".claude/projects/x")) {
 		t.Errorf("an unchecked passthrough is not denied: %v", p.NoWrite)
+	}
+}
+
+// A protected memory file with another name inside ~/.claude keeps
+// ~/.claude read-only: a write through that name is not a write to the
+// denied path.
+func TestMacProfileHardLinkedMemoryKeepsStateReadOnly(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	mem := filepath.Join(home, ".claude/projects/other/memory/MEMORY.md")
+	if err := os.MkdirAll(filepath.Dir(mem), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude/debug"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mem, []byte("notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := filepath.EvalSymlinks(home)
+	profile := func() seatbelt.Profile {
+		p, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if p := profile(); !slices.Contains(p.Write, filepath.Join(h, ".claude")) {
+		t.Fatalf("~/.claude not writable without a link: %v", p.Write)
+	}
+	if err := os.Link(mem, filepath.Join(home, ".claude/debug/x")); err != nil {
+		t.Fatal(err)
+	}
+	if p := profile(); slices.Contains(p.Write, filepath.Join(h, ".claude")) {
+		t.Errorf("~/.claude writable with a hard-linked memory file: %v", p.Write)
 	}
 }

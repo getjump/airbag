@@ -146,9 +146,10 @@ resolves to, so a `memory/` that is a link, or lies under a linked project
 directory or a linked `~/.claude/projects`, is denied where it really is too,
 with the directories above that place. Seatbelt rules match paths, not files: a
 file in a passed-through path that has another hard-linked name is denied (the
-whole path, when it cannot be checked in full), but a memory file that also has a hard-linked name elsewhere under the writable
-`~/.claude` can be changed through that name (on Linux such a project stays in
-the branch). What it cannot:
+whole path, when it cannot be checked in full), and when a memory file or other
+protected file has another name, `~/.claude` (or `~/.codex`) stays read-only for
+the session, since a write through that name would not be a write to the denied
+path. What it cannot:
 `~/.claude.json` stays writable, so a change to it — including MCP servers,
 permissions and per-project trust — persists in full without review, and the
 rest of `~/.claude` and `~/.codex` persists as before. The fix is a branch of
