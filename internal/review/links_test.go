@@ -525,3 +525,53 @@ func TestConfigLinkedIntoWorkspaceGit(t *testing.T) {
 	}
 	t.Fatalf("no change in %+v", cs)
 }
+
+// Inside .git, a watched directory linked there names what is added in
+// it, and a change above a watched path's real place there moves it.
+func TestWatchedPathsInsideWorkspaceGit(t *testing.T) {
+	for _, tc := range []struct {
+		name, rel string
+		make      func(t *testing.T, s *session.Session)
+		want      string
+	}{
+		{"dir", ".git/nvim/init.lua", func(t *testing.T, s *session.Session) {
+			writeCfg(t, filepath.Join(s.WSUpper(), ".git/nvim/init.lua"), "vim.cmd('!id')\n")
+		}, "persist"},
+		{"above", ".git/airbag", func(t *testing.T, s *session.Session) {
+			p := filepath.Join(s.WSUpper(), ".git/airbag")
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := unix.Mknod(p, syscall.S_IFCHR, 0); err != nil {
+				t.Skipf("cannot create a whiteout here: %v", err)
+			}
+		}, "persist"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AIRBAG_HOME", t.TempDir())
+			home, ws := t.TempDir(), t.TempDir()
+			writeCfg(t, filepath.Join(ws, ".git/nvim/init.lua"), "-- rc\n")
+			writeCfg(t, filepath.Join(ws, ".git/airbag/claude.json"), `{"numStartups":1}`)
+			symlink(t, filepath.Join(ws, ".git/nvim"), filepath.Join(home, ".config/nvim"))
+			symlink(t, filepath.Join(ws, ".git/airbag/claude.json"), filepath.Join(home, ".claude.json"))
+			s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.make(t, s)
+			cs, err := Scan(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range cs {
+				if c.Rel == tc.rel {
+					if !slices.Contains(c.Flags, tc.want) {
+						t.Errorf("flags %v", c.Flags)
+					}
+					return
+				}
+			}
+			t.Fatalf("no change at %s in %+v", tc.rel, cs)
+		})
+	}
+}

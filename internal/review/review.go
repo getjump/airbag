@@ -189,6 +189,16 @@ func classify(s *session.Session, cs []Change) {
 	if s.OverHome {
 		aliases = homeAliases(s.Home, []string{s.Home, s.Workspace})
 	}
+	// Git's own files take names only from watched paths whose real
+	// place is inside .git, not from a link to the workspace or a
+	// directory above it (the workspace table flags hooks and config).
+	gitDir := filepath.Join(s.Workspace, ".git")
+	var gitAliases []homeAlias
+	for _, a := range aliases {
+		if a.target == gitDir || strings.HasPrefix(a.target, gitDir+string(filepath.Separator)) {
+			gitAliases = append(gitAliases, a)
+		}
+	}
 	for i := range cs {
 		c := &cs[i]
 		rel := filepath.ToSlash(c.Rel)
@@ -207,11 +217,11 @@ func classify(s *session.Session, cs []Change) {
 		if c.Layer == "home" {
 			names = append(names, rel)
 		}
-		// Git's own files take no name from a linked directory above them
-		// (the workspace table flags hooks and config), only one a
-		// watched path links to exactly.
-		gitInternal := c.Layer == "ws" && strings.HasPrefix(rel, ".git/")
-		for _, a := range aliasRels(aliases, c.Path, gitInternal) {
+		lookup := aliases
+		if c.Layer == "ws" && strings.HasPrefix(rel, ".git/") {
+			lookup = gitAliases
+		}
+		for _, a := range aliasRels(lookup, c.Path) {
 			if c.IsDir() {
 				a += "/"
 			}
@@ -226,7 +236,7 @@ func classify(s *session.Session, cs []Change) {
 		// elsewhere: it changes the path as a whole. Only a directory
 		// there, new or changed, leaves the path where it is.
 		if c.Kind == Deleted || c.Kind == Replaced || !c.IsDir() {
-			if above := aliasesAbove(aliases, c.Path); len(above) > 0 && !(c.Layer == "ws" && strings.HasPrefix(rel, ".git/")) {
+			if above := aliasesAbove(lookup, c.Path); len(above) > 0 {
 				c.Flags = append(c.Flags, "persist", "holds where "+listHome(above)+" really is")
 				if slices.ContainsFunc(above, func(n string) bool { return agentMemory(n) || agentMemory(n+"/memory") }) {
 					c.Flags = append(c.Flags, "agent instructions")
