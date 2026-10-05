@@ -3,6 +3,7 @@ package sandbox
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -74,6 +75,13 @@ func PreflightRuntime(b Backend, c session.RuntimeConfig, workspace string, over
 		if pathWithin(abs, c.RootFS) || pathWithin(c.RootFS, abs) {
 			return c, fmt.Errorf("runtime rootfs must be separate from workspace and sessions")
 		}
+		// What runs or boots on this machine does not come from where
+		// the agent's files are.
+		for _, f := range []string{c.Binary, c.Kernel} {
+			if f != "" && pathWithin(f, abs) {
+				return c, fmt.Errorf("%s is inside the workspace or the sessions; the runtime binary and kernel must come from outside them", f)
+			}
+		}
 	}
 	st, err = os.Stat(c.Binary)
 	if err != nil {
@@ -104,10 +112,33 @@ func PreflightRuntime(b Backend, c session.RuntimeConfig, workspace string, over
 	} else if c.Kernel != "" {
 		return c, fmt.Errorf("gvisor does not use --runtime-kernel")
 	}
-	if err := optionalHostReady(b.Name); err != nil {
+	if err := optionalHostReady(b.Name, workspace); err != nil {
 		return c, err
 	}
 	return c, nil
+}
+
+// hostTool finds name on PATH as a program of this machine: its path
+// absolute with links resolved, and outside the workspace and the
+// sessions, where the agent's files are. A PATH entry into the project,
+// as direnv adds, would otherwise run the project's program on the host.
+func hostTool(name, workspace string) (string, error) {
+	p, err := exec.LookPath(name)
+	if err != nil {
+		return "", err
+	}
+	if p, err = filepath.Abs(p); err != nil {
+		return "", err
+	}
+	if p, err = filepath.EvalSymlinks(p); err != nil {
+		return "", err
+	}
+	for _, root := range []string{workspace, session.Root()} {
+		if pathWithin(p, follow(root)) {
+			return "", fmt.Errorf("%s on PATH is %s, inside the workspace or the sessions; put the system's first on PATH", name, p)
+		}
+	}
+	return p, nil
 }
 
 func pathWithin(path, root string) bool {

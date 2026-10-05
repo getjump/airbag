@@ -39,7 +39,7 @@ type guestConfig struct {
 	GID                  int      `json:"gid"`
 }
 
-func optionalHostReady(backend string) error {
+func optionalHostReady(backend, workspace string) error {
 	if _, err := unix.IoctlGetTermios(int(os.Stdin.Fd()), unix.TCGETS); err == nil {
 		return fmt.Errorf("%s currently supports noninteractive stdin only; use native for a terminal", backend)
 	}
@@ -58,7 +58,7 @@ func optionalHostReady(backend string) error {
 		}
 	}
 	if backend == "microvm" {
-		if _, err := exec.LookPath("mkfs.ext4"); err != nil {
+		if _, err := hostTool("mkfs.ext4", workspace); err != nil {
 			return fmt.Errorf("microvm requires mkfs.ext4: %w", err)
 		}
 	}
@@ -317,7 +317,7 @@ func executeProvider(binary string, args []string) (int, error) {
 	return 0, err
 }
 
-func ext4Image(source, path string, size int64) error {
+func ext4Image(mkfs, source, path string, size int64) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
@@ -330,7 +330,7 @@ func ext4Image(source, path string, size int64) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	cmd := exec.CommandContext(context.Background(), "mkfs.ext4", "-q", "-F", "-d", source, path) //nolint:gosec // image creation from host-owned session data; no untrusted image parsing
+	cmd := exec.CommandContext(context.Background(), mkfs, "-q", "-F", "-d", source, path) //nolint:gosec // hostTool's mkfs.ext4, on host-owned session data; no untrusted image parsing
 	cmd.Env = providerEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("make guest image: %w: %s", err, out)
@@ -340,10 +340,14 @@ func ext4Image(source, path string, size int64) error {
 
 func runMicroVM(s *session.Session, dir, root string) (int, error) {
 	rootImage, workImage := filepath.Join(dir, "root.ext4"), filepath.Join(dir, "work.ext4")
-	if err := ext4Image(root, rootImage, 2<<30); err != nil {
+	mkfs, err := hostTool("mkfs.ext4", s.Workspace)
+	if err != nil {
+		return 1, fmt.Errorf("microvm requires mkfs.ext4: %w", err)
+	}
+	if err := ext4Image(mkfs, root, rootImage, 2<<30); err != nil {
 		return 1, err
 	}
-	if err := ext4Image(s.CloneDir(), workImage, 10<<30); err != nil {
+	if err := ext4Image(mkfs, s.CloneDir(), workImage, 10<<30); err != nil {
 		return 1, err
 	}
 	sock := filepath.Join(s.Dir, "v.sock")

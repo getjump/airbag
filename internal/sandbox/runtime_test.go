@@ -85,3 +85,69 @@ func TestRuntimeRejectsUnsupportedProfileBeforeSession(t *testing.T) {
 		t.Fatalf("a secret behind a symlinked workspace passed preflight: %v", err)
 	}
 }
+
+// A tool found on PATH runs on this machine, so one in the workspace or
+// the sessions, directly or through a link, is refused.
+func TestHostToolComesFromOutside(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", filepath.Join(t.TempDir(), "sessions"))
+	workspace := t.TempDir()
+	tool := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "image-tool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(t.TempDir(), "bin")
+	if err := os.Symlink(filepath.Join(workspace, "bin"), link); err != nil {
+		t.Fatal(err)
+	}
+	wsLink := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(workspace, wsLink); err != nil {
+		t.Fatal(err)
+	}
+	tool(filepath.Join(workspace, "bin"))
+	tool(filepath.Join(session.Root(), "bin"))
+	outside := t.TempDir()
+	tool(outside)
+	for name, tc := range map[string]struct{ path, workspace string }{
+		"workspace":        {filepath.Join(workspace, "bin"), workspace},
+		"through a link":   {link, workspace},
+		"linked workspace": {filepath.Join(workspace, "bin"), wsLink},
+		"sessions":         {filepath.Join(session.Root(), "bin"), workspace},
+	} {
+		t.Setenv("PATH", tc.path+string(os.PathListSeparator)+outside)
+		if p, err := hostTool("image-tool", tc.workspace); err == nil {
+			t.Fatalf("%s: ran %s from the agent's files", name, p)
+		}
+	}
+	t.Setenv("PATH", outside)
+	p, err := hostTool("image-tool", workspace)
+	if want, _ := filepath.EvalSymlinks(filepath.Join(outside, "image-tool")); err != nil || p != want {
+		t.Fatalf("the tool from outside: %q %v", p, err)
+	}
+}
+
+// The runtime binary and kernel come from outside the workspace and the
+// sessions too.
+func TestRuntimeFilesComeFromOutside(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux profile")
+	}
+	t.Setenv("AIRBAG_HOME", filepath.Join(t.TempDir(), "sessions"))
+	workspace, rootfs := t.TempDir(), t.TempDir()
+	bin := filepath.Join(workspace, "runsc")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, err := SelectBackend("gvisor", "any")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = PreflightRuntime(b, session.RuntimeConfig{RootFS: rootfs, Binary: bin}, workspace, false, false, 0, &policy.Policy{})
+	if err == nil || !strings.Contains(err.Error(), "inside the workspace") {
+		t.Fatalf("a runtime binary in the workspace passed preflight: %v", err)
+	}
+}
