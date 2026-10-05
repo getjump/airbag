@@ -295,3 +295,16 @@ func TestLinkInsideWildcardPrefix(t *testing.T) {
 	}
 	t.Fatalf("no change in %+v", cs)
 }
+
+// Deleting ~/.claude/projects while a project directory in it is a link
+// to one holding memory removes instructions too.
+func TestHoldsMemoryThroughLinkedProject(t *testing.T) {
+	home := t.TempDir()
+	writeCfg(t, filepath.Join(home, "dotfiles/proj/memory/M.md"), "remember\n")
+	symlink(t, filepath.Join(home, "dotfiles/proj"), filepath.Join(home, ".claude/projects/-x"))
+	for _, rel := range []string{".claude", ".claude/projects"} {
+		if !holdsMemory(filepath.Join(home, rel), rel) {
+			t.Errorf("%s: linked project's memory not found", rel)
+		}
+	}
+}

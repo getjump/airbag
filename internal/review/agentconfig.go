@@ -577,12 +577,15 @@ func holdsMemory(realPath, rel string) bool {
 	return false
 }
 
+// subdirs lists the directories in dir, a link to one included (a
+// project directory kept in ~/dotfiles, say).
 func subdirs(dir string) []string {
 	ents, _ := os.ReadDir(dir)
 	var out []string
 	for _, e := range ents {
-		if e.IsDir() {
-			out = append(out, filepath.Join(dir, e.Name()))
+		p := filepath.Join(dir, e.Name())
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			out = append(out, p)
 		}
 	}
 	return out
