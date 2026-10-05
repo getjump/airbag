@@ -56,5 +56,9 @@ Nothing is released yet; this is what the first release holds.
   stops if that check fails; it always checks the SHA-256, and says so when
   that was the only check. `AIRBAG_VERIFY=require` refuses to install without
   cosign or `gh`.
+- Public Go packages for embedding parts of airbag in another agent runtime:
+  `operation`, `policy`, `audit`, `outbox`, `githubpr`, `creds` and `proxy`,
+  the same code the CLI runs; not a stable API yet
+  ([docs/composition.md](docs/composition.md)).
 
 [Unreleased]: https://github.com/getjump/airbag/commits/main

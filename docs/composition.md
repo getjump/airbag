@@ -144,12 +144,11 @@ tracked proxy flows and forwards before closing storage. Forward dials are
 cancelled. The same owner is used by both native platform entry points.
 The lifecycle tests exercise startup failure, close, repeated close and resume.
 
-This change is stacked on PR #17, which includes #15. The separate runtime/FUSE
-and approvals branches still need integration with these public imports and
-the host owner before merging them. It does not enable their features or claim
-equivalent capabilities between native, gVisor and microVM execution. No build
-speed improvement is claimed: package boundaries do not remove FUSE crossings
-or audit commits.
+The separate runtime/FUSE and approvals branches still need integration with
+these public imports and the host owner before merging them. It does not
+enable their features or claim equivalent capabilities between native, gVisor
+and microVM execution. No build speed improvement is claimed: package
+boundaries do not remove FUSE crossings or audit commits.
 
 ## Validation
 
