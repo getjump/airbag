@@ -362,7 +362,8 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string, f *
 // proxy when the host environment has one. The upstream proxy is the
 // user's own and is not checked; it resolves the target itself. The
 // stream belongs to f from the moment it connects: an upstream proxy
-// that never answers CONNECT is closed with the flow (idle or cut).
+// that never answers CONNECT is closed with the flow (idle or cut), and
+// dial then says errStopped, as it does for a direct dial.
 func (p *Proxy) dial(ctx context.Context, f *flow, hostport string, check bool) (net.Conn, error) {
 	pu, err := p.Upstream(&url.URL{Scheme: "https", Host: hostport})
 	if err != nil {
@@ -375,19 +376,24 @@ func (p *Proxy) dial(ctx context.Context, f *flow, hostport string, check bool) 
 	if err != nil {
 		return nil, err
 	}
+	fail := func(err error) (net.Conn, error) {
+		c.Close()
+		if f.isStopped() {
+			return nil, errStopped
+		}
+		return nil, err
+	}
 	req := &http.Request{Method: http.MethodConnect, URL: &url.URL{Opaque: hostport}, Host: hostport, Header: http.Header{}}
 	if pu.User != nil {
 		req.Header.Set("Proxy-Authorization", "Basic "+basicAuth(pu.User))
 	}
 	if err := req.Write(c); err != nil {
-		c.Close()
-		return nil, err
+		return fail(err)
 	}
 	br := bufio.NewReader(c)
 	resp, err := http.ReadResponse(br, req) //nolint:bodyclose // the reply to CONNECT: its body is the tunnel, c, which is returned or closed below
 	if err != nil {
-		c.Close()
-		return nil, err
+		return fail(err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		c.Close()

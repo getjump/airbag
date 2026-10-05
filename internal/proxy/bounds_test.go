@@ -731,8 +731,8 @@ func TestUpstreamProxyNeverAnswers(t *testing.T) {
 				t.Fatalf("no answer to CONNECT: %v", err)
 			}
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				t.Fatal("CONNECT succeeded through an upstream proxy that never answered")
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("CONNECT through an upstream proxy that never answered: %d, want 403 (the connection was cut)", resp.StatusCode)
 			}
 			if n := openFlows(p, 0, 2*time.Second); n != 0 {
 				t.Fatalf("%d flows open, want 0", n)

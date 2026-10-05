@@ -158,6 +158,13 @@ func (f *flow) release(c io.Closer) {
 	f.mu.Unlock()
 }
 
+// isStopped reports whether the flow has stopped.
+func (f *flow) isStopped() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopped
+}
+
 // stop closes the flow's connections. It reports whether this call
 // stopped it, rather than an earlier one.
 func (f *flow) stop() bool {
