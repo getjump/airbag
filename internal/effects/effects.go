@@ -1,6 +1,7 @@
 // Package effects is the append-only effect log of a session, a SQLite
-// database with one table. Triggers refuse updates and deletes, so the
-// log is the source of truth for review and audit:
+// database: the events table, and the runtime context of observed
+// attempts. Triggers refuse updates and deletes, so the log is the
+// source of truth for review and audit:
 //
 //	sqlite3 /var/tmp/airbag-$UID/s-…/effects.db 'select kind, count(*) from events group by 1'
 package effects
@@ -33,6 +34,14 @@ CREATE TABLE IF NOT EXISTS events (
 	reason  TEXT NOT NULL DEFAULT '',
 	predict TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS event_context (
+ id INTEGER PRIMARY KEY REFERENCES events(id),
+ data TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS context_no_update BEFORE UPDATE ON event_context
+ BEGIN SELECT RAISE(ABORT, 'effect log is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS context_no_delete BEFORE DELETE ON event_context
+ BEGIN SELECT RAISE(ABORT, 'effect log is append-only'); END;
 CREATE INDEX IF NOT EXISTS events_kind ON events(kind);
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 	BEGIN SELECT RAISE(ABORT, 'effect log is append-only'); END;
@@ -88,7 +97,7 @@ func (m *meter) take(t time.Time) bool {
 }
 
 func Open(path string) (*Log, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +114,16 @@ func Open(path string) (*Log, error) {
 func (l *Log) Add(e Effect) { _ = l.AddAll([]Effect{e}) }
 
 var errClosed = errors.New("effect log closed")
+
+// AddChecked commits e, with its runtime context, before an intercepted
+// operation is released: a failure to log must not become an unaudited
+// allow.
+func (l *Log) AddChecked(e Effect) error { return l.AddAll([]Effect{e}) }
+
+// AddBatchChecked commits batch atomically (WAL, synchronous=FULL).
+// Callers withhold every allow in it until this returns nil. A refusal
+// past its rate is counted as in AddAll: it was refused, not allowed.
+func (l *Log) AddBatchChecked(batch []Effect) error { return l.AddAll(batch) }
 
 // AddAll writes es in one transaction: a batch costs one sync to disk,
 // not one each. It reports whether they were written; a refusal past
@@ -221,6 +240,14 @@ func DroppedCount(e Effect) int {
 // keeps past its burst.
 const RefuseRate = refuseRate
 
+// runtimeContext is what an observed attempt adds to its events row.
+type runtimeContext struct {
+	Source string   `json:"source"`
+	PID    uint32   `json:"pid,omitempty"`
+	Detail string   `json:"detail,omitempty"`
+	Argv   []string `json:"argv,omitempty"`
+}
+
 func insert(tx *sql.Tx, e Effect) error {
 	pred := []byte("[]")
 	if e.Predict != nil {
@@ -228,8 +255,21 @@ func insert(tx *sql.Tx, e Effect) error {
 			pred = b
 		}
 	}
-	_, err := tx.ExecContext(context.Background(), `INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
+	result, err := tx.ExecContext(context.Background(), `INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
 		e.Time.UTC().Format(time.RFC3339Nano), e.Kind, e.Target, e.Verdict, e.Reason, string(pred))
+	if err != nil || e.Source == "" {
+		return err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	// Only the extra fields; the events row holds the rest.
+	ctx, err := json.Marshal(runtimeContext{e.Source, e.PID, e.Detail, e.Argv})
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(context.Background(), `INSERT INTO event_context (id, data) VALUES (?, ?)`, id, string(ctx))
 	return err
 }
 
@@ -285,7 +325,16 @@ func Read(path string) ([]Effect, error) {
 		return nil, err
 	}
 	defer func() { _ = db.Close() }()
-	rows, err := db.QueryContext(context.Background(), `SELECT t, kind, target, verdict, reason, predict FROM events ORDER BY id`)
+	// A log made before runtime context existed has no event_context.
+	var hasContext int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='event_context'`).Scan(&hasContext); err != nil {
+		return nil, err
+	}
+	query := `SELECT t, kind, target, verdict, reason, predict, '' FROM events ORDER BY id`
+	if hasContext != 0 {
+		query = `SELECT e.t, e.kind, e.target, e.verdict, e.reason, e.predict, coalesce(c.data, '') FROM events e LEFT JOIN event_context c ON c.id=e.id ORDER BY e.id`
+	}
+	rows, err := db.QueryContext(context.Background(), query)
 	if err != nil {
 		return nil, err
 	}
@@ -293,9 +342,17 @@ func Read(path string) ([]Effect, error) {
 	var out []Effect
 	for rows.Next() {
 		var e Effect
-		var t, pred string
-		if err := rows.Scan(&t, &e.Kind, &e.Target, &e.Verdict, &e.Reason, &pred); err != nil {
+		var t, pred, ctx string
+		if err := rows.Scan(&t, &e.Kind, &e.Target, &e.Verdict, &e.Reason, &pred, &ctx); err != nil {
 			return out, err
+		}
+		if ctx != "" {
+			// Into its own type: a context row cannot change the verdict.
+			var rc runtimeContext
+			if err := json.Unmarshal([]byte(ctx), &rc); err != nil {
+				return out, err
+			}
+			e.Source, e.PID, e.Detail, e.Argv = rc.Source, rc.PID, rc.Detail, rc.Argv
 		}
 		e.Time, _ = time.Parse(time.RFC3339Nano, t)
 		_ = json.Unmarshal([]byte(pred), &e.Predict)

@@ -44,6 +44,13 @@ func stopFailed(s *session.Session, code int, err error) (int, error) {
 }
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
+	// An empty mode is durable: a session from before the option, or one
+	// that never set it.
+	switch s.RuntimeAudit {
+	case "", "durable", "buffered":
+	default:
+		return 1, fmt.Errorf("invalid runtime audit mode %q", s.RuntimeAudit)
+	}
 	optional := s.Backend != "" && s.Backend != "native"
 	if optional {
 		if err := prepareRuntimeWorkspace(s); err != nil {
@@ -104,6 +111,15 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if err != nil {
 		return 1, fmt.Errorf("pseudo-terminal: %w", err)
 	}
+	// The opt-in runtime options get a private channel to PID 1 as fd 4;
+	// without them the sandbox starts as it did before they existed.
+	var rt *runtimeHost
+	if runtimeOn(s) {
+		if rt, err = startRuntime(s, host.Gate, host.Log); err != nil {
+			return 1, fmt.Errorf("runtime channel: %w", err)
+		}
+		defer func() { _ = rt.finish(s) }() // an early return; the normal path reports it below
+	}
 	cmd := exec.CommandContext(context.Background(), self, InitArg, s.Dir) //nolint:gosec // airbag itself, as the sandbox's PID 1
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The sandbox gets a session of its own, so the user's terminal is
@@ -126,6 +142,12 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		cmd.ExtraFiles = []*os.File{tty.ctlPeer} // fd 3: ttyCtlFd
 		cmd.SysProcAttr.Setctty = true
 		cmd.SysProcAttr.Ctty = 0
+	}
+	if rt != nil {
+		if tty == nil {
+			cmd.ExtraFiles = []*os.File{rt.placeholder} // fd 3: unused without a tty
+		}
+		cmd.ExtraFiles = append(cmd.ExtraFiles, rt.child) // fd 4: runtimeFD
 	}
 	// Signals for the agent go to the sandbox's PID 1, which passes them
 	// on: the agent is no longer in airbag's process group, so Ctrl-C
@@ -153,6 +175,10 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if tty != nil {
 		tty.start()
 	}
+	if rt != nil {
+		// PID 1 holds the only other end: its exit is the channel's EOF.
+		_ = rt.child.Close()
+	}
 	err = cmd.Wait()
 	if tty != nil {
 		tty.finish()
@@ -165,10 +191,18 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	case err != nil:
 		return 1, fmt.Errorf("sandbox: %w", err)
 	}
+	// A runtime audit that did not reach the log is a failed run, never
+	// a clean stop.
+	var rtErr error
+	if rt != nil {
+		if rtErr = rt.finish(s); rtErr != nil {
+			code = 125
+		}
+	}
 	s.Status = session.StatusStopped
 	s.ExitCode = code
 	s.Ended = time.Now()
-	return code, s.Save()
+	return code, errors.Join(rtErr, s.Save())
 }
 
 func userNSHint() string {

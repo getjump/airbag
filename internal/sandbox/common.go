@@ -27,6 +27,10 @@ import (
 // InitArg is the hidden subcommand that runs inside the namespaces.
 const InitArg = "__airbag_init"
 
+// ExecInitArg is the hidden subcommand that installs the --exec-policy
+// filter in the agent's process, then execs the agent (Linux only).
+const ExecInitArg = "__airbag_exec_init"
+
 // DefaultPassthrough: the agent state that bypasses the branch because
 // it must survive a discard for the user's own workflow and the agent
 // CLI never executes, loads as config, or restores it into other files.

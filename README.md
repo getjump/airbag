@@ -270,6 +270,7 @@ Before more features comes a measurement on real work against the alternatives:
 - [What the agent gets](docs/agent.md): files, network, outbox, secrets, kernel, sessions
 - [Review and apply](docs/review.md): `--attention`, `--json`, rollback, `apply --branch`
 - [Policies](docs/policies.md): rules over effects, deferred commands, bound credentials
+- [Runtime policy](docs/runtime-policy.md): opt-in file and exec checks on Linux, their audit and limits
 - [Threat model](docs/threat-model.md): what airbag protects against, and what not
 - [Execution boundaries](docs/execution-backends.md): `airbag capabilities`, `--require-isolation`, no fallback;
   [optional gVisor and microVM runtimes](docs/runtime-options.md) on Linux

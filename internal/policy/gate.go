@@ -67,6 +67,17 @@ func (g *Gate) Check(in Input) (Decision, string) {
 		return d, ""
 	}
 	key := d.Rule + "|" + in.Effect.String()
+	// An approval for one intercepted argv must not approve a different command.
+	if in.Source != "" {
+		ctx, err := json.Marshal(struct {
+			Source string
+			Argv   []string
+		}{in.Source, in.Argv})
+		if err != nil {
+			return Decision{Verdict: Deny, Rule: d.Rule, Message: "airbag cannot key this approval: " + err.Error()}, ""
+		}
+		key += "|" + string(ctx)
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	asks, err := ReadAsks(g.dir)

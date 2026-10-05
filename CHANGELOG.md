@@ -43,6 +43,12 @@ Nothing is released yet; this is what the first release holds.
 - Claude Code and Codex get airbag's hooks as read-only managed settings, so
   review shows which tool call changed which file.
 - `airbag doctor` checks that the machine can run airbag.
+- Opt-in runtime policies on Linux: `--fs-policy` checks file operations on
+  the workspace and `$HOME` views through FUSE, `--exec-policy` checks
+  `execve` attempts through seccomp user notification. Each decision is logged
+  before the operation goes on (`--runtime-audit=buffered` queues ordinary
+  ones), and `airbag log --json` shows its source, PID and argv
+  ([docs/runtime-policy.md](docs/runtime-policy.md)).
 - A macOS prototype: Seatbelt around the agent and an APFS clone as the
   branch, not yet run on a real Mac ([docs/macos.md](docs/macos.md)).
 - `install.sh`, `go install` and a Nix flake; `airbag version` reports the
