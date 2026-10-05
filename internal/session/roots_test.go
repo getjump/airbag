@@ -148,3 +148,38 @@ func TestCheckComparesFilesystemIDOnSameDevice(t *testing.T) {
 		t.Fatalf("another filesystem on the same device passed: %v", err)
 	}
 }
+
+// A directory removed and made again can get the old inode back, as
+// ext4 gives it at once. Without a creation time to tell, its inode
+// generation does.
+func TestCheckComparesGeneration(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ws")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id, err := DirIDOf(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Gen == 0 {
+		t.Skip("this filesystem gives no inode generation")
+	}
+	id.Born = 0
+	if err := id.Check(dir); err != nil {
+		t.Fatalf("the same directory: %v", err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := id.Check(dir); err == nil || !strings.Contains(err.Error(), "another directory") {
+		t.Fatalf("a directory made again passed: %v", err)
+	}
+	other := id
+	other.Gen++
+	if err := other.Check(dir); err == nil || !strings.Contains(err.Error(), "another directory") {
+		t.Fatalf("another generation passed: %v", err)
+	}
+}

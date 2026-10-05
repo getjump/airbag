@@ -105,23 +105,27 @@ type Meta struct {
 }
 
 // DirID is a directory as a session found it: its path with links
-// resolved, its device and inode, its creation time where the
-// filesystem records one, and the filesystem's ID from statfs where it
-// gives one (0 for either where it does not). Path and inode tell it
-// from a link or another directory at the same path, the creation time
-// from a new directory given a removed one's inode. The device may
+// resolved, its device and inode, its creation time and inode
+// generation where the filesystem records them, and the filesystem's ID
+// from statfs where it gives one (0 for each where it does not). Path
+// and inode tell it from a link or another directory at the same path;
+// the creation time and the generation tell it from a new directory
+// given a removed one's inode, which ext4 does at once. The device may
 // change only when the creation time and the filesystem ID both say it
 // is the same directory: the same filesystem mounted again (a WSL disk,
 // a btrfs subvolume, an overlay) gets a new device number but keeps its
 // ID, while another filesystem mounted at the path, whose root can share
 // the inode, or a btrfs snapshot, which keeps the inode and the creation
 // time, has another ID. A recorded ID must match whatever the device: a
-// device formatted again keeps its number.
+// device formatted again keeps its number. Where a filesystem records
+// neither a creation time nor a generation (NFS, FUSE), a directory
+// removed and made again with the same inode number is not told apart.
 type DirID struct {
 	Real string `json:"real"`
 	Dev  uint64 `json:"dev"`
 	Ino  uint64 `json:"ino"`
 	Born int64  `json:"born,omitempty"`
+	Gen  uint64 `json:"gen,omitempty"`
 	FS   uint64 `json:"fs,omitempty"`
 }
 
@@ -139,7 +143,7 @@ func DirIDOf(p string) (DirID, error) {
 	if !ok {
 		return DirID{}, fmt.Errorf("%s: no device and inode", p)
 	}
-	return DirID{Real: real, Dev: u64(st.Dev), Ino: u64(st.Ino), Born: born(real, st), FS: fsID(real)}, nil
+	return DirID{Real: real, Dev: u64(st.Dev), Ino: u64(st.Ino), Born: born(real, st), Gen: gen(real), FS: fsID(real)}, nil
 }
 
 // Check refuses p when it is not the directory id was taken of: it
@@ -151,7 +155,7 @@ func (id DirID) Check(p string) error {
 		return fmt.Errorf("%s, a root of the session: %w", p, err)
 	case got.Real != id.Real:
 		return fmt.Errorf("%s leads to %s now, not to %s as when the session began", p, got.Real, id.Real)
-	case got.Ino != id.Ino || id.Born != 0 && got.Born != id.Born:
+	case got.Ino != id.Ino || id.Born != 0 && got.Born != id.Born || id.Gen != 0 && got.Gen != id.Gen:
 		return fmt.Errorf("%s is another directory than when the session began: that one was moved or removed, or the filesystem gives new inode numbers on each mount (FAT, sshfs without use_ino)", p)
 	case id.FS != 0 && got.FS != id.FS,
 		got.Dev != id.Dev && (id.Born == 0 || id.FS == 0):
