@@ -2339,7 +2339,9 @@ func TestRollbackCutShortBeforeRestoreRestoresLater(t *testing.T) {
 // A finished rollback's directory is renamed out of the numbered ones
 // before it is removed: a removal cut short, with the journal gone and
 // the rest not, leaves no numbered directory without a journal, which
-// would refuse every later apply. The next apply clears what is left.
+// would refuse every later apply. The rollback is done all the same:
+// failed, it would leave the session applied, and a second rollback
+// would undo the apply before. The next apply clears what is left.
 func TestRollbackRemovalCutShortLeavesNoLostJournal(t *testing.T) {
 	s, box, ws := modifiedApplied(t)
 	removeTree = func(dir string) error {
@@ -2351,8 +2353,11 @@ func TestRollbackRemovalCutShortLeavesNoLostJournal(t *testing.T) {
 	}
 	t.Cleanup(func() { removeTree = os.RemoveAll })
 	var out bytes.Buffer
-	if err := Rollback(s, nil, &out); err == nil {
-		t.Fatal("the removal was not cut short")
+	if err := Rollback(s, nil, &out); err != nil || !strings.Contains(out.String(), "warning") {
+		t.Fatalf("a finished rollback whose removal is cut short: %v\n%s", err, out.String())
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied {
+		t.Fatalf("the session is left applied: %+v %v", saved, err)
 	}
 	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
 		t.Fatalf("not rolled back: %q", got)
@@ -2511,5 +2516,48 @@ func TestListGenerationsTakesOnlyItsOwnNames(t *testing.T) {
 	gs, err := listGenerations(s)
 	if err != nil || len(gs) != 1 || gs[0].n != 2 {
 		t.Fatalf("generations: %+v %v", gs, err)
+	}
+}
+
+// A rollback cut short after it put a replaced directory back leaves a
+// journal of what is still to do, not of everything the apply did:
+// otherwise the next rollback would take the user's files there that
+// are the same as the agent's for the agent's, and remove them.
+func TestRollbackCutShortAfterARestoreKeepsTheUsersFiles(t *testing.T) {
+	s, box, src := overlayReplacedDir(t,
+		map[string]string{"a.go": "package a\n", "b.go": "package b\n"},
+		map[string]string{"a.go": "package a\n", "new.go": "package new\n"})
+	// A change rolled back after the directory: it sorts before it.
+	if err := os.WriteFile(filepath.Join(s.WSUpper(), "a.txt"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	first := filepath.Join(filepath.Dir(src), "a.txt")
+	afterRemove = func(p string) {
+		if p == first {
+			afterRemove = nil
+			panic("cut short") // as a crash: nothing after this runs
+		}
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	func() {
+		defer func() { _ = recover() }()
+		_ = Rollback(s, nil, &out)
+		t.Fatal("the rollback was not cut short")
+	}()
+	if got := read(t, filepath.Join(src, "b.go")); got != "package b\n" {
+		t.Fatalf("not cut short after the directory was put back: %q", got)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	for rel, want := range map[string]string{"a.go": "package a\n", "b.go": "package b\n"} {
+		if got := read(t, filepath.Join(src, rel)); got != want {
+			t.Errorf("src/%s = %q after the second rollback, want the user's %q\n%s", rel, got, want, out.String())
+		}
 	}
 }
