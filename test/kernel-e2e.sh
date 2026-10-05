@@ -62,7 +62,7 @@ if [ -x "$T/kernprobe386" ]; then
 	out=$("$AIRBAG" run -- sh -c "'$T/kernprobe386' 2>&1" 2>/dev/null || true)
 	discard
 	case "$out" in
-	*"exec format error"*|*"cannot execute"*|*"ENOEXEC"*|"")
+	*[Ee]"xec format error"*|*"cannot execute"*|*"ENOEXEC"*|"")
 		echo "note: i386 ABI not runnable on this kernel; skipping the 32-bit check" ;;
 	*)
 		for pair in "io_uring_setup=ENOSYS" "bpf=EPERM" "add_key=EPERM" \

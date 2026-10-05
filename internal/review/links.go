@@ -212,6 +212,7 @@ func resolveIn(home, rel string, roots []string) (string, bool) {
 // workspace inside $HOME, say), as that root is written, so the result
 // is spelled as the change it is found as.
 func under(real string, roots []string) (string, bool) {
+	real = realPrefix(real) // a link's target may be spelled through a link (/var for /private/var)
 	best, bestLen := "", -1
 	for _, root := range roots {
 		rr, err := filepath.EvalSymlinks(root)
@@ -224,6 +225,21 @@ func under(real string, roots []string) (string, bool) {
 		}
 	}
 	return best, bestLen >= 0
+}
+
+// realPrefix resolves the links in the longest part of p that exists
+// and joins the rest on as written.
+func realPrefix(p string) string {
+	rest := ""
+	for d := p; ; d = filepath.Dir(d) {
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			return filepath.Join(r, rest)
+		}
+		if filepath.Dir(d) == d {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(d), rest)
+	}
 }
 
 // aliasesAbove returns the watched names whose real place is below real
