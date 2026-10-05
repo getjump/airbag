@@ -322,6 +322,13 @@ func folded(c Change) string {
 // a cache or agent state.
 func Dropped(c Change) bool { return folded(c) != "" }
 
+// DroppedState reports whether apply leaves a change out as agent state
+// rather than as a cache.
+func DroppedState(c Change) bool {
+	_, kind := noise(c.Rel)
+	return Dropped(c) && kind == "agent state"
+}
+
 // attentionLine is one line of the attention list: a change, or the
 // unflagged changes in one git directory in $HOME, counted.
 type attentionLine struct {

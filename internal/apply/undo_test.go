@@ -1306,6 +1306,48 @@ func TestApplyKeepsFoldsUnderReplacedDir(t *testing.T) {
 	}
 }
 
+// A cache under a directory the agent replaced (rm -rf ~/.m2, then a
+// build) is still left out: the agent's jars do not reach the host.
+func TestApplyDropsCacheUnderReplacedDir(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	jar := ".m2/repository/g/a/1/a-1.jar"
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(home, jar)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, jar), []byte("host"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	up := filepath.Join(s.HomeUpper(), ".m2")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(s.HomeUpper(), jar)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Setxattr(up, "user.overlay.opaque", []byte("y"), 0); err != nil {
+		t.Skipf("cannot mark a directory opaque here: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.HomeUpper(), jar), []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if b, err := os.ReadFile(filepath.Join(home, jar)); err == nil && string(b) == "agent" {
+		t.Errorf("the agent's jar reached the host under a replaced ~/.m2\n%s", out.String())
+	}
+}
+
 // A config that is a link into $HOME: the agent's write lands on the
 // link's target, and if the host removes that target during the session,
 // apply reports it rather than bringing it back.

@@ -149,8 +149,10 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	// What review folds in $HOME (caches, agent state) is left out: the
 	// fold is why it needs no decision, and a download cache holds code
 	// a host build runs as it is. --only naming it takes it anyway.
-	// A folded change under a directory the agent replaced is kept with
-	// it: applying the replacement takes the host's directory away.
+	// Agent state folded under a directory the agent replaced is kept
+	// with it (~/.claude rebuilt): applying the replacement takes the
+	// host's directory away. A cache there is left out all the same; the
+	// host's copy goes to the undo journal with the rest.
 	var replaced []string
 	for _, c := range cs {
 		if c.Kind == review.Replaced && c.IsDir() && !review.Dropped(c) {
@@ -160,7 +162,7 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	var kept []review.Change
 	dropped := 0
 	for _, c := range cs {
-		under := slices.ContainsFunc(replaced, func(r string) bool { return strings.HasPrefix(c.Path, r) })
+		under := review.DroppedState(c) && slices.ContainsFunc(replaced, func(r string) bool { return strings.HasPrefix(c.Path, r) })
 		if review.Dropped(c) && !under && !homeMatches(c, o.Only, s.Home) {
 			dropped++
 			continue
