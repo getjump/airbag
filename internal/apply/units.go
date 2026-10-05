@@ -157,7 +157,13 @@ func forget(cs []review.Change) {
 	for i := len(cs) - 1; i >= 0; i-- {
 		c := cs[i]
 		if c.IsDir() && c.Kind != review.Deleted {
-			_ = os.Remove(c.Upper) // only if empty
+			// Only if empty. A replacement that still holds what apply
+			// left out stays as a plain directory, or a second apply
+			// would replace the host's directory again, taking away
+			// what the first one wrote.
+			if os.Remove(c.Upper) != nil && c.Kind == review.Replaced {
+				clearOpaque(c.Upper)
+			}
 			continue
 		}
 		_ = os.RemoveAll(c.Upper)

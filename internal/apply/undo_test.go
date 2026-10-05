@@ -1334,6 +1334,12 @@ func TestApplyDropsCacheUnderReplacedDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(s.HomeUpper(), jar), []byte("agent"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(up, "wrapper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(up, "wrapper/w.properties"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	box, err := outbox.Open(s.EffectsPath())
 	if err != nil {
 		t.Fatal(err)
@@ -1345,6 +1351,18 @@ func TestApplyDropsCacheUnderReplacedDir(t *testing.T) {
 	}
 	if b, err := os.ReadFile(filepath.Join(home, jar)); err == nil && string(b) == "agent" {
 		t.Errorf("the agent's jar reached the host under a replaced ~/.m2\n%s", out.String())
+	}
+	// What was applied stays on a second apply, and the session is done.
+	if s.Status != session.StatusApplied {
+		t.Errorf("status %s with only a left-out cache in the session\n%s", s.Status, out.String())
+	}
+	out.Reset()
+	s.Status = session.StatusStopped
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".m2/wrapper/w.properties")); err != nil {
+		t.Errorf("a second apply took away what the first wrote: %v\n%s", err, out.String())
 	}
 }
 
