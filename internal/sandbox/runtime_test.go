@@ -151,3 +151,32 @@ func TestRuntimeFilesComeFromOutside(t *testing.T) {
 		t.Fatalf("a runtime binary in the workspace passed preflight: %v", err)
 	}
 }
+
+// The sessions inside the workspace, through a link as AIRBAG_HOME, are
+// refused before a session exists: the copy would copy itself.
+func TestSessionsOutsideTheWorkspace(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux profile")
+	}
+	workspace, rootfs := t.TempDir(), t.TempDir()
+	bin := filepath.Join(t.TempDir(), "runsc")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(workspace, ".airbag"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(filepath.Join(workspace, ".airbag"), link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AIRBAG_HOME", link)
+	b, err := SelectBackend("gvisor", "any")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = PreflightRuntime(b, session.RuntimeConfig{RootFS: rootfs, Binary: bin}, workspace, false, false, 0, &policy.Policy{})
+	if err == nil || !strings.Contains(err.Error(), "one inside the other") {
+		t.Fatalf("sessions inside the workspace passed preflight: %v", err)
+	}
+}

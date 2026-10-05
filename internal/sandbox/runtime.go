@@ -66,6 +66,16 @@ func PreflightRuntime(b Backend, c session.RuntimeConfig, workspace string, over
 	if !st.IsDir() || c.RootFS == "/" {
 		return c, fmt.Errorf("runtime rootfs must be a dedicated trusted directory")
 	}
+	// The copy is made below the sessions from the workspace: either one
+	// inside the other (AIRBAG_HOME a link into the project, say), as the
+	// directories they name, and the copy would copy itself.
+	sessions, err := filepath.Abs(session.Root())
+	if err != nil {
+		return c, err
+	}
+	if sessions = follow(sessions); pathWithin(sessions, workspace) || pathWithin(workspace, sessions) {
+		return c, fmt.Errorf("the sessions (%s) and the workspace %s lie one inside the other; set AIRBAG_HOME outside the workspace", sessions, workspace)
+	}
 	for _, path := range []string{workspace, session.Root()} {
 		abs, err := filepath.Abs(path)
 		if err != nil {
