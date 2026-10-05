@@ -24,6 +24,10 @@ func TestOverlayCopyUpKeepsRoot(t *testing.T) {
 	if err != nil {
 		t.Skip("no unshare")
 	}
+	// CI runners and some distributions refuse user namespaces.
+	if out, err := exec.CommandContext(t.Context(), unshare, "-rm", "true").CombinedOutput(); err != nil { //nolint:gosec // a probe
+		t.Skipf("no user namespace here: %v %s", err, out)
+	}
 	cmd := exec.CommandContext(t.Context(), unshare, "-rm", os.Args[0], "-test.run=^TestOverlayCopyUpKeepsRoot$", "-test.v") //nolint:gosec // this test binary, in a namespace of its own
 	cmd.Env = append(os.Environ(), "AIRBAG_TEST_OVERLAY=1")
 	out, err := cmd.CombinedOutput()
