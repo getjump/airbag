@@ -481,11 +481,22 @@ func TestLegacyConfigPath(t *testing.T) {
 }
 
 // A config the agent made writable by other users is flagged: another
-// user could add an MCP server to it. Narrower or group modes are not.
+// user could add an MCP server to it. Narrower modes are not, nor group
+// write when the group is the user's private one.
 func TestConfigModeWidened(t *testing.T) {
+	private := func(p string) bool {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return privateGroup(fileGID(fi))
+	}
 	for mode, flagged := range map[os.FileMode]bool{0o602: true, 0o666: true, 0o644: false, 0o600: false, 0o660: false} {
 		s, realPath, branchPath := cfgSession(t)
 		writeCfg(t, realPath, `{"numStartups":1}`)
+		if mode == 0o660 {
+			flagged = !private(realPath)
+		}
 		writeCfg(t, branchPath, `{"numStartups":1}`)
 		if err := os.Chmod(branchPath, mode); err != nil {
 			t.Fatal(err)
@@ -711,5 +722,37 @@ func TestLinkedConfigChains(t *testing.T) {
 	}
 	if d := diffOf(c); strings.Contains(d, "evil") {
 		t.Errorf("diff printed a value: %q", d)
+	}
+}
+
+// Group write on a config whose group is shared with other users is
+// flagged.
+func TestConfigGroupWritableShared(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1}`)
+	writeCfg(t, branchPath, `{"numStartups":1}`)
+	// A group other than the user's own: on most systems as root,
+	// "daemon" (1) or "bin" (2).
+	shared := -1
+	for _, gid := range []int{1, 2, 100} {
+		if !privateGroup(gid) && os.Chown(realPath, -1, gid) == nil {
+			shared = gid
+			break
+		}
+	}
+	if shared < 0 {
+		t.Skip("cannot give the config a shared group here")
+	}
+	if err := os.Chmod(branchPath, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == ".claude.json" && !slices.ContainsFunc(c.Flags, func(f string) bool { return strings.Contains(f, "writable by other users") }) {
+			t.Errorf("group %d: flags %v", shared, c.Flags)
+		}
 	}
 }

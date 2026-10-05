@@ -258,9 +258,11 @@ func classify(s *session.Session, cs []Change) {
 			if slices.ContainsFunc(names, func(n string) bool { return touchesHostShellState(s.Home, n, c.Kind) }) {
 				c.Flags = append(c.Flags, "persist", shellStateFlag)
 			}
-			// Project memory is loaded into later sessions.
+			// Project memory is loaded into later sessions; a link where a
+			// directory above it is points it at whatever the link names.
 			if slices.ContainsFunc(names, func(n string) bool {
-				return agentMemory(n) || (c.Kind == Deleted || c.Kind == Replaced) && holdsMemory(c.Path, n)
+				return agentMemory(n) || (c.Kind == Deleted || c.Kind == Replaced) && holdsMemory(c.Path, n) ||
+					c.Type == fs.ModeSymlink && aboveMemory(n)
 			}) {
 				c.Flags = append(c.Flags, "agent instructions")
 			}

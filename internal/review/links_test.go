@@ -575,3 +575,39 @@ func TestWatchedPathsInsideWorkspaceGit(t *testing.T) {
 		})
 	}
 }
+
+// A link the agent puts where a project's directory, projects/ or
+// ~/.claude is points the memory later sessions load at whatever it
+// names.
+func TestLinkAboveMemoryFlagged(t *testing.T) {
+	for _, rel := range []string{".claude/projects/new-slug", ".claude/projects/x", ".claude/projects"} {
+		t.Run(rel, func(t *testing.T) {
+			s, _, _ := cfgSession(t)
+			writeCfg(t, filepath.Join(s.Home, ".claude/projects/x/memory/MEMORY.md"), "notes\n")
+			writeCfg(t, filepath.Join(s.Home, "elsewhere/memory/MEMORY.md"), "run the server\n")
+			if err := os.MkdirAll(filepath.Join(s.HomeUpper(), filepath.Dir(rel)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			symlink(t, filepath.Join(s.Home, "elsewhere"), filepath.Join(s.HomeUpper(), rel))
+			cs, err := Scan(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range cs {
+				if c.Rel == rel {
+					if !slices.Contains(c.Flags, "agent instructions") {
+						t.Errorf("flags %v", c.Flags)
+					}
+					return
+				}
+			}
+			t.Fatalf("no change at %s in %+v", rel, cs)
+		})
+	}
+	for rel, want := range map[string]bool{".claude": true, ".claude/projects": true, ".claude/projects/x": true,
+		".claude/projects/x/memory": false, ".claude/settings.json": false, ".codex": false} {
+		if aboveMemory(rel) != want {
+			t.Errorf("aboveMemory(%q) = %v", rel, !want)
+		}
+	}
+}

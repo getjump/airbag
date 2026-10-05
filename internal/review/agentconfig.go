@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -390,19 +391,49 @@ func shadowing(c Change) string {
 
 // widened names a mode change that lets other users write the config,
 // who could then add an MCP server to it; "" when there is none. Without
-// a real file the CLI's own 0600 is the base.
+// a real file the CLI's own 0600 is the base. Group write counts unless
+// the group is the user's own (a user private group, as most Linux
+// distributions make); a shared one (users, staff) holds others.
 func widened(c Change) string {
 	if c.Kind == Deleted || c.Type != 0 {
 		return ""
 	}
-	old := fs.FileMode(0o600)
+	old, gid := fs.FileMode(0o600), -1
 	if fi, err := os.Stat(c.Path); err == nil {
-		old = fi.Mode().Perm()
+		old, gid = fi.Mode().Perm(), fileGID(fi)
+	} else if fi, err := os.Lstat(c.Upper); err == nil {
+		gid = fileGID(fi)
 	}
-	if c.Mode.Perm()&^old&0o002 == 0 {
+	mask := fs.FileMode(0o002)
+	if !privateGroup(gid) {
+		mask |= 0o020
+	}
+	if c.Mode.Perm()&^old&mask == 0 {
 		return ""
 	}
 	return fmt.Sprintf("mode %04o -> %04o, writable by other users", old, c.Mode.Perm())
+}
+
+func fileGID(fi fs.FileInfo) int {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return int(st.Gid)
+	}
+	return -1
+}
+
+// privateGroup reports whether gid is the current user's private group:
+// named as the user, so presumably holding no one else. Anything it
+// cannot tell counts as shared.
+func privateGroup(gid int) bool {
+	if gid < 0 {
+		return false
+	}
+	g, err := user.LookupGroupId(strconv.Itoa(gid))
+	if err != nil {
+		return false
+	}
+	u, err := user.Current()
+	return err == nil && g.Name == u.Username && g.Gid == u.Gid
 }
 
 // configFlags are review's flags for a config file change: configNotes
@@ -598,6 +629,13 @@ func subdirs(dir string) []string {
 // agentMemory reports whether a home path is inside a Claude Code project
 // memory directory (~/.claude/projects/<slug>/memory/…), which later
 // sessions load as instructions.
+// aboveMemory reports whether rel is a directory a project's memory
+// lies below: ~/.claude, its projects/ or a project's directory.
+func aboveMemory(rel string) bool {
+	parts := strings.Split(strings.TrimSuffix(filepath.ToSlash(rel), "/"), "/")
+	return parts[0] == ".claude" && (len(parts) == 1 || parts[1] == "projects" && len(parts) <= 3)
+}
+
 func agentMemory(rel string) bool {
 	parts := strings.Split(strings.TrimSuffix(filepath.ToSlash(rel), "/"), "/")
 	return len(parts) >= 4 && parts[0] == ".claude" && parts[1] == "projects" && parts[3] == "memory"
