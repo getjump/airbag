@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/getjump/airbag/internal/policy"
@@ -62,5 +63,14 @@ func TestRuntimeRejectsUnsupportedProfileBeforeSession(t *testing.T) {
 	}
 	if _, err := os.Stat(session.Root()); !os.IsNotExist(err) {
 		t.Fatal("preflight created session data")
+	}
+	// The same secret through a symlinked workspace, as a non-git cwd
+	// reaches it: the copy follows the link, so the check must too.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(workspace, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PreflightRuntime(b, session.RuntimeConfig{}, link, false, false, 0, &policy.Policy{}); err == nil || !strings.Contains(err.Error(), ".env") {
+		t.Fatalf("a secret behind a symlinked workspace passed preflight: %v", err)
 	}
 }

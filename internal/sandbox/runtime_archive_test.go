@@ -74,3 +74,31 @@ func TestGuestExportSizeLimit(t *testing.T) {
 		t.Fatal("accepted oversized guest file")
 	}
 }
+
+func TestSymlinkedWorkspaceExportsItsFiles(t *testing.T) {
+	dir := t.TempDir()
+	real, link, dst := filepath.Join(dir, "real"), filepath.Join(dir, "link"), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(real, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"keep.txt", "sub/nested.txt"} {
+		if err := os.WriteFile(filepath.Join(real, f), []byte(f), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("real", link); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := exportWorkspace(link, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if err := importWorkspace(dst, &buf); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"keep.txt", "sub/nested.txt"} {
+		if b, err := os.ReadFile(filepath.Join(dst, f)); err != nil || string(b) != f {
+			t.Fatalf("%s through a symlinked workspace: %q %v", f, b, err)
+		}
+	}
+}

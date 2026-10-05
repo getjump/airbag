@@ -89,6 +89,13 @@ func importWorkspace(dst string, input io.Reader) error {
 }
 
 func exportWorkspace(root string, output io.Writer) error {
+	// WalkDir does not descend into a root that is a symlink: a workspace
+	// reached through one (a non-git cwd) would export empty, a branch in
+	// which every real file is gone. Walk the directory it names.
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
 	source, err := os.OpenRoot(root)
 	if err != nil {
 		return err

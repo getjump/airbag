@@ -32,6 +32,13 @@ func PreflightRuntime(b Backend, c session.RuntimeConfig, workspace string, over
 	if nix || forwards != 0 || len(p.Hide) != 0 {
 		return c, fmt.Errorf("%s does not support Nix daemon, TCP forwards or explicit hide rules", b.Name)
 	}
+	// The checks see the directory the workspace names, as the copy does
+	// (exportWorkspace): through a symlink, Find would not descend and
+	// would pass a workspace that holds secret files.
+	workspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return c, err
+	}
 	if files := secretfs.Find(workspace); len(files) != 0 {
 		return c, fmt.Errorf("%s cannot mediate workspace secret reads yet (%s); use native", b.Name, files[0])
 	}
@@ -63,6 +70,7 @@ func PreflightRuntime(b Backend, c session.RuntimeConfig, workspace string, over
 		if err != nil {
 			return c, err
 		}
+		abs = realPrefix(abs) // the session root may not exist yet
 		if pathWithin(abs, c.RootFS) || pathWithin(c.RootFS, abs) {
 			return c, fmt.Errorf("runtime rootfs must be separate from workspace and sessions")
 		}
