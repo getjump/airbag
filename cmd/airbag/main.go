@@ -179,7 +179,7 @@ func cmdRun(args []string) (int, error) {
 		return 1, err
 	}
 	ws := workspace(cwd)
-	if ws == home || ws == "/" {
+	if wholeHome(ws, home) {
 		return 1, fmt.Errorf("refusing to use %s as the workspace; cd into a project", ws)
 	}
 	pol, err := policy.Load(ws, home)
@@ -332,6 +332,26 @@ func cmdHook(agent, event string) {
 		_, _ = os.Stdout.Write(out)
 	}
 	os.Exit(0)
+}
+
+// wholeHome reports a workspace that is $HOME or /, by the directory
+// it is: git names the top of a repository with links resolved, so a
+// repository at ~ on a system where /home is a link (/var/home) is
+// spelled differently from $HOME.
+func wholeHome(ws, home string) bool {
+	if c := filepath.Clean(ws); c == filepath.Clean(home) || c == "/" {
+		return true
+	}
+	a, err := os.Stat(ws)
+	if err != nil {
+		return false
+	}
+	for _, p := range []string{home, "/"} {
+		if b, err := os.Stat(p); err == nil && os.SameFile(a, b) {
+			return true
+		}
+	}
+	return false
 }
 
 // workspace is the git toplevel, or the current directory.

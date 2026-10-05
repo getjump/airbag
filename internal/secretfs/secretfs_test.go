@@ -55,3 +55,33 @@ func TestOpenNested(t *testing.T) {
 		}
 	}
 }
+
+// A workspace named through a link has its secret files found all the
+// same: a walk does not enter a root that is a link.
+func TestFindThroughLinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(real, "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{".env", "api/.env.local"} {
+		if err := os.WriteFile(filepath.Join(real, rel), []byte("K=v\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	got := Find(link)
+	sort.Strings(got)
+	if len(got) != 2 || got[0] != ".env" || got[1] != filepath.Join("api", ".env.local") {
+		t.Fatalf("Find through a link: %v", got)
+	}
+	files := Open(link)
+	for _, f := range files {
+		_ = f.F.Close()
+	}
+	if len(files) != 2 {
+		t.Fatalf("Open through a link opened %d files", len(files))
+	}
+}
