@@ -386,8 +386,19 @@ func TestReportNamesTrustLinks(t *testing.T) {
 	if w := why(nil, "i-1"); !strings.Contains(w, "1 links") {
 		t.Errorf("an applied link out is not counted: %s", w)
 	}
-	if w := why([]Change{link("applied", "v3")}, "i-1"); strings.Contains(w, "trust-links") {
-		t.Errorf("an applied link the session now changes counts as the change: %s", w)
+	// Changed to lead inside, the applied link still holds the command
+	// until that change is applied; changed to lead out, it counts once.
+	if w := why([]Change{link("applied", "v3")}, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("an applied link out is not counted while its change waits: %s", w)
+	}
+	if w := why([]Change{link("applied-inner", "/etc/other")}, "i-1"); !strings.Contains(w, "2 links") {
+		t.Errorf("an applied link and a change to another path: %s", w)
+	}
+	if err := os.Remove(filepath.Join(upper, "applied")); err != nil {
+		t.Fatal(err)
+	}
+	if w := why([]Change{link("applied", "/etc/third")}, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("a path counts once, as its change: %s", w)
 	}
 }
 

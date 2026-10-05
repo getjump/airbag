@@ -218,7 +218,8 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 // (notes.md -> .env). Apply holds the session's deferred commands while
 // such a link is in the real files, unless it leads to an installed
 // program; a link review cannot read counts. A link an earlier, partial
-// apply wrote is no change any more, but still holds them.
+// apply wrote is no change any more, but still holds them, until a change
+// the session makes to it is applied as well.
 func linksOut(s *session.Session, cs []Change) int {
 	in := func(p, dir string) bool {
 		if dir == "" {
@@ -247,19 +248,21 @@ func linksOut(s *session.Session, cs []Change) int {
 		return !ok || !in(t, wsReal) || secretfs.IsSecret(strings.ToLower(filepath.Base(t)))
 	}
 	n := 0
-	changed := make(map[string]bool, len(cs))
+	// A path counts once: the change, or else the link in the real files,
+	// which holds the commands until a change to it is applied too.
+	counted := make(map[string]bool, len(cs))
 	for _, c := range cs {
-		changed[c.Path] = true
 		if c.Type != fs.ModeSymlink || c.Kind == Deleted {
 			continue
 		}
 		text, err := os.Readlink(c.Upper)
 		if leads(c.Path, text, err) {
+			counted[c.Path] = true
 			n++
 		}
 	}
 	for p := range s.Applied {
-		if changed[p] {
+		if counted[p] {
 			continue
 		}
 		if fi, err := os.Lstat(p); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
