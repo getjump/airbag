@@ -36,6 +36,8 @@ than downgraded to a generic host command.
 `airbag review --json` and `airbag outbox --json` expose the typed `result`
 separately from the request: `queued` has a ticket, `completed` carries the
 confirmed PR URL, and `unknown` carries uncertainty, never an invented success.
+An outcome you recorded with `airbag outbox resolve` has `recorded_by: "user"`
+and your note as its value, not a URL.
 
 On the host:
 
@@ -109,7 +111,7 @@ as for other intents; an intent left pending (by `--yes`, `--branch` or
 The preview marks every line of the frozen body with `| ` and gives its byte and
 line counts, so text in the body cannot pass for the end of it. Rules see the
 repository lowercased, as GitHub names repositories, so a rule on `org/repo`
-holds for any spelling.
+holds for any spelling: write repository names in rules in lowercase.
 
 A session execution lock prevents two live executors from recovering or
 publishing each other's work. After a crash, `running` becomes terminal

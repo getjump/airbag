@@ -23,6 +23,8 @@ set -eu
 echo "\$*" >> "$L/calls"
 branch=\$(cat "$L/branch")
 sha=\$(git -C "$T/proj" rev-parse "refs/heads/\$branch")
+# As gh api --include does: a status line, headers, a blank line, the body.
+printf 'HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n'
 if [ "\$5" = GET ]; then
     printf '{"object":{"sha":"%s"}}\n' "\$sha"
 else

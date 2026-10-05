@@ -197,7 +197,8 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 		case outbox.Pending, string(operation.Approved):
 			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "`" + outbox.Line(in.Argv) + "` waits for apply"})
 		case outbox.Unknown:
-			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "outcome unknown: " + in.Output})
+			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "outcome unknown: " + in.Output +
+				"; once checked, `airbag outbox resolve " + in.ID + " done|failed` lets the intents after it run"})
 		}
 	}
 	sort.SliceStable(r.Attention, func(i, j int) bool { return attentionRank(r.Attention[i].What) < attentionRank(r.Attention[j].What) })

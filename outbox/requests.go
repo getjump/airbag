@@ -128,7 +128,7 @@ func (b *Box) Resolve(id string, done bool) error {
 		status, outcome, output = Done, operation.Succeeded, "recorded by the user: it took effect"
 	}
 	if digest != "" {
-		r, err := json.Marshal(operation.Result{Outcome: outcome, Ticket: id, RequestDigest: digest, Value: output})
+		r, err := json.Marshal(operation.Result{Outcome: outcome, Ticket: id, RequestDigest: digest, Value: output, RecordedBy: "user"})
 		if err != nil {
 			return err
 		}

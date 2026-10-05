@@ -178,7 +178,7 @@ func TestResolveOnlyUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := all[0].TypedResult(); all[0].Status != Failed || r == nil || r.Outcome != operation.Failure || !strings.Contains(r.Value, "recorded by the user") {
+	if r := all[0].TypedResult(); all[0].Status != Failed || r == nil || r.Outcome != operation.Failure || r.RecordedBy != "user" {
 		t.Fatalf("resolved: %s %+v", all[0].Status, r)
 	}
 }

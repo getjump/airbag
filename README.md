@@ -415,9 +415,10 @@ The command runs on your machine, with your environment and credentials, after
   and a file outside the workspace is refused when the agent queues the call
   (`/tmp` in the sandbox is not yours); pass text inline or put the file in the
   workspace; a call that names a secret file (`.env`, a key) is refused;
-- after an incomplete action the rest wait, since a pull request without its push means
-  nothing; after `apply --branch` generic commands wait, because the working tree is not
-  the result; if the session changed `.git/config` or hooks, they wait for
+- after a failure the rest wait in that apply, since a pull request without its push
+  means nothing; after an unknown outcome they wait until you record what happened
+  (`airbag outbox resolve`); after `apply --branch` generic commands wait, because the
+  working tree is not the result; if the session changed `.git/config` or hooks, they wait for
   `--trust-git`, as pushes do, and run with hooks and fsmonitor off;
 - rules see the call as an `intent.cmd` effect, so
   `'"untrusted" in session.labels && effect.kind == "intent.cmd"'` can refuse
