@@ -94,5 +94,6 @@ Smaller, self-contained tasks are labeled
   `test/` when it is about what a session does.
 - Commit messages: an imperative summary line, then what changed and why.
 - Update the README when something user-visible changes.
+- The maintainer's agent workflows, their labels and gates: [docs/agents.md](docs/agents.md).
 - Security problems: please report them privately through a GitHub security
   advisory, not a public issue.
