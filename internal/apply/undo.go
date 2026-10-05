@@ -83,12 +83,14 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	if err != nil {
 		return nil, err
 	}
-	// What a rollback's removal cut short left holds nothing needed: all
-	// of it was rolled back. Its removal is best effort: every listing
-	// passes it by, and one that cannot go must not stop every apply.
+	// What a crash left before a journal was first written (.new), and
+	// what a rollback's removal cut short left (.gone), hold nothing
+	// needed. Their removal is best effort: every listing passes them by,
+	// each gets a name of its own, and one that cannot go must not stop
+	// every apply.
 	if es, err := os.ReadDir(root); err == nil {
 		for _, e := range es {
-			if strings.HasSuffix(e.Name(), ".gone") {
+			if strings.HasSuffix(e.Name(), ".gone") || strings.HasSuffix(e.Name(), ".new") {
 				_ = os.RemoveAll(filepath.Join(root, e.Name()))
 			}
 		}
@@ -102,10 +104,7 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	// one, so a numbered directory without one is a journal lost, never a
 	// crash before the first write. A crash leaves only the .new.
 	final := filepath.Join(root, strconv.Itoa(n))
-	g := &generation{dir: final + ".new", roots: rootsOf(s), Session: s.ID, Started: time.Now(), Clone: s.Clone}
-	if err := os.RemoveAll(g.dir); err != nil {
-		return nil, err
-	}
+	g := &generation{dir: fmt.Sprintf("%s.%d.new", final, time.Now().UnixNano()), roots: rootsOf(s), Session: s.ID, Started: time.Now(), Clone: s.Clone}
 	if err := os.MkdirAll(filepath.Join(g.dir, "saved"), 0o700); err != nil {
 		return nil, err
 	}
@@ -474,10 +473,9 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		// is the user's, and there is no later rollback to try again.
 		// Renamed first to a name the listings pass by: a removal cut
 		// short leaves no numbered directory without its journal.
-		gone := g.dir + ".gone"
-		if err := os.RemoveAll(gone); err != nil {
-			return left, err
-		}
+		// A name of its own: one an earlier removal could not clear
+		// may still be there with this generation's number.
+		gone := fmt.Sprintf("%s.%d.gone", g.dir, time.Now().UnixNano())
 		if err := os.Rename(g.dir, gone); err != nil {
 			return left, err
 		}

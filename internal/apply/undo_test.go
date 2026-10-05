@@ -2385,6 +2385,15 @@ func TestRollbackRemovalCutShortLeavesNoLostJournal(t *testing.T) {
 			t.Errorf("the next apply left %s", e.Name())
 		}
 	}
+	// One left with this generation's number, the next apply could not
+	// clear it either, does not stop its rollback.
+	if err := os.MkdirAll(filepath.Join(generationsDir(s), "1.gone", "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("a leftover with the same number stops the rollback: %v\n%s", err, out.String())
+	}
 }
 
 // The rollback of an apply that did not finish needs no mark: apply
@@ -2508,7 +2517,7 @@ func TestListGenerationsTakesOnlyItsOwnNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := rootSession(t, ws)
-	for _, name := range []string{"2", "03", "+4", "-1", "0", "5.new", "6.gone"} {
+	for _, name := range []string{"2", "03", "+4", "-1", "0", "5.new", "6.1791234567.gone"} {
 		if err := os.MkdirAll(filepath.Join(generationsDir(s), name), 0o700); err != nil {
 			t.Fatal(err)
 		}
