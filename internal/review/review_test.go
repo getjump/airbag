@@ -400,6 +400,32 @@ func TestReportNamesTrustLinks(t *testing.T) {
 	if w := why([]Change{link("applied", "/etc/third")}, "i-1"); !strings.Contains(w, "1 links") {
 		t.Errorf("a path counts once, as its change: %s", w)
 	}
+	// A link in a folded cache is left out by apply unless --only names
+	// it, so it holds nothing; once applied that way, it does.
+	s.Applied = nil
+	home := t.TempDir()
+	s.Home = home
+	if err := os.MkdirAll(filepath.Join(upper, ".cache", "tool"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cached := link(filepath.Join(".cache", "tool", "link"), "/etc/app")
+	cached.Layer, cached.Path = "home", filepath.Join(home, ".cache", "tool", "link")
+	if !Dropped(cached) {
+		t.Fatal("the cache link is not folded; the case tests nothing")
+	}
+	if w := why([]Change{cached}, "i-1"); strings.Contains(w, "trust-links") {
+		t.Errorf("a link apply leaves out holds the command: %s", w)
+	}
+	if err := os.MkdirAll(filepath.Dir(cached.Path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/app", cached.Path); err != nil {
+		t.Fatal(err)
+	}
+	s.Applied = map[string]time.Time{cached.Path: time.Now()}
+	if w := why(nil, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("a cache link applied with --only is not counted: %s", w)
+	}
 }
 
 // A link to an installed program does not hold a command in apply, so

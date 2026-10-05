@@ -268,9 +268,12 @@ func linksOut(s *session.Session, cs []Change) int {
 	n := 0
 	// A path counts once: the change, or else the link in the real files,
 	// which holds the commands until a change to it is applied too.
+	// A link apply leaves out by default (one in a folded cache) reaches
+	// the real files only when --only names it.
 	counted := make(map[string]bool, len(cs))
+	leftOut := LeftOut(cs)
 	for _, c := range cs {
-		if c.Type != fs.ModeSymlink || c.Kind == Deleted {
+		if c.Type != fs.ModeSymlink || c.Kind == Deleted || leftOut(c) {
 			continue
 		}
 		text, err := os.Readlink(c.Upper)

@@ -165,17 +165,11 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	// with it (~/.claude rebuilt): applying the replacement takes the
 	// host's directory away. A cache there is left out all the same; the
 	// host's copy goes to the undo journal with the rest.
-	var replaced []string
-	for _, c := range cs {
-		if c.Kind == review.Replaced && c.IsDir() && !review.Dropped(c) {
-			replaced = append(replaced, c.Path+string(filepath.Separator))
-		}
-	}
+	leftOut := review.LeftOut(cs)
 	var kept []review.Change
 	dropped := 0
 	for _, c := range cs {
-		under := review.DroppedState(c) && slices.ContainsFunc(replaced, func(r string) bool { return strings.HasPrefix(c.Path, r) })
-		if review.Dropped(c) && !under && !homeMatches(c, o.Only, s.Home) {
+		if leftOut(c) && !homeMatches(c, o.Only, s.Home) {
 			dropped++
 			continue
 		}
