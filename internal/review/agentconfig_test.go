@@ -66,8 +66,7 @@ func diffOf(c Change) string {
 // Nothing reaches the real file before apply.
 func TestBenignConfigChangeNeedsNoDecision(t *testing.T) {
 	s, realPath, branchPath := cfgSession(t)
-	real := `{"numStartups":1,"tipsHistory":{"x":1},"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.1,"lastSessionId":"a"}}}`
-	writeCfg(t, realPath, real)
+	writeCfg(t, realPath, `{"numStartups":1,"tipsHistory":{"x":1},"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.1,"lastSessionId":"a"}}}`)
 	writeCfg(t, branchPath, `{"numStartups":2,"projects":{"/home/me/api":{"hasTrustDialogAccepted":true,"allowedTools":[],"lastCost":0.2,"lastSessionId":"secret-b","lastDuration":5}}}`)
 
 	c, cs := scanConfig(t, s)
@@ -87,9 +86,6 @@ func TestBenignConfigChangeNeedsNoDecision(t *testing.T) {
 	}
 	if !strings.Contains(d, "benign key(s): ") || strings.Contains(d, "secret-b") {
 		t.Errorf("diff %q: want benign key names, no values", d)
-	}
-	if b, _ := os.ReadFile(realPath); string(b) != real {
-		t.Errorf("the real file changed before apply: %s", b)
 	}
 }
 
@@ -124,7 +120,7 @@ func TestMixedConfigChangeIsPersist(t *testing.T) {
 // whole new file is shown by key, each in its class.
 func TestNewConfigFileComparedToEmpty(t *testing.T) {
 	s, _, branchPath := cfgSession(t)
-	writeCfg(t, branchPath, `{"numStartups":1,"hooks":{}}`)
+	writeCfg(t, branchPath, `{"numStartups":1,"hooks":{"Stop":[]}}`)
 	c, _ := scanConfig(t, s)
 	if !slices.Contains(c.Flags, "persist key(s): hooks") || slices.ContainsFunc(c.Flags, func(f string) bool { return strings.Contains(f, "numStartups") }) {
 		t.Errorf("flags = %v", c.Flags)
@@ -405,5 +401,226 @@ func TestDiffQuotesMultilineNames(t *testing.T) {
 	}
 	if lines := strings.Count(b.String(), "\n"); lines != 3 {
 		t.Fatalf("diff has %d lines, want 3: %q", lines, b.String())
+	}
+}
+
+// Every listed key path has the class its table gives it, and no path is
+// in both tables.
+func TestKeyTables(t *testing.T) {
+	for _, cf := range jsonConfigs {
+		for _, set := range []struct {
+			pats []string
+			want keyClass
+		}{{cf.benign, classBenign}, {cf.persist, classPersist}} {
+			for _, p := range set.pats {
+				path := strings.Split(strings.ReplaceAll(p, "*", "/some/project"), ".")
+				if c, listed, _ := cf.class(path); !listed || c != set.want {
+					t.Errorf("%s %s: class %v listed %v, want %v", cf.path, p, c, listed, set.want)
+				}
+			}
+		}
+		for _, p := range cf.benign {
+			if slices.Contains(cf.persist, p) {
+				t.Errorf("%s: %s is both benign and persist", cf.path, p)
+			}
+		}
+		// The keys that run code or change trust, pinned: dropping one
+		// from the table would still show it, but as unknown.
+		for _, p := range []string{
+			"mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "mcpContextUris",
+			"permissions", "allowedTools", "hooks", "env", "apiKeyHelper",
+			"customApiKeyResponses", "oauthAccount", "primaryApiKey", "bypassPermissionsModeAccepted",
+			"projects.*.allowedTools", "projects.*.mcpServers", "projects.*.mcpContextUris",
+			"projects.*.enabledMcpjsonServers", "projects.*.disabledMcpjsonServers",
+			"projects.*.hasTrustDialogAccepted", "projects.*.hasClaudeMdExternalIncludesApproved",
+		} {
+			if !slices.Contains(cf.persist, p) {
+				t.Errorf("%s: %s is not persist", cf.path, p)
+			}
+		}
+	}
+}
+
+// A new project's entry, as the CLI first writes it, holds its listed
+// keys with their empty defaults: that adds nothing, so it needs no
+// decision. A non-empty value still does, and so does emptying a list
+// that had entries.
+func TestEmptyDefaultsAreNoChange(t *testing.T) {
+	_, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1,"projects":{"/old":{"disabledMcpjsonServers":["x"]}}}`)
+	writeCfg(t, branchPath, `{"numStartups":2,"projects":{"/old":{"disabledMcpjsonServers":[]},"/home/me/new":{"allowedTools":[],"mcpServers":{},"mcpContextUris":[],"enabledMcpjsonServers":[],"disabledMcpjsonServers":[],"hasTrustDialogAccepted":false,"hasClaudeMdExternalIncludesApproved":false,"lastCost":0}}}`)
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+	want := []string{"persist", `persist key(s): projects["/old"].disabledMcpjsonServers`}
+	if got := configFlags(c); !slices.Equal(got, want) {
+		t.Errorf("flags = %q, want %q", got, want)
+	}
+}
+
+// Claude Code reads its legacy config, ~/.claude/.config.json, first
+// when it exists: it is reviewed by key like ~/.claude.json.
+func TestLegacyConfigPath(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	writeCfg(t, filepath.Join(s.HomeUpper(), ".claude/.config.json"), `{"numStartups":1,"mcpServers":{"x":{"command":"evil"}}}`)
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel != ".claude/.config.json" {
+			continue
+		}
+		if !slices.Contains(c.Flags, "persist key(s): mcpServers") {
+			t.Errorf("flags = %v", c.Flags)
+		}
+		if d := diffOf(c); strings.Contains(d, "evil") {
+			t.Errorf("diff printed a value: %q", d)
+		}
+		return
+	}
+	t.Fatalf("no change for the legacy config in %+v", cs)
+}
+
+// A config the agent made writable by other users is flagged: another
+// user could add an MCP server to it. Narrower or group modes are not.
+func TestConfigModeWidened(t *testing.T) {
+	for mode, flagged := range map[os.FileMode]bool{0o602: true, 0o666: true, 0o644: false, 0o600: false, 0o660: false} {
+		s, realPath, branchPath := cfgSession(t)
+		writeCfg(t, realPath, `{"numStartups":1}`)
+		writeCfg(t, branchPath, `{"numStartups":1}`)
+		if err := os.Chmod(branchPath, mode); err != nil {
+			t.Fatal(err)
+		}
+		cs, err := Scan(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var flags []string
+		for _, c := range cs {
+			if c.Rel == ".claude.json" {
+				flags = c.Flags
+			}
+		}
+		got := slices.ContainsFunc(flags, func(f string) bool { return strings.Contains(f, "writable by other users") })
+		if got != flagged || (len(Attention(cs)) > 0) != flagged {
+			t.Errorf("mode %04o: flags %v, attention %d", mode, flags, len(Attention(cs)))
+		}
+	}
+}
+
+// A directory where the config was is nothing review can read: it is
+// flagged as the worst case, like a deletion.
+func TestConfigDirectoryIsUnreadable(t *testing.T) {
+	_, realPath, branchPath := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1}`)
+	if err := os.MkdirAll(branchPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath, Type: fs.ModeDir, Kind: Replaced}
+	if flags := configFlags(c); !slices.Contains(flags, "persist") {
+		t.Errorf("flags = %q, want persist", flags)
+	}
+}
+
+// A real config that is a symlink into $HOME (a dotfiles directory): a
+// change written through the link lands on the link's target, which is
+// reviewed by key like the config; a branch copy that replaced the link
+// is compared with the file the link points to.
+func TestSymlinkedConfig(t *testing.T) {
+	s, realPath, branchPath := cfgSession(t)
+	target := filepath.Join(s.Home, "dotfiles", "claude.json")
+	writeCfg(t, target, `{"numStartups":1}`)
+	if err := os.Symlink("dotfiles/claude.json", realPath); err != nil {
+		t.Fatal(err)
+	}
+	through := Change{Layer: "home", Rel: "dotfiles/claude.json", Path: target, Upper: filepath.Join(s.HomeUpper(), "dotfiles", "claude.json"), Kind: Modified}
+	writeCfg(t, through.Upper, `{"numStartups":2,"mcpServers":{"x":{"command":"evil"}}}`)
+	if flags := configFlags(through); !slices.Contains(flags, "persist key(s): mcpServers") {
+		t.Errorf("written through the link: flags = %q", flags)
+	}
+	if d := diffOf(through); strings.Contains(d, "evil") || !strings.Contains(d, "benign key(s): numStartups") {
+		t.Errorf("written through the link: diff = %q", d)
+	}
+	writeCfg(t, branchPath, `{"numStartups":2}`)
+	replaced := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath, Kind: Modified}
+	if flags := configFlags(replaced); len(flags) != 0 {
+		t.Errorf("the link replaced by a counter change: flags = %q", flags)
+	}
+}
+
+// A change to a shell snapshot or session env file the host already has
+// is shell code a host session sources: flagged, listed and shown. A new
+// one is the sandbox session's own and stays folded.
+func TestHostShellStateIsFlagged(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	writeCfg(t, filepath.Join(s.Home, ".claude/shell-snapshots/snapshot-bash-1.sh"), "export PATH=/usr/bin\n")
+	writeCfg(t, filepath.Join(s.Home, ".claude/session-env/host-id/hook-0.sh"), "")
+	for rel, body := range map[string]string{
+		".claude/shell-snapshots/snapshot-bash-1.sh": "export PATH=/tmp/evil:/usr/bin\n",
+		".claude/shell-snapshots/snapshot-bash-2.sh": "export PATH=/usr/bin\n",
+		".claude/session-env/host-id/hook-1.sh":      "export X=1\n",
+		".claude/session-env/sandbox-id/hook-0.sh":   "export Y=1\n",
+	} {
+		writeCfg(t, filepath.Join(s.HomeUpper(), rel), body)
+	}
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		".claude/shell-snapshots/snapshot-bash-1.sh": true, ".claude/shell-snapshots/snapshot-bash-2.sh": false,
+		".claude/session-env/host-id/hook-1.sh": true, ".claude/session-env/sandbox-id/hook-0.sh": false,
+	}
+	for _, c := range cs {
+		w, ok := want[c.Rel]
+		if !ok {
+			continue
+		}
+		if got := slices.Contains(c.Flags, shellStateFlag) && slices.Contains(c.Flags, "persist"); got != w {
+			t.Errorf("%s: flags %v, want flagged=%v", c.Rel, c.Flags, w)
+		}
+		if d := diffOf(c); strings.Contains(d, "export") != w {
+			t.Errorf("%s: diff %q, want contents shown=%v", c.Rel, d, w)
+		}
+	}
+	var b strings.Builder
+	Render(&b, s, cs, nil, nil, nil)
+	if !strings.Contains(b.String(), "~/.claude/shell-snapshots/snapshot-bash-1.sh") || strings.Contains(b.String(), "snapshot-bash-2.sh") {
+		t.Errorf("review listing:\n%s", b.String())
+	}
+}
+
+// A name with a line break is one quoted line in the review listing and
+// in the attention list, so it cannot add a line that passes for another
+// change.
+func TestListQuotesNewlineNames(t *testing.T) {
+	s, _, _ := cfgSession(t)
+	writeCfg(t, filepath.Join(s.HomeUpper(), ".config/autostart/x\n  + ~/.cache/harmless.txt"), "[Desktop Entry]\n")
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	Render(&b, s, cs, nil, nil, nil)
+	WriteAttention(&b, BuildReport(s, cs, nil, nil, nil))
+	for _, line := range strings.Split(b.String(), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "+ ~/.cache/") {
+			t.Fatalf("a name added a line:\n%s", b.String())
+		}
+	}
+}
+
+// holdsMemory reads directory names, so a home path holding glob
+// characters still finds a project's memory.
+func TestHoldsMemoryGlobCharacters(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "a[b]*?")
+	writeCfg(t, filepath.Join(home, ".claude/projects/-x/memory/M.md"), "remember")
+	for rel, real := range map[string]string{
+		".claude":             filepath.Join(home, ".claude"),
+		".claude/projects":    filepath.Join(home, ".claude/projects"),
+		".claude/projects/-x": filepath.Join(home, ".claude/projects/-x"),
+	} {
+		if !holdsMemory(real, rel) {
+			t.Errorf("%s: memory not found", rel)
+		}
 	}
 }

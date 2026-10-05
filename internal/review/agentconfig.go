@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -55,45 +56,53 @@ type jsonConfig struct {
 }
 
 var jsonConfigs = []jsonConfig{
-	{
-		path: ".claude.json",
-		benign: []string{
-			// Written by a non-interactive `claude -p` run on its own.
-			"firstStartTime", "firstStartVersion", "machineID", "userID",
-			"migrationVersion", "opusProMigrationComplete", "sonnet1m45MigrationComplete",
-			"seenNotifications", "hasResetAutoModeOptInForDefaultOffer", "pluginUsage",
-			// Written by interactive sessions: startup, onboarding and tip
-			// counters, and markers of what was already shown.
-			"numStartups", "hasCompletedOnboarding", "lastOnboardingVersion",
-			"tipsHistory", "tipLifetimeShownCounts", "tipsHistoryByCommand",
-			"lastReleaseNotesSeen", "lastClawdEntranceVersion",
-			// Per-project counters an interactive session rewrites on exit.
-			"projects.*.lastSessionId", "projects.*.lastStartTime", "projects.*.lastVersionBase",
-			"projects.*.lastGracefulShutdown", "projects.*.lastCost", "projects.*.lastDuration",
-			"projects.*.lastAPIDuration", "projects.*.lastAPIDurationWithoutRetries",
-			"projects.*.lastToolDuration", "projects.*.lastFpsAverage", "projects.*.lastFpsLow1Pct",
-			"projects.*.lastLinesAdded", "projects.*.lastLinesRemoved",
-			"projects.*.lastTotalInputTokens", "projects.*.lastTotalOutputTokens",
-			"projects.*.lastTotalCacheCreationInputTokens", "projects.*.lastTotalCacheReadInputTokens",
-			"projects.*.lastTotalWebSearchRequests", "projects.*.lastModelUsage",
-			"projects.*.lastSessionMetrics",
-		},
-		persist: []string{
-			"mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "mcpContextUris",
-			"permissions", "allowedTools", "hooks", "env", "apiKeyHelper",
-			// Answers to "use this API key from the environment?", and the
-			// account a login inside the session recorded: which account
-			// (and organization, whose managed settings later sessions
-			// fetch) the host's next session uses.
-			"customApiKeyResponses", "oauthAccount",
-			// Per project: tool permissions, MCP servers, folder trust, and
-			// approval of CLAUDE.md imports from outside the project.
-			"projects.*.allowedTools", "projects.*.mcpServers", "projects.*.mcpContextUris",
-			"projects.*.enabledMcpjsonServers", "projects.*.disabledMcpjsonServers",
-			"projects.*.hasTrustDialogAccepted", "projects.*.hasClaudeMdExternalIncludesApproved",
-		},
-	},
+	{path: ".claude.json", benign: claudeBenign, persist: claudePersist},
+	// The legacy place, which Claude Code still reads first when it exists.
+	{path: ".claude/.config.json", benign: claudeBenign, persist: claudePersist},
 }
+
+// claudeBenign and claudePersist are Claude Code's global config keys,
+// the same in both places the file may be.
+var (
+	claudeBenign = []string{
+		// Written by a non-interactive `claude -p` run on its own.
+		"firstStartTime", "firstStartVersion", "machineID", "userID",
+		"migrationVersion", "opusProMigrationComplete", "sonnet1m45MigrationComplete",
+		"seenNotifications", "hasResetAutoModeOptInForDefaultOffer", "pluginUsage",
+		// Written by interactive sessions: startup, onboarding and tip
+		// counters, and markers of what was already shown.
+		"numStartups", "hasCompletedOnboarding", "lastOnboardingVersion",
+		"tipsHistory", "tipLifetimeShownCounts", "tipsHistoryByCommand",
+		"lastReleaseNotesSeen", "lastClawdEntranceVersion",
+		// Per-project counters an interactive session rewrites on exit.
+		"projects.*.lastSessionId", "projects.*.lastStartTime", "projects.*.lastVersionBase",
+		"projects.*.lastGracefulShutdown", "projects.*.lastCost", "projects.*.lastDuration",
+		"projects.*.lastAPIDuration", "projects.*.lastAPIDurationWithoutRetries",
+		"projects.*.lastToolDuration", "projects.*.lastFpsAverage", "projects.*.lastFpsLow1Pct",
+		"projects.*.lastLinesAdded", "projects.*.lastLinesRemoved",
+		"projects.*.lastTotalInputTokens", "projects.*.lastTotalOutputTokens",
+		"projects.*.lastTotalCacheCreationInputTokens", "projects.*.lastTotalCacheReadInputTokens",
+		"projects.*.lastTotalWebSearchRequests", "projects.*.lastModelUsage",
+		"projects.*.lastSessionMetrics",
+	}
+	claudePersist = []string{
+		"mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "mcpContextUris",
+		"permissions", "allowedTools", "hooks", "env", "apiKeyHelper",
+		// Answers to "use this API key from the environment?", and the
+		// account a login inside the session recorded: which account
+		// (and organization, whose managed settings later sessions
+		// fetch) the host's next session uses.
+		"customApiKeyResponses", "oauthAccount", "primaryApiKey",
+		// The answer to the bypass-permissions dialog: the host's next
+		// --dangerously-skip-permissions run no longer asks.
+		"bypassPermissionsModeAccepted",
+		// Per project: tool permissions, MCP servers, folder trust, and
+		// approval of CLAUDE.md imports from outside the project.
+		"projects.*.allowedTools", "projects.*.mcpServers", "projects.*.mcpContextUris",
+		"projects.*.enabledMcpjsonServers", "projects.*.disabledMcpjsonServers",
+		"projects.*.hasTrustDialogAccepted", "projects.*.hasClaudeMdExternalIncludesApproved",
+	}
+)
 
 // NoteHostConfigs records, before a run, which jsonConfig files exist in
 // the real $HOME (session.Meta.HostConfigs). The agent's CLI rewrites
@@ -213,6 +222,9 @@ func (cf *jsonConfig) diff(prefix []string, a, b json.RawMessage) []keyChange {
 	}
 	c, listed, below := cf.class(prefix)
 	if listed {
+		if empty(a) && empty(b) {
+			return nil // a listed key the CLI writes with its default, as a new project's entry has
+		}
 		return []keyChange{{prefix, c}}
 	}
 	if len(prefix) == 0 || below {
@@ -229,16 +241,60 @@ func (cf *jsonConfig) diff(prefix []string, a, b json.RawMessage) []keyChange {
 	return []keyChange{{prefix, classUnknown}}
 }
 
+// empty reports an absent value or an empty one: [], {}, false or "".
+// For a key the table lists, going from one to another adds nothing: an
+// empty permission list allows nothing, and an empty deny list is no list.
+// null is not empty, as in object.
+func empty(v json.RawMessage) bool {
+	switch canon(v) {
+	case "", "[]", "{}", "false", `""`:
+		return true
+	}
+	return false
+}
+
+// configAt returns the jsonConfig a home change is: the config itself,
+// or the file a real config that is a symlink points to inside $HOME (a
+// dotfiles directory, say), which the agent's CLI writes through the
+// link. nil when it is neither.
+func configAt(c Change) *jsonConfig {
+	if cf := configFor(filepath.ToSlash(c.Rel)); cf != nil {
+		return cf
+	}
+	home, ok := strings.CutSuffix(c.Path, string(filepath.Separator)+c.Rel)
+	if !ok {
+		return nil
+	}
+	for i := range jsonConfigs {
+		real := filepath.Join(home, jsonConfigs[i].path)
+		t, err := os.Readlink(real)
+		if err != nil {
+			continue
+		}
+		if !filepath.IsAbs(t) {
+			t = filepath.Join(filepath.Dir(real), t)
+		}
+		if filepath.Clean(t) == c.Path {
+			return &jsonConfigs[i]
+		}
+	}
+	return nil
+}
+
 // configChanges lists a config file's changed key paths for review (names
 // only, never values). ok is false when the change is not a config file;
-// readable is false when either side is not a readable regular JSON file.
+// readable is false when either side is not a readable regular JSON file
+// (a directory where the config was is not).
 func configChanges(c Change) (changes []keyChange, readable, ok bool) {
-	if c.Layer != "home" || c.IsDir() {
+	if c.Layer != "home" {
 		return nil, false, false
 	}
-	cf := configFor(filepath.ToSlash(c.Rel))
+	cf := configAt(c)
 	if cf == nil {
 		return nil, false, false
+	}
+	if c.IsDir() {
+		return nil, false, true
 	}
 	branchRaw, err := readRegular(c.Upper)
 	if err != nil {
@@ -247,7 +303,7 @@ func configChanges(c Change) (changes []keyChange, readable, ok bool) {
 	if _, err := topLevel(branchRaw); err != nil {
 		return nil, false, true
 	}
-	realRaw, err := readRegular(c.Path)
+	realRaw, err := readReal(c.Path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		realRaw = []byte("{}")
@@ -284,10 +340,30 @@ func configNotes(c Change) (notes []string, ok bool) {
 	if k := byClass[classUnknown]; len(k) > 0 {
 		notes = append(notes, "unknown key(s): "+strings.Join(k, ", "))
 	}
+	if m := widened(c); m != "" {
+		notes = append(notes, m)
+	}
 	if k := byClass[classBenign]; len(k) > 0 {
 		notes = append(notes, benignNote+strings.Join(k, ", "))
 	}
 	return notes, true
+}
+
+// widened names a mode change that lets other users write the config,
+// who could then add an MCP server to it; "" when there is none. Without
+// a real file the CLI's own 0600 is the base.
+func widened(c Change) string {
+	if c.Kind == Deleted || c.Type != 0 {
+		return ""
+	}
+	old := fs.FileMode(0o600)
+	if fi, err := os.Stat(c.Path); err == nil {
+		old = fi.Mode().Perm()
+	}
+	if c.Mode.Perm()&^old&0o002 == 0 {
+		return ""
+	}
+	return fmt.Sprintf("mode %04o -> %04o, writable by other users", old, c.Mode.Perm())
 }
 
 // configFlags are review's flags for a config file change: configNotes
@@ -352,8 +428,15 @@ func surrogateEscape(b []byte) bool {
 // there could point host-side airbag at any file the agent chose; it
 // opens with O_NOFOLLOW and checks the opened file, so a swap between
 // the check and the read does not help either.
-func readRegular(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+func readRegular(path string) ([]byte, error) { return readFile(path, syscall.O_NOFOLLOW) }
+
+// readReal reads the real config, which the host may keep as a symlink
+// (into a dotfiles directory, say). The real $HOME is the host's, not
+// the agent's, so the link is followed, to a regular file only.
+func readReal(path string) ([]byte, error) { return readFile(path, 0) }
+
+func readFile(path string, flags int) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|flags, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {
 			return nil, errNotRegular
@@ -442,9 +525,32 @@ func holdsMemory(realPath, rel string) bool {
 	if parts[0] != ".claude" || len(parts) > 3 || len(parts) >= 2 && parts[1] != "projects" {
 		return false
 	}
-	pattern := map[int]string{1: "projects/*/memory", 2: "*/memory", 3: "memory"}[len(parts)]
-	m, _ := filepath.Glob(filepath.Join(realPath, pattern))
-	return len(m) > 0
+	// The project directories it holds, read as names: a home path may
+	// hold the characters a glob pattern would take as special.
+	projects := []string{realPath}
+	switch len(parts) {
+	case 1:
+		projects = subdirs(filepath.Join(realPath, "projects"))
+	case 2:
+		projects = subdirs(realPath)
+	}
+	for _, p := range projects {
+		if _, err := os.Lstat(filepath.Join(p, "memory")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func subdirs(dir string) []string {
+	ents, _ := os.ReadDir(dir)
+	var out []string
+	for _, e := range ents {
+		if e.IsDir() {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
 }
 
 // agentMemory reports whether a home path is inside a Claude Code project

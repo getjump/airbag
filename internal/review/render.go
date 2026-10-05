@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,7 +39,10 @@ var homeNoise = []struct{ match, group, kind string }{
 	// Claude Code state that now goes through the branch (only the
 	// current workspace's transcripts pass through). settings.json,
 	// hooks, skills, CLAUDE.md and a project's memory/ are flagged, so
-	// they are not folded here; everything below is caches and logs.
+	// they are not folded here; everything below is caches and logs,
+	// except shell snapshots and session env files, which the CLI
+	// sources: a change to one the host already has is flagged
+	// (hostShellState), so it is not folded either.
 	{".claude/projects/", ".claude/", "agent state"}, {".claude/sessions/", ".claude/", "agent state"},
 	{".claude/session-env/", ".claude/", "agent state"}, {".claude/shell-snapshots/", ".claude/", "agent state"},
 	// Not file-history/: a host /rewind writes it back into files.
@@ -248,6 +252,7 @@ func list(w io.Writer, all []Change, prefix string) {
 		if c.IsDir() {
 			name += "/"
 		}
+		name = OneLine(name)
 		flags := ""
 		if f := withoutOutside(c.Flags); len(f) > 0 {
 			flags = "  " + strings.Join(f, ", ")
@@ -258,16 +263,16 @@ func list(w io.Writer, all []Change, prefix string) {
 
 func display(c Change) string {
 	if c.Layer == "home" {
-		return oneLine("~/" + c.Rel)
+		return OneLine("~/" + c.Rel)
 	}
-	return oneLine(c.Rel)
+	return OneLine(c.Rel)
 }
 
-// oneLine quotes a name the agent chose (a path, a link target) when it
+// OneLine quotes a name the agent chose (a path, a link target) when it
 // holds a line break: the terminal-safe writer escapes other control
 // characters but keeps newlines, so a raw one could add lines that pass
 // for other changes.
-func oneLine(s string) string {
+func OneLine(s string) string {
 	if strings.ContainsAny(s, "\n\r") {
 		return strconv.Quote(s)
 	}
@@ -478,10 +483,10 @@ func Diff(w io.Writer, c Change) {
 		}
 		fmt.Fprintf(w, "--- a/%s\n+++ b/%s\n", display(c), display(c))
 		if old != "" {
-			fmt.Fprintf(w, "-symlink -> %s\n", oneLine(old))
+			fmt.Fprintf(w, "-symlink -> %s\n", OneLine(old))
 		}
 		if cur != "" {
-			fmt.Fprintf(w, "+symlink -> %s\n", oneLine(cur))
+			fmt.Fprintf(w, "+symlink -> %s\n", OneLine(cur))
 		}
 		return
 	}
@@ -490,7 +495,10 @@ func Diff(w io.Writer, c Change) {
 	// Only Claude Code's own backups, beside the config in $HOME: an
 	// agent file elsewhere with such a name is shown like any other.
 	if c.Layer == "home" && (!strings.Contains(filepath.ToSlash(c.Rel), "/") && strings.HasPrefix(c.Rel, ".claude.json") && configFor(filepath.ToSlash(c.Rel)) == nil ||
-		func() bool { _, kind := Noise(c.Rel); return kind == "agent state" && !agentMemory(c.Rel) }()) {
+		func() bool {
+			_, kind := Noise(c.Rel)
+			return kind == "agent state" && !agentMemory(c.Rel) && !slices.Contains(c.Flags, shellStateFlag)
+		}()) {
 		fmt.Fprintf(w, "%s %s (agent state; contents not shown)\n", map[string]string{Added: "+", Deleted: "-", Modified: "~", Replaced: "!"}[c.Kind], display(c))
 		return
 	}
@@ -506,7 +514,7 @@ func Diff(w io.Writer, c Change) {
 		if len(parts) == 0 {
 			parts = []string{"no key changed"}
 		}
-		fmt.Fprintf(w, "~ %s: %s\n", display(c), strings.Join(parts, "; "))
+		fmt.Fprintf(w, "%s %s: %s\n", map[string]string{Added: "+", Deleted: "-", Modified: "~", Replaced: "!"}[c.Kind], display(c), strings.Join(parts, "; "))
 		return
 	}
 	a, b := c.Path, c.Upper

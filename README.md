@@ -158,8 +158,8 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   real `$HOME`: the login (`~/.claude/.credentials.json`, `~/.codex/auth.json`, so a
   discard does not log you out), the current workspace's Claude Code transcripts
   (`~/.claude/projects/<this project>/`, so `claude --resume` works after a discard) and
-  Codex's transcripts (`~/.codex/sessions`, which Codex keys by date, not by project,
-  so these are not narrowed to the workspace). Mind what that means: a transcript the
+  Codex's transcripts and logs (`~/.codex/sessions`, which Codex keys by date, not by
+  project, so these are not narrowed to the workspace, and `~/.codex/log`). Mind what that means: a transcript the
   agent wrote, resumed later outside airbag (`claude --continue`, `codex resume`),
   brings that conversation back, so resume a sandboxed session inside airbag
   (`airbag run --session`), and a login the agent changed inside a session is the
@@ -171,15 +171,22 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   already changed them in the branch: then they stay in the branch, and airbag says so. Everything else an agent keeps in
   `$HOME` — other projects' transcripts, sessions, shell snapshots, file history,
   todos, caches — goes through the branch: review folds it into one `agent state`
-  line and a discard drops it. A project's `memory/` (instructions loaded into later
+  line and a discard drops it. The exception is shell code Claude Code sources: a
+  change to a shell snapshot or a session's env file the host already has is flagged
+  `persist` and shown in full; the sandbox session's own new ones stay folded. A project's `memory/` (instructions loaded into later
   sessions) stays in the branch too, flagged `agent instructions`, so you see it and
   a discard drops it. `~/.claude.json` goes through the branch too, the whole file:
   nothing in it reaches the real file before apply, Claude Code's own counters
   included. Review shows it by key name, never value: keys the CLI rewrites every
   run (counters, ids, migration markers) as `benign key(s)`, which need no decision;
   an MCP server, a tool permission, a trust decision or the logged-in account flagged
-  `persist`; any other key as `unknown key(s)`. If the host rewrote or removed the
-  file during the session, apply reports it as a conflict. On the macOS prototype,
+  `persist`; any other key as `unknown key(s)`. A listed key written with an empty
+  default (`[]`, `{}`, `false`), as a new project's entry has, is no change; a mode
+  that lets other users write the file is flagged. The legacy `~/.claude/.config.json`
+  is reviewed the same way, and so is the file a symlinked `~/.claude.json` points to
+  inside `$HOME` (apply then writes a regular file in place of the link). If the host
+  rewrote or removed the file during the session, apply reports it as a conflict; leave
+  it out with `apply -i` or `--only`. On the macOS prototype,
   which has no branch of `$HOME`, this narrowing is only partial; see
   [docs/macos.md](docs/macos.md).
 

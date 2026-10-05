@@ -201,6 +201,9 @@ func classify(s *session.Session, cs []Change) {
 			// or changes trust, unknown keys listed plainly, and benign
 			// counters with no flag, so they need no decision.
 			c.Flags = append(c.Flags, configFlags(*c)...)
+			if touchesHostShellState(s.Home, *c) {
+				c.Flags = append(c.Flags, "persist", shellStateFlag)
+			}
 			// Project memory is loaded into later sessions.
 			if agentMemory(rel) || (c.Kind == Deleted || c.Kind == Replaced) && holdsMemory(c.Path, rel) {
 				c.Flags = append(c.Flags, "agent instructions")

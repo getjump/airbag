@@ -1,7 +1,9 @@
 package review
 
 import (
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -111,4 +113,35 @@ func matchPersist(rel, pat string) bool {
 	default:
 		return strings.TrimSuffix(rel, "/") == pat
 	}
+}
+
+// hostShellState: agent state directories whose entries the agent's CLI
+// sources as shell code, one entry per session: Claude Code's shell
+// snapshots and its sessions' env files. A new entry is the sandbox
+// session's own; a change to one the real $HOME already has is shell
+// code a host session runs, so it is flagged and shown, never folded.
+var hostShellState = []string{".claude/shell-snapshots/", ".claude/session-env/"}
+
+// shellStateFlag marks such a change; Diff shows its contents.
+const shellStateFlag = "shell code a host session sources"
+
+// touchesHostShellState reports whether a home change is in a
+// hostShellState directory and touches an entry the real $HOME already
+// has (the first name below the directory), or deletes or replaces the
+// directory itself while the real one holds entries.
+func touchesHostShellState(home string, c Change) bool {
+	rel := strings.TrimSuffix(filepath.ToSlash(c.Rel), "/")
+	for _, d := range hostShellState {
+		dir := strings.TrimSuffix(d, "/")
+		if rel == dir {
+			ents, _ := os.ReadDir(filepath.Join(home, dir))
+			return (c.Kind == Deleted || c.Kind == Replaced) && len(ents) > 0
+		}
+		if rest, ok := strings.CutPrefix(rel, d); ok {
+			first, _, _ := strings.Cut(rest, "/")
+			_, err := os.Lstat(filepath.Join(home, dir, first))
+			return err == nil
+		}
+	}
+	return false
 }

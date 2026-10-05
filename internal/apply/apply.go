@@ -146,7 +146,7 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		for _, c := range cf {
 			fmt.Fprintf(o.Out, "  %s: %s\n", c.Path, c.Reason)
 		}
-		return fmt.Errorf("nothing applied; rerun with --force to overwrite, or discard the session")
+		return fmt.Errorf("nothing applied; leave these out with apply -i or --only, rerun with --force to overwrite them, or discard the session")
 	}
 	if len(picked) > 0 {
 		gen, err := beginGeneration(s)

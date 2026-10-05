@@ -84,9 +84,9 @@ func mark(c review.Change) string {
 
 func display(c review.Change) string {
 	if c.Layer == "home" {
-		return "~/" + c.Rel
+		return review.OneLine("~/" + c.Rel)
 	}
-	return c.Rel
+	return review.OneLine(c.Rel)
 }
 
 func withoutOutside(fl []string) []string {

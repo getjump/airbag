@@ -215,6 +215,6 @@ func WriteAttention(w io.Writer, r Report) {
 	}
 	fmt.Fprintf(w, "Session %s: %d things need a decision\n", r.Session.ID, len(r.Attention))
 	for _, a := range r.Attention {
-		fmt.Fprintf(w, "  %-9s %-40s %s\n", a.What, clip(a.Target, 40), a.Why)
+		fmt.Fprintf(w, "  %-9s %-40s %s\n", a.What, clip(OneLine(a.Target), 40), a.Why)
 	}
 }
