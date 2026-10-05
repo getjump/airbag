@@ -2630,8 +2630,8 @@ func TestRollbackLeavingPathsStaysStoppedUntilTheSessionIsSaved(t *testing.T) {
 	if err := Rollback(s, nil, &out); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied {
-		t.Fatalf("the next rollback left the session applied: %+v %v", saved, err)
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied || saved.Baseline.IsZero() {
+		t.Fatalf("the next rollback left the session applied, or its baseline as it was: %+v %v", saved, err)
 	}
 	if g, err := lastGeneration(s); err != nil || g == nil || g.Stopped || !g.Partial {
 		t.Fatalf("the journal is not settled: %+v %v", g, err)

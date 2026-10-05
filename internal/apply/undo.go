@@ -862,14 +862,14 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	// journal gone or settled, a crash would leave apply to run the
 	// outbox on the rolled-back tree. A rollback that finishes an earlier
 	// partial one sets right a session that crash left applied.
+	// Setting it right resets the baseline too: the save that would
+	// have was lost with the crash.
 	save := !partial
 	if s.Status == session.StatusApplied {
 		s.Status, save = session.StatusStopped, true
 	}
-	if !partial {
-		s.Baseline = time.Now()
-	}
 	if save {
+		s.Baseline = time.Now()
 		if err := s.Save(); err != nil {
 			return err
 		}
