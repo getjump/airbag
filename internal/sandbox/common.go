@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf16"
 
 	"golang.org/x/sys/unix"
 
@@ -58,17 +59,23 @@ var DefaultPassthrough = []string{
 // ClaudeProjectSlug is how Claude Code names a project's directory under
 // ~/.claude/projects: the absolute path with every character that is not
 // an ASCII letter or digit turned into "-" (so /home/me/my_proj becomes
-// -home-me-my-proj; Claude Code 2.1.x, as its docs describe). Claude
+// -home-me-my-proj; Claude Code 2.1.x, as its docs describe). It
+// replaces with a JavaScript regular expression, which matches UTF-16
+// code units: a character outside the Basic Multilingual Plane, an
+// emoji say, is two of them and turns into "--". Claude
 // Code hashes names longer than maxSlug; airbag does not mirror the
 // hash, so such a directory is not passed through: it stays in the
 // branch, the safe side (docs/macos.md).
 func ClaudeProjectSlug(dir string) string {
-	return strings.Map(func(r rune) rune {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
-			return r
+	var b strings.Builder
+	for _, u := range utf16.Encode([]rune(dir)) {
+		if u >= 'a' && u <= 'z' || u >= 'A' && u <= 'Z' || u >= '0' && u <= '9' {
+			b.WriteByte(byte(u))
+		} else {
+			b.WriteByte('-')
 		}
-		return '-'
-	}, dir)
+	}
+	return b.String()
 }
 
 const maxSlug = 200

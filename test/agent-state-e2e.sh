@@ -174,6 +174,19 @@ grep -q "changed on the host during the session" "$T/apply.out" || fail "no conf
 grep -q '"ok"' "$HOME/.claude.json" && fail "mcpServers reached the real file despite the conflict"
 "$AIRBAG" discard --yes >/dev/null
 
+# A fifth session rewrites the config while the host removes it: the
+# branch copy reads as a new file, and apply reports the removal rather
+# than bringing the file back.
+"$AIRBAG" run -- sh "$T/agent4.sh" >"$T/run.out" 2>&1 || fail "fifth agent run failed:
+$(cat "$T/run.out")"
+rm "$HOME/.claude.json"
+"$AIRBAG" apply --yes >"$T/apply.out" 2>&1 && fail "apply brought back a config the host removed:
+$(cat "$T/apply.out")"
+grep -q "deleted on the host during the session" "$T/apply.out" || fail "no conflict for the removal: $(cat "$T/apply.out")"
+[ ! -e "$HOME/.claude.json" ] || fail "the removed config is back"
+"$AIRBAG" discard --yes >/dev/null
+printf '{"numStartups":9,"userID":"seed"}\n' > "$HOME/.claude.json"
+
 # A session stored by an older airbag passed ~/.claude.json and all of
 # ~/.claude/projects/ through; resumed now, it keeps only today's list.
 "$AIRBAG" run -- true >"$T/run.out" 2>&1 || fail "legacy setup run failed: $(cat "$T/run.out")"

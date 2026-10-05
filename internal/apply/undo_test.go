@@ -1031,3 +1031,44 @@ func TestRollbackKeepsTempNamedFileAfterFinishedApply(t *testing.T) {
 		t.Fatalf("version of %s from before the apply = %q", d, prev)
 	}
 }
+
+// An agent config that was in the real $HOME when a run began and that
+// the host removed since reads as a new file in the branch; apply
+// reports the removal instead of bringing the old settings back. A
+// config that was never there is an ordinary new file.
+func TestConflictConfigRemovedOnHost(t *testing.T) {
+	for _, existed := range []bool{true, false} {
+		t.Setenv("AIRBAG_HOME", t.TempDir())
+		home := t.TempDir()
+		s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		real := filepath.Join(home, ".claude.json")
+		if existed {
+			if err := os.WriteFile(real, []byte(`{"mcpServers":{"x":{}}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		review.NoteHostConfigs(s)
+		branch := filepath.Join(s.HomeUpper(), ".claude.json")
+		if err := os.MkdirAll(filepath.Dir(branch), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(branch, []byte(`{"mcpServers":{"x":{}},"numStartups":1}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if existed {
+			if err := os.Remove(real); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var found bool
+		for _, c := range Conflicts(s, mustScan(t, s)) {
+			found = found || c.Path == real && c.Reason == "deleted on the host during the session"
+		}
+		if found != existed {
+			t.Errorf("existed at the run's start=%v: conflict=%v", existed, found)
+		}
+	}
+}

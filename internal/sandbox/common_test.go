@@ -16,6 +16,8 @@ func TestClaudeProjectSlug(t *testing.T) {
 		"/home/me/my_proj":     "-home-me-my-proj",
 		"/home/me/a.b c/d":     "-home-me-a-b-c-d",
 		"/home/me/caf\u00e9/x": "-home-me-caf--x",
+		// Outside the BMP: two UTF-16 code units, two dashes.
+		"/work/\U0001F600": "-work---",
 	} {
 		if got := ClaudeProjectSlug(in); got != want {
 			t.Errorf("slug(%q) = %q, want %q", in, got, want)

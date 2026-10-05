@@ -178,7 +178,7 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   included. Review shows it by key name, never value: keys the CLI rewrites every
   run (counters, ids, migration markers) as `benign key(s)`, which need no decision;
   an MCP server, a tool permission, a trust decision or the logged-in account flagged
-  `persist`; any other key as `unknown key(s)`. If Claude Code on the host rewrote the
+  `persist`; any other key as `unknown key(s)`. If the host rewrote or removed the
   file during the session, apply reports it as a conflict. On the macOS prototype,
   which has no branch of `$HOME`, this narrowing is only partial; see
   [docs/macos.md](docs/macos.md).

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"unicode/utf8"
+
+	"github.com/getjump/airbag/internal/session"
 )
 
 // Agents keep some state in a JSON file in $HOME that they rewrite every
@@ -91,6 +93,23 @@ var jsonConfigs = []jsonConfig{
 			"projects.*.hasTrustDialogAccepted", "projects.*.hasClaudeMdExternalIncludesApproved",
 		},
 	},
+}
+
+// NoteHostConfigs records, before a run, which jsonConfig files exist in
+// the real $HOME (session.Meta.HostConfigs). The agent's CLI rewrites
+// them every run, so the branch copies one up; if the host removes the
+// real file later, that copy reads as a new file, and the record is how
+// apply tells the two apart.
+func NoteHostConfigs(s *session.Session) {
+	if !s.OverHome {
+		return
+	}
+	for i := range jsonConfigs {
+		p := filepath.Join(s.Home, jsonConfigs[i].path)
+		if _, err := os.Lstat(p); err == nil && !slices.Contains(s.HostConfigs, p) {
+			s.HostConfigs = append(s.HostConfigs, p)
+		}
+	}
 }
 
 func configFor(rel string) *jsonConfig {

@@ -278,6 +278,9 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 	}
+	// Which agent configs the real $HOME has now, so apply can tell a
+	// host removal from a new file (sandbox.Run saves the session).
+	review.NoteHostConfigs(s)
 	code, err := sandbox.Run(s, proxy.Allowlist(s.Allow), pol)
 	if err != nil {
 		return code, err
