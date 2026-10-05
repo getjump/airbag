@@ -122,7 +122,7 @@ func TestRelayCapsWhatItOpens(t *testing.T) {
 				return
 			}
 			accepted.Add(1)
-			defer c.Close()
+			t.Cleanup(func() { _ = c.Close() })
 		}
 	}()
 	relay := unixListener(t, "relay")
@@ -135,7 +135,7 @@ func TestRelayCapsWhatItOpens(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer c.Close()
+		t.Cleanup(func() { _ = c.Close() })
 		if !closedSoon(c, 150*time.Millisecond) {
 			alive++
 		}
