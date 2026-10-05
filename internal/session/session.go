@@ -138,9 +138,9 @@ type DirID struct {
 }
 
 // RecordDirID is DirIDOf for a root a session begins with: a directory
-// on an overlay is copied up first (settle). A root that cannot be (one
-// the user may write below but does not own, say), or that settle cannot
-// tell is on an overlay or not, is refused: the first write below would
+// on an overlay is copied up first (settle). A root that cannot be (a
+// read-only overlay, or one the user may not write), or that settle
+// cannot tell is on an overlay or not, is refused: the first write below would
 // change its creation time, an overlay records no generation, and
 // without either a directory made again in its place, with the same
 // inode number, would pass for it.

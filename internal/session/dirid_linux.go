@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"syscall"
 
@@ -61,16 +62,27 @@ func gen(p string) uint64 {
 // image, has another. It fails on an overlay where that cannot be done.
 func settle(p string) error {
 	var fs unix.Statfs_t
-	if err := unix.Statfs(p, &fs); err != nil {
+	err := unix.Statfs(p, &fs)
+	for err == unix.EINTR { // a FUSE or network filesystem can be interrupted
+		err = unix.Statfs(p, &fs)
+	}
+	if err != nil {
 		return fmt.Errorf("cannot tell whether it is on an overlay: %w", err)
 	}
 	if fs.Type != unix.OVERLAYFS_SUPER_MAGIC {
 		return nil
 	}
 	var st unix.Stat_t
-	err := unix.Lstat(p, &st)
+	err = unix.Lstat(p, &st)
 	if err == nil {
 		err = unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{st.Atim, st.Mtim}, unix.AT_SYMLINK_NOFOLLOW)
+	}
+	if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+		// Times of one's choosing take the owner; the current time takes
+		// only write access, as a root the user writes below but does not
+		// own has. It copies the root up all the same, and the first
+		// write at the top would have set those times anyway.
+		err = unix.UtimesNanoAt(unix.AT_FDCWD, p, nil, unix.AT_SYMLINK_NOFOLLOW)
 	}
 	if err != nil {
 		return fmt.Errorf("on an overlay, and cannot be copied up to its top layer (%w), so a directory made again in its place could not be told from it; run airbag in a directory you own", err)
