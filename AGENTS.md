@@ -86,10 +86,11 @@ Check every change against the boundary:
 - Are there tests that fail without the guard? A check that no test exercises
   can go away unnoticed.
 
-Report P0 and P1 problems only: a way past the boundary, a failure that
-opens, data lost on apply or rollback, docs that promise what the code does
-not do. Give each one a file:line and the safe fix. No style nits; gofmt and
-the linters cover style.
+Lead with what matters most: a way past the boundary, a failure that opens,
+data lost on apply or rollback, docs that promise what the code does not do.
+Smaller correctness problems (a hang, a wrong error, a missing test for a
+guard) are worth reporting too. Give each one a file:line and the safe fix.
+No style nits; gofmt and the linters cover style.
 
 ## Agents working on this repository
 
