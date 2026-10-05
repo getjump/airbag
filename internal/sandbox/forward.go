@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"io"
 	"net"
 	"strconv"
 	"sync"
@@ -12,6 +11,7 @@ import (
 	"github.com/getjump/airbag/internal/models"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/proxy"
 )
 
 // forwarder relays the agent's connections to a tcp:// target: a dev
@@ -20,22 +20,41 @@ import (
 // logged as net.tcp. Once the session reads a secret, connections to
 // targets off this machine are refused and open ones closed; loopback
 // targets stay, since data written there does not leave the machine.
+//
+// The relay runs on the host side, so what the agent can hold open is
+// bounded: a connection closes after idle with no byte either way, or
+// once one side has finished sending and the other has been quiet for
+// drain (proxy.ForwardIdle, proxy.Drain), and at most max are open (or
+// being dialled) at once.
 type forwarder struct {
 	f    session.Forward
 	gate *policy.Gate
 	log  *effects.Log
+	// dial connects to the target; a test replaces it to act while a
+	// connection is dialled.
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	idle, drain time.Duration
+	max         int
 
 	mu      sync.Mutex
+	n       int // connections admitted
 	open    map[net.Conn]bool
+	pending map[net.Conn]bool
 	stopped bool
 	ctx     context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 }
 
+// maxForwardConns caps the connections relayed to one tcp:// target at
+// once: well above a database client's pool.
+const maxForwardConns = 256
+
 func newForwarder(f session.Forward, gate *policy.Gate, log *effects.Log) *forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &forwarder{f: f, gate: gate, log: log, open: map[net.Conn]bool{}, ctx: ctx, cancel: cancel}
+	return &forwarder{ctx: ctx, cancel: cancel, f: f, gate: gate, log: log, dial: (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		idle: proxy.ForwardIdle, drain: proxy.Drain, max: maxForwardConns, open: map[net.Conn]bool{}, pending: map[net.Conn]bool{}}
 }
 
 func (fw *forwarder) target() string { return net.JoinHostPort(fw.f.Host, strconv.Itoa(fw.f.Port)) }
@@ -68,17 +87,27 @@ func (fw *forwarder) serve(l net.Listener) {
 
 func (fw *forwarder) handle(c net.Conn) {
 	defer c.Close()
-	fw.mu.Lock()
-	if fw.stopped {
-		fw.mu.Unlock()
-		return
-	}
-	fw.open[c] = true
-	fw.mu.Unlock()
-	defer func() { fw.mu.Lock(); delete(fw.open, c); fw.mu.Unlock() }()
 	deny := func(reason string) {
 		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "deny", Reason: reason})
 	}
+	// The slot comes first: a connection waiting on the checks (a policy
+	// that asks serializes them) holds a goroutine and a host fd too.
+	fw.mu.Lock()
+	if fw.stopped || fw.max > 0 && fw.n >= fw.max {
+		fw.mu.Unlock()
+		deny("too many open connections")
+		return
+	}
+	fw.n++
+	fw.pending[c] = true
+	fw.mu.Unlock()
+	defer func() {
+		fw.mu.Lock()
+		fw.n--
+		delete(fw.open, c)
+		delete(fw.pending, c)
+		fw.mu.Unlock()
+	}()
 	if fw.gate.Tainted() != "" && !fw.local() {
 		deny("secret-taint")
 		return
@@ -87,17 +116,28 @@ func (fw *forwarder) handle(c net.Conn) {
 		deny(d.Rule)
 		return
 	}
-	up, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(fw.ctx, "tcp", fw.target())
+	up, err := fw.dial(fw.ctx, "tcp", fw.target())
 	if err != nil {
 		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "allow", Reason: "unreachable: " + err.Error()})
 		return
 	}
 	defer up.Close()
+	fw.mu.Lock()
+	delete(fw.pending, c)
+	if fw.stopped {
+		fw.mu.Unlock()
+		return
+	}
+	fw.open[c] = true
+	fw.mu.Unlock()
+	// A secret read while this connection was dialled: cut has run
+	// already and did not see it.
+	if fw.gate.Tainted() != "" && !fw.local() {
+		deny("secret-taint")
+		return
+	}
 	fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "allow"})
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(up, c); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
-	<-done
+	proxy.Relay(c, up, fw.idle, fw.drain)
 }
 
 // cut closes open connections to a target off this machine.
@@ -106,11 +146,13 @@ func (fw *forwarder) cut() {
 		return
 	}
 	fw.mu.Lock()
-	defer fw.mu.Unlock()
+	var logged []effects.Effect
 	for c := range fw.open {
 		_ = c.Close()
-		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "cut", Reason: "secret-taint"})
+		logged = append(logged, effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "cut", Reason: "secret-taint"})
 	}
+	fw.mu.Unlock()
+	_ = fw.log.AddAll(logged) // after every close: the read waits for them
 }
 
 func (fw *forwarder) close() {
@@ -118,6 +160,9 @@ func (fw *forwarder) close() {
 	fw.stopped = true
 	fw.cancel()
 	for c := range fw.open {
+		c.Close()
+	}
+	for c := range fw.pending {
 		c.Close()
 	}
 	fw.mu.Unlock()

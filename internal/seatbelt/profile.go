@@ -32,6 +32,9 @@ type Profile struct {
 	NoRead []string
 	// NoWrite: paths under Write that stay read-only.
 	NoWrite []string
+	// NoWriteRegex: like NoWrite, for every path a regular expression
+	// matches (e.g. every project's memory directory).
+	NoWriteRegex []string
 	// Ports: localhost TCP ports the agent may connect to.
 	Ports []int
 	// Sockets: unix sockets the agent may connect to (airbag's control
@@ -120,6 +123,9 @@ func (p Profile) String() string {
 	line(`(allow file-write-data file-ioctl (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))`)
 	for _, d := range p.NoWrite {
 		line("(deny file-write* (subpath %s))", Quote(d))
+	}
+	for _, re := range p.NoWriteRegex {
+		line(`(deny file-write* (regex #"%s"))`, strings.ReplaceAll(re, `"`, `\"`))
 	}
 
 	for _, port := range p.Ports {

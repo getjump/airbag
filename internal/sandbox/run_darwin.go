@@ -77,6 +77,17 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		}
 	}
 
+	rel, err := filepath.Rel(s.Workspace, s.Cwd)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		rel = "."
+	}
+	// The agent works in the clone, so Claude Code names its project
+	// directory after the clone's path: that one passes through too, and
+	// is made with its memory/ before the run (the profile does not let
+	// the agent create project directories).
+	pass, holes := ClaudeProjectState(filepath.Join(s.CloneDir(), rel), s.CloneDir())
+	s.Passthrough = appendNew(s.Passthrough, pass...)
+	s.BranchHoles = appendNew(s.BranchHoles, holes...)
 	prof, err := macProfile(s, port, tmp, cache)
 	if err != nil {
 		return 1, err
@@ -100,10 +111,6 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 			return 127, fmt.Errorf("%s: not found", path)
 		}
 		path = p
-	}
-	rel, err := filepath.Rel(s.Workspace, s.Cwd)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		rel = "."
 	}
 	cmd := exec.CommandContext(context.Background(), "/usr/bin/sandbox-exec", append([]string{"-p", prof.String(), path}, s.Argv[1:]...)...) //nolint:gosec // the command the user asked to run, inside the profile
 	cmd.Dir = filepath.Join(s.CloneDir(), rel)

@@ -55,7 +55,6 @@ func runPullRequest(s *session.Session, box *outbox.Box, it outbox.Intent, in *b
 	if err != nil {
 		return pendingPR(it, o, err)
 	}
-	// Recheck the local selection after the potentially slow remote read.
 	if err := selectedCommit(s, *it.Request.PullRequest); err != nil {
 		return pendingPR(it, o, err)
 	}

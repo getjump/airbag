@@ -5,11 +5,17 @@
 package sandbox
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf16"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/mirror"
@@ -21,15 +27,203 @@ import (
 // InitArg is the hidden subcommand that runs inside the namespaces.
 const InitArg = "__airbag_init"
 
-// DefaultPassthrough: agent state that must survive a discarded branch
-// (transcripts, logs, login refreshes). Paths are relative to $HOME.
-// A trailing slash marks a directory, which airbag creates if missing.
+// DefaultPassthrough: the agent state that bypasses the branch because
+// it must survive a discard for the user's own workflow and the agent
+// CLI never executes, loads as config, or restores it into other files.
+// Everything else agents keep in $HOME goes through the branch, so it is
+// shown in review and dropped on discard. Paths are relative to $HOME; a
+// trailing slash marks a directory, which airbag creates if missing.
+//
+// This is the fixed part. The current workspace's transcript directory
+// also passes through, but its path depends on the working directory, so
+// ClaudeProjectState computes it per session (and keeps its memory/ in
+// the branch). The passthrough stored on a session is the two combined.
+//
+//   - .claude/.credentials.json, .codex/auth.json: the login, so a
+//     discard does not log the user out.
+//   - .codex/sessions/, .codex/log/: Codex transcripts for resume. Codex
+//     keys sessions by date (sessions/<year>/<month>/…), not by project,
+//     so unlike Claude Code's they cannot be narrowed to this workspace;
+//     a discard keeps every project's Codex transcripts (docs/macos.md).
+//
+// Review reads the real $HOME as the host's own (it follows links there
+// to classify changes, review.homeAliases, and reads the real configs
+// through them), so a passthrough path, which the agent writes in the
+// real $HOME, must never lie at or above a path review watches or a
+// config's directory.
+//
+// What used to pass through and now goes through the branch: the whole
+// .claude/projects/ tree (only the current workspace's dir passes now),
+// .claude/sessions/, file-history/, session-env/, shell-snapshots/,
+// todos/, statsig/, backups/, debug/, ide/, plans/, and .claude.json
+// (review shows its changed keys by class, see agentconfig.go).
 var DefaultPassthrough = []string{
-	".claude/projects/", ".claude/sessions/", ".claude/file-history/", ".claude/session-env/",
-	".claude/shell-snapshots/", ".claude/todos/", ".claude/statsig/", ".claude/backups/",
-	".claude/debug/", ".claude/ide/", ".claude/plans/",
-	".claude/.credentials.json", ".claude.json",
+	".claude/.credentials.json",
 	".codex/sessions/", ".codex/log/", ".codex/auth.json",
+}
+
+// ClaudeProjectSlug is how Claude Code names a project's directory under
+// ~/.claude/projects: the absolute path with every character that is not
+// an ASCII letter or digit turned into "-" (so /home/me/my_proj becomes
+// -home-me-my-proj; Claude Code 2.1.x, as its docs describe). It
+// replaces with a JavaScript regular expression, which matches UTF-16
+// code units: a character outside the Basic Multilingual Plane, an
+// emoji say, is two of them and turns into "--". Claude
+// Code hashes names longer than maxSlug; airbag does not mirror the
+// hash, so such a directory is not passed through: it stays in the
+// branch, the safe side (docs/macos.md).
+func ClaudeProjectSlug(dir string) string {
+	var b strings.Builder
+	for _, u := range utf16.Encode([]rune(dir)) {
+		if u >= 'a' && u <= 'z' || u >= 'A' && u <= 'Z' || u >= '0' && u <= '9' {
+			b.WriteByte(byte(u))
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
+const maxSlug = 200
+
+// NarrowPassthrough drops what a session stored before the passthrough
+// was narrowed: a session created by an older airbag passed ~/.claude.json
+// and all of ~/.claude/projects/ (and more) through, and resuming it must
+// not keep that. What stays is today's DefaultPassthrough and the
+// per-project transcript directories, each with its memory/ hole.
+func NarrowPassthrough(s *session.Session) {
+	pass := append([]string{}, DefaultPassthrough...)
+	var holes []string
+	for _, p := range s.Passthrough {
+		if projectDir(p) {
+			pass = appendNew(pass, p)
+			holes = appendNew(holes, p+"memory")
+		}
+	}
+	s.Passthrough, s.BranchHoles = pass, holes
+}
+
+// projectDir reports whether p is one project's directory,
+// ".claude/projects/<slug>/", as ClaudeProjectState makes them.
+func projectDir(p string) bool {
+	slug, ok := strings.CutPrefix(p, ".claude/projects/")
+	if !ok || !strings.HasSuffix(slug, "/") {
+		return false
+	}
+	slug = strings.TrimSuffix(slug, "/")
+	return slug != "" && slug != "." && slug != ".." && !strings.Contains(slug, "/")
+}
+
+// AddClaudeProjectState merges the transcript passthrough and memory
+// holes for cwd (and the workspace root) into the session's, without
+// duplicates. A resumed session may run from another directory of the
+// same repository, whose transcript directory must pass through too.
+//
+// A directory that an earlier run of this session already changed or
+// removed in the branch (it was not passed through then) stays in the
+// branch: passing it through now would hide that change from the run but
+// not from review, and apply would then fight the real transcripts. Its
+// transcripts from this run reach the real $HOME only if applied.
+func AddClaudeProjectState(s *session.Session, cwd string) {
+	pass, holes := ClaudeProjectState(cwd, s.Workspace)
+	var kept []string
+	for _, p := range pass {
+		if !slices.Contains(s.Passthrough, p) {
+			if branchChanged(filepath.Join(s.HomeUpper(), strings.TrimSuffix(p, "/"))) {
+				fmt.Fprintf(os.Stderr, "airbag: ~/%s was changed earlier in this session; it stays in the branch (its transcripts reach ~ only if applied)\n", strings.TrimSuffix(p, "/"))
+				continue
+			}
+		}
+		kept = append(kept, p)
+	}
+	s.Passthrough = appendNew(s.Passthrough, kept...)
+	for _, h := range holes {
+		if slices.ContainsFunc(s.Passthrough, func(p string) bool { return strings.HasPrefix(h, p) }) {
+			s.BranchHoles = appendNew(s.BranchHoles, h)
+		}
+	}
+}
+
+// branchChanged reports whether an upper-layer path holds a change: a
+// file, a whiteout or an opaque directory at or below it. Plain
+// directories alone are not one: apply leaves the copied-up ancestors
+// of what it took.
+func branchChanged(root string) bool {
+	changed := false
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			changed = !(p == root && errors.Is(err, fs.ErrNotExist))
+		case !d.IsDir() || opaque(p):
+			changed = true
+		default:
+			return nil
+		}
+		return filepath.SkipAll
+	})
+	return changed
+}
+
+func opaque(p string) bool {
+	for _, attr := range []string{"user.overlay.opaque", "trusted.overlay.opaque"} {
+		buf := make([]byte, 8)
+		if n, err := unix.Lgetxattr(p, attr, buf); err == nil && n > 0 && buf[0] == 'y' {
+			return true
+		}
+	}
+	return false
+}
+
+func appendNew(list []string, add ...string) []string {
+	for _, a := range add {
+		if !slices.Contains(list, a) {
+			list = append(list, a)
+		}
+	}
+	return list
+}
+
+// ClaudeProjectState returns, for the current workspace, the transcript
+// directories that pass through to the real $HOME (so a resumed session
+// keeps the conversation across a discard) and the memory/ directories
+// inside them that stay in the branch. Claude Code writes transcripts
+// under the slug of the working directory and auto-memory under the slug
+// of the git root, so both are covered when they differ. memory/ holds
+// instructions loaded into later sessions, so review shows it and a
+// discard drops it, like any branch change.
+//
+// cwd and root are absolute paths; root is the git top-level (or "").
+func ClaudeProjectState(cwd, root string) (pass, holes []string) {
+	seen := map[string]bool{}
+	// Claude Code names a directory by the physical path (its cwd is
+	// resolved), while airbag may have been started from a path through a
+	// symlink: both spellings are covered.
+	dirs := []string{cwd, root}
+	for _, d := range []string{cwd, root} {
+		if d == "" {
+			continue
+		}
+		if r, err := filepath.EvalSymlinks(d); err == nil && r != d {
+			dirs = append(dirs, r)
+		}
+	}
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		slug := ClaudeProjectSlug(d)
+		if len(slug) > maxSlug {
+			continue // Claude Code hashes it; see ClaudeProjectSlug
+		}
+		base := ".claude/projects/" + slug + "/"
+		if seen[base] {
+			continue
+		}
+		seen[base] = true
+		pass = append(pass, base)
+		holes = append(holes, base+"memory")
+	}
+	return pass, holes
 }
 
 // DefaultHidden: credentials the agent never sees. Paths are relative
@@ -259,3 +453,68 @@ func shimNames(s *session.Session) []string {
 	}
 	return names
 }
+
+// noSymlinkSoFar is noSymlink for the components of rel that exist: a
+// path about to be created must not lead through a symlink.
+func noSymlinkSoFar(root, rel string) error {
+	p := root
+	for _, part := range strings.Split(filepath.Clean(rel), "/") {
+		p = filepath.Join(p, part)
+		st, err := os.Lstat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("~/%s is a symlink", strings.TrimPrefix(p, root+"/"))
+		}
+	}
+	return nil
+}
+
+// maxPassFiles bounds the files checked for hard links in a passed-
+// through path; past it the path counts as one that may hold one.
+var maxPassFiles = 100000
+
+// hardLinks returns the files at or below p (relative to root) that
+// have more than one name: written through their name here, a file
+// whose other name is in the branch (~/.bashrc), or in a branch hole
+// inside p (the project's memory/), would change for real. full is
+// false when p could not be walked in full (too many files, an
+// unreadable directory): it may hold more.
+func hardLinks(root, p string) (linked []string, full bool) {
+	n, top := 0, filepath.Join(root, p)
+	err := filepath.WalkDir(top, func(q string, d fs.DirEntry, err error) error {
+		if err != nil {
+			switch {
+			case q == top && d == nil && (errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOTDIR)):
+				return nil // nothing there (a component is a file, say)
+			case q != top && errors.Is(err, fs.ErrNotExist):
+				return nil // gone since it was listed
+			}
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if n++; n > maxPassFiles {
+			return errTooMany
+		}
+		var st unix.Stat_t
+		if err := unix.Lstat(q, &st); errors.Is(err, unix.ENOENT) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if st.Nlink > 1 {
+			rel, _ := filepath.Rel(root, q)
+			linked = append(linked, rel)
+		}
+		return nil
+	})
+	return linked, err == nil
+}
+
+var errTooMany = errors.New("too many files")

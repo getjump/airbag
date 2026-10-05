@@ -247,6 +247,28 @@ func TestAbsentDraftFlagDoesNotAttestPublishedRequest(t *testing.T) {
 	}
 }
 
+func TestPublishedPRMatchesRepositoryInGitHubsSpelling(t *testing.T) {
+	p := operation.PullRequest{Repository: "getjump/airbag", Base: "main", Head: "work", HeadCommit: strings.Repeat("a", 40), Title: "Fix", Body: "body"}
+	response := func(repo, head string) []byte {
+		data, err := json.Marshal(map[string]any{"number": 7, "html_url": "https://github.com/" + repo + "/pull/7", "title": p.Title, "body": p.Body, "draft": false,
+			"head": map[string]any{"ref": head, "sha": p.HeadCommit, "repo": map[string]string{"full_name": repo}},
+			"base": map[string]any{"ref": p.Base, "repo": map[string]string{"full_name": repo}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	if _, valid := exactPR(response("GetJump/Airbag", p.Head), p); !valid {
+		t.Fatal("GitHub's own spelling of the repository was not attested")
+	}
+	if _, valid := exactPR(response("getjump/airbag2", p.Head), p); valid {
+		t.Fatal("another repository was attested")
+	}
+	if _, valid := exactPR(response("GetJump/Airbag", "Work"), p); valid {
+		t.Fatal("a branch differing in case was attested")
+	}
+}
+
 func TestPartialApplyDoesNotSelectAnEntireCommitForPublication(t *testing.T) {
 	s, b, it := prFixture(t)
 	log, _ := mockPR(t, *it.Request.PullRequest, "ok")

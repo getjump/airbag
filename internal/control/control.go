@@ -18,6 +18,7 @@ import (
 	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
+	"github.com/getjump/airbag/internal/netcap"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/steps"
@@ -55,13 +56,30 @@ func (s *Server) HTTPServer() *http.Server {
 	mux.HandleFunc("POST /hook/{agent}/{event}", s.hook)
 	mux.HandleFunc("POST /exec", s.exec)
 	mux.HandleFunc("POST /taint", s.taint)
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// The agent can open connections here, and each one held is a
+	// goroutine and a file descriptor on the host side: at most
+	// MaxConns are open at once, a request must arrive whole within a
+	// minute (its header within 10 s) and its answer be taken within
+	// one, and a connection waiting for its next request is closed after
+	// two.
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: time.Minute,
+		WriteTimeout: time.Minute, IdleTimeout: 2 * time.Minute}
 	return srv
 }
 
+// MaxConns caps the connections to the control socket open at once.
+// Each shim, hook and secret read holds one while it asks; past the cap
+// one more is closed, and the shim goes on as it does when the host
+// does not answer.
+const MaxConns = 128
+
+// maxBody bounds a request's body: an intent, a deferred command or a
+// hook's payload.
+const maxBody = 4 << 20
+
 func (s *Server) intent(w http.ResponseWriter, r *http.Request) {
 	var in outbox.Intent
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -83,7 +101,9 @@ func (s *Server) intent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, in)
 }
 
-func (s *Server) Serve(l net.Listener) error { return s.HTTPServer().Serve(l) }
+// LimitListener retains the control endpoint's connection bound for host owners.
+func LimitListener(l net.Listener) net.Listener { return netcap.Limit(l, MaxConns) }
+func (s *Server) Serve(l net.Listener) error    { return s.HTTPServer().Serve(LimitListener(l)) }
 
 // writeJSON answers with v. Once the status is out, a failed write is
 // the client's to see, as a short body.
@@ -107,7 +127,7 @@ type DeferReply struct {
 // stops the command later: it runs only on content that matches.
 func (s *Server) deferCmd(w http.ResponseWriter, r *http.Request) {
 	var in outbox.Intent
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&in); err != nil || len(in.Argv) == 0 {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil || len(in.Argv) == 0 {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -254,7 +274,7 @@ func inside(root, p string) (string, bool) {
 // call changed which files.
 func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 	var p agents.HookPayload
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&p); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&p); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -307,7 +327,12 @@ func (s *Server) taint(w http.ResponseWriter, r *http.Request) {
 	if s.Gate != nil {
 		s.Gate.Taint(t.File)
 	}
-	s.Log.Add(effects.Effect{Kind: "secret.read", Target: t.File, Verdict: "taint", Reason: t.Exe})
+	// A resumed session reads the label back from this entry
+	// (restoreLabels): the read goes on only once it is written.
+	if err := s.Log.AddAll([]effects.Effect{{Kind: "secret.read", Target: t.File, Verdict: "taint", Reason: t.Exe}}); err != nil {
+		http.Error(w, "the read could not be logged: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	_, _ = w.Write([]byte("{}"))
 }
 
@@ -339,7 +364,7 @@ type Exec struct {
 
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	var e Exec
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&e); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&e); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -434,13 +459,21 @@ func post(timeout time.Duration, url string, body io.Reader) (*http.Response, er
 	return client(timeout).Do(req)
 }
 
+// transport is shared by every call. A Transport of its own per call
+// would keep that call's connection open and idle, with two goroutines
+// on this side and one on the host's, for as long as the process runs:
+// the sandbox's init reports each secret read through here.
+var transport = &http.Transport{
+	DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", socketPath())
+	},
+	MaxIdleConns:    2,
+	IdleConnTimeout: 30 * time.Second,
+}
+
 func client(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout, Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socketPath())
-		},
-	}}
+	return &http.Client{Timeout: timeout, Transport: transport}
 }
 
 // Defer asks whether a call waits in the outbox; from inside the

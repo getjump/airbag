@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"container/list"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -27,14 +28,27 @@ import (
 // CA signs the certificates the proxy shows for the hosts it
 // intercepts. It is made for one session and lives in memory: the key
 // is never written anywhere. Name constraints limit it to the bound
-// hosts, so even its key could not vouch for any other site.
+// hosts, so even its key could not vouch for any other site, and its
+// extended key usage to TLS servers, so not for a client or for code.
 type CA struct {
 	cert *x509.Certificate
 	key  *ecdsa.PrivateKey
 	PEM  []byte
 
-	mu    sync.Mutex
-	certs map[string]*tls.Certificate
+	mu     sync.Mutex
+	leaves map[string]*list.Element // host → its *cachedLeaf in order
+	order  list.List                // most recently used first
+	max    int
+}
+
+// maxLeaves bounds the certificates a CA keeps. Under a wildcard
+// binding (*.example.com) the agent picks the names, and each would
+// otherwise stay; a leaf dropped is made again when next asked for.
+const maxLeaves = 256
+
+type cachedLeaf struct {
+	host string
+	cert *tls.Certificate
 }
 
 func NewCA(hosts []string) (*CA, error) {
@@ -48,6 +62,7 @@ func NewCA(hosts []string) (*CA, error) {
 		NotBefore:                   time.Now().Add(-time.Hour),
 		NotAfter:                    time.Now().Add(30 * 24 * time.Hour),
 		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		ExtKeyUsage:                 []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid:       true,
 		IsCA:                        true,
 		MaxPathLenZero:              true,
@@ -65,6 +80,20 @@ func NewCA(hosts []string) (*CA, error) {
 		}
 		tmpl.PermittedDNSDomains = append(tmpl.PermittedDNSDomains, strings.TrimPrefix(host, "*"))
 	}
+	// A constraint limits only the kind of name it is about: with DNS
+	// names alone the CA could still vouch for any IP address, with
+	// addresses alone for any DNS name. So the kind the hosts do not use
+	// is closed: every address is excluded, or the only DNS name allowed
+	// is "invalid", which never names a real site (RFC 6761).
+	if len(tmpl.PermittedIPRanges) == 0 {
+		tmpl.ExcludedIPRanges = []*net.IPNet{
+			{IP: net.IPv4zero.To4(), Mask: net.CIDRMask(0, 32)},
+			{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
+		}
+	}
+	if len(tmpl.PermittedDNSDomains) == 0 {
+		tmpl.PermittedDNSDomains = []string{"invalid"}
+	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		return nil, err
@@ -74,7 +103,7 @@ func NewCA(hosts []string) (*CA, error) {
 		return nil, err
 	}
 	return &CA{cert: cert, key: key, PEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		certs: map[string]*tls.Certificate{}}, nil
+		leaves: map[string]*list.Element{}, max: maxLeaves}, nil
 }
 
 func serial() *big.Int {
@@ -82,12 +111,15 @@ func serial() *big.Int {
 	return n
 }
 
-// leaf returns a certificate for host, signed by the CA.
+// leaf returns a certificate for host, signed by the CA. The most
+// recently used ones are kept; one dropped from the cache stays valid
+// for a handshake that holds it already.
 func (c *CA) leaf(host string) (*tls.Certificate, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if t, ok := c.certs[host]; ok {
-		return t, nil
+	if e, ok := c.leaves[host]; ok {
+		c.order.MoveToFront(e)
+		return e.Value.(*cachedLeaf).cert, nil
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -95,15 +127,17 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial(),
-		Subject:      pkix.Name{CommonName: host},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     c.cert.NotAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	if ip := net.ParseIP(host); ip != nil {
+		// No common name: OpenSSL checks a leaf's CN as a DNS name when it
+		// has no DNS name, and "10.0.0.1" is not among the permitted ones.
 		tmpl.IPAddresses = []net.IP{ip}
 	} else {
+		tmpl.Subject = pkix.Name{CommonName: host}
 		tmpl.DNSNames = []string{host}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, &key.PublicKey, c.key)
@@ -111,7 +145,12 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	t := &tls.Certificate{Certificate: [][]byte{der, c.cert.Raw}, PrivateKey: key}
-	c.certs[host] = t
+	c.leaves[host] = c.order.PushFront(&cachedLeaf{host: host, cert: t})
+	for c.order.Len() > c.max {
+		e := c.order.Back()
+		c.order.Remove(e)
+		delete(c.leaves, e.Value.(*cachedLeaf).host)
+	}
 	return t, nil
 }
 
@@ -120,10 +159,16 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 // the value in place of the placeholder, and goes on to the real host
 // over a TLS connection verified against this machine's roots. The
 // response comes back with the value masked.
-func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, live *creds.Live) {
+//
+// The connection is the flow f: bytes either way on it or on its
+// upstream connections keep it open. It is closed when it has waited
+// Limits.KeepAlive for its next request, or when a request in progress
+// has moved no byte for Limits.Idle (a host that stalls). A protocol
+// upgrade is refused, so no connection outlives its HTTP exchanges.
+func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, live *creds.Live, f *flow) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		http.Error(w, "airbag: cannot intercept", http.StatusInternalServerError)
+		answer(w, "airbag: cannot intercept", http.StatusInternalServerError)
 		return
 	}
 	conn, _, err := hj.Hijack()
@@ -131,7 +176,6 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 		return
 	}
 	target := r.Host
-	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	tconn := tls.Server(conn, &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"http/1.1"},
@@ -141,6 +185,10 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 			return p.CA.leaf(host)
 		},
 	})
+	if !f.hold(conn) { // not tconn: see hold
+		return // cut
+	}
+	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	_ = tconn.SetDeadline(time.Now().Add(15 * time.Second))
 	if err := tconn.HandshakeContext(context.Background()); err != nil {
 		conn.Close()
@@ -157,7 +205,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 	name, canonical := upstreamHost(target)
 	tr := &http.Transport{
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			c, err := p.dial(target, check)
+			c, err := p.dial(ctx, f, target, check)
 			if err != nil {
 				return nil, err
 			}
@@ -166,7 +214,13 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 				c.Close()
 				return nil, err
 			}
-			return tc, nil
+			// The flow holds c, under tc (see hold); a cut during the
+			// handshake failed it.
+			if f.isStopped() {
+				_ = tc.Close()
+				return nil, errStopped
+			}
+			return &watchedConn{Conn: tc, f: f}, nil
 		},
 		ResponseHeaderTimeout: 2 * time.Minute,
 		IdleConnTimeout:       time.Minute,
@@ -237,31 +291,40 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 				return
 			}
 		}
+		if req.Header.Get("Upgrade") != "" {
+			// After an upgrade (a websocket) the stream is not HTTP.
+			// Putting the placeholder back in it would mean holding up
+			// any bytes that could start the value (a "ping", when the
+			// value starts with "g"); without that, a host that echoes
+			// would hand the value to the agent. The request is refused
+			// before it reaches the host.
+			p.Log.Add(audit.Event{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "protocol upgrade: the stream cannot be checked for the credential"})
+			http.Error(w, "airbag: "+host+" is reached with a credential, and airbag does not pass a protocol upgrade (websocket) there: it could not keep the value out of the upgraded stream", http.StatusForbidden)
+			return
+		}
 		reason := ""
 		if live.Substitute(req.Header.Clone(), cloneURL(req)) {
 			reason = live.Name
 		}
 		p.Log.Add(audit.Event{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "allow", Reason: reason})
-		if req.Header.Get("Upgrade") != "" {
-			// A hijacked connection never reports closed; its end is
-			// when the proxied exchange returns.
-			defer once.Do(func() { close(closed) })
-		}
 		rp.ServeHTTP(w, req)
 	})
 
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       p.Limits.KeepAlive,
 		ConnState: func(_ net.Conn, s http.ConnState) {
 			if s == http.StateClosed {
 				once.Do(func() { close(closed) })
 			}
 		},
 	}
-	done := p.track(host, target, func() { _ = tconn.Close() })
-	defer done()
-	go func() { _ = srv.Serve(&oneConn{c: tconn}) }()
+	// The server gets the TLS connection inside a watchedConn, not as a
+	// *tls.Conn, so it does not know the connection is TLS: req.TLS is
+	// nil in the handler. Nothing here reads it; the upstream request's
+	// scheme is set in Rewrite.
+	go func() { _ = srv.Serve(&oneConn{c: &watchedConn{Conn: tconn, f: f}}) }()
 	<-closed
 	_ = srv.Close()
 }

@@ -48,9 +48,22 @@ type Conflict struct {
 // Overlay reads the live workspace, so the agent's version was based
 // on the old file; applying it would silently drop the human's edit.
 func Conflicts(s *session.Session, cs []review.Change) []Conflict {
-	since := s.Created
+	base := s.Created
 	if !s.Baseline.IsZero() {
-		since = s.Baseline
+		base = s.Baseline
+	}
+	// since is when p last matched the branch's view: the session's
+	// start, or a later apply that wrote p or a directory above it.
+	since := func(p string) time.Time {
+		t := base
+		for q := p; ; q = filepath.Dir(q) {
+			if at, ok := s.Applied[q]; ok && at.After(t) {
+				t = at
+			}
+			if q == filepath.Dir(q) {
+				return t
+			}
+		}
 	}
 	var replaced []string
 	for _, c := range cs {
@@ -67,8 +80,13 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 		exists := err == nil
 		switch c.Kind {
 		case review.Added:
-			if exists && !(c.IsDir() && st.IsDir()) {
+			switch {
+			case exists && !(c.IsDir() && st.IsDir()):
 				out = append(out, Conflict{c.Path, "created on the host during the session"})
+			case !exists && slices.Contains(s.HostConfigs, c.Path):
+				// An agent config the host removed: the branch copy
+				// reads as new, but applying it would undo the removal.
+				out = append(out, Conflict{c.Path, "deleted on the host during the session"})
 			}
 		default:
 			if !exists {
@@ -81,7 +99,7 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 				if p := changedInside(c.Path, since); p != "" {
 					out = append(out, Conflict{p, "changed on the host during the session, inside a directory the agent removed"})
 				}
-			} else if !st.IsDir() && changedAfter(c.Path, since) {
+			} else if !st.IsDir() && changedAfter(c.Path, since(c.Path)) {
 				out = append(out, Conflict{c.Path, "changed on the host during the session"})
 			}
 		}
@@ -97,13 +115,13 @@ func changedAfter(p string, t time.Time) bool {
 	return ctime(&st).After(t)
 }
 
-func changedInside(dir string, t time.Time) string {
+func changedInside(dir string, since func(string) time.Time) string {
 	found := ""
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || found != "" {
 			return filepath.SkipAll
 		}
-		if !d.IsDir() && changedAfter(p, t) {
+		if !d.IsDir() && changedAfter(p, since(p)) {
 			found = p
 		}
 		return nil
@@ -129,6 +147,33 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		return fmt.Errorf("session %s is still running", s.ID)
 	}
 	in := bufio.NewReader(o.In)
+	// What review folds in $HOME (caches, agent state) is left out: the
+	// fold is why it needs no decision, and a download cache holds code
+	// a host build runs as it is. --only naming it takes it anyway.
+	// Agent state folded under a directory the agent replaced is kept
+	// with it (~/.claude rebuilt): applying the replacement takes the
+	// host's directory away. A cache there is left out all the same; the
+	// host's copy goes to the undo journal with the rest.
+	var replaced []string
+	for _, c := range cs {
+		if c.Kind == review.Replaced && c.IsDir() && !review.Dropped(c) {
+			replaced = append(replaced, c.Path+string(filepath.Separator))
+		}
+	}
+	var kept []review.Change
+	dropped := 0
+	for _, c := range cs {
+		under := review.DroppedState(c) && slices.ContainsFunc(replaced, func(r string) bool { return strings.HasPrefix(c.Path, r) })
+		if review.Dropped(c) && !under && !homeMatches(c, o.Only, s.Home) {
+			dropped++
+			continue
+		}
+		kept = append(kept, c)
+	}
+	cs = kept
+	if dropped > 0 {
+		fmt.Fprintf(o.Out, "Leaving out %d cache and agent state files in $HOME (name one with --only to take it)\n", dropped)
+	}
 	chosen, err := choose(Units(cs), in, o)
 	if err != nil {
 		return err
@@ -140,9 +185,9 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if cf := Conflicts(s, picked); len(cf) > 0 && !o.Force {
 		fmt.Fprintf(o.Out, "Conflicts: %d files changed on the host while the agent worked:\n", len(cf))
 		for _, c := range cf {
-			fmt.Fprintf(o.Out, "  %s: %s\n", c.Path, c.Reason)
+			fmt.Fprintf(o.Out, "  %s: %s\n", review.OneLine(c.Path), c.Reason)
 		}
-		return fmt.Errorf("nothing applied; rerun with --force to overwrite, or discard the session")
+		return fmt.Errorf("nothing applied; leave these out with apply -i or --only, rerun with --force to overwrite them, or discard the session")
 	}
 	if len(picked) > 0 {
 		gen, err := beginGeneration(s)
@@ -158,6 +203,22 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		if err := gen.finish(); err != nil {
 			return err
 		}
+		// What apply wrote matches the branch from now on: a later run's
+		// change to it conflicts only with a host edit after this.
+		// A file is recorded with its own change time, which a host edit
+		// after it exceeds even on a coarse clock; the rest with now.
+		now := time.Now()
+		if s.Applied == nil {
+			s.Applied = map[string]time.Time{}
+		}
+		for _, c := range picked {
+			at := now
+			var st unix.Stat_t
+			if unix.Lstat(c.Path, &st) == nil && st.Mode&unix.S_IFMT != unix.S_IFDIR {
+				at = ctime(&st)
+			}
+			s.Applied[c.Path] = at
+		}
 	}
 	if !s.Clone {
 		forget(picked) // a clone matches the real files once they are applied
@@ -165,6 +226,17 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if gitTouched(picked) {
 		s.GitTouched = true
 	}
+	// A config this apply removed from the real $HOME, itself or with a
+	// directory above it, is not one the host removed: a later run may
+	// create it anew.
+	s.HostConfigs = slices.DeleteFunc(s.HostConfigs, func(p string) bool {
+		return slices.ContainsFunc(picked, func(c review.Change) bool {
+			// A file or link in place of a directory removes it too,
+			// though Scan calls that Modified.
+			removed := c.Kind == review.Deleted || c.Kind == review.Replaced || c.Kind == review.Modified && !c.IsDir()
+			return c.Kind == review.Deleted && c.Path == p || removed && strings.HasPrefix(p, c.Path+string(filepath.Separator))
+		})
+	})
 	if len(picked) > 0 {
 		fmt.Fprintf(o.Out, "Applied %d changes.\n", len(picked))
 	}
@@ -173,10 +245,12 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if err != nil {
 		return err
 	}
-	if len(rest) == 0 {
+	// What apply leaves out does not keep the session open.
+	left := slices.DeleteFunc(slices.Clone(rest), review.Dropped)
+	if len(left) == 0 {
 		s.Status = session.StatusApplied
 	} else {
-		fmt.Fprintf(o.Out, "%d changes stay in session %s: airbag apply -i, or airbag discard.\n", len(rest), s.ID)
+		fmt.Fprintf(o.Out, "%d changes stay in session %s: airbag apply -i, or airbag discard.\n", len(left), s.ID)
 	}
 	if err := s.Save(); err != nil {
 		return err

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/effects"
@@ -103,8 +102,8 @@ func startHostServices(s *session.Session, allow proxy.Allowlist, pol *policy.Po
 		return nil, err
 	}
 	ctl := &control.Server{Box: h.box, Log: h.Log, Steps: steps.NewTracker(s), Gate: h.Gate, Root: ep.ControlRoot}
-	h.serve(&http.Server{Handler: h.Proxy, ReadHeaderTimeout: 30 * time.Second}, pl)
-	h.serve(ctl.HTTPServer(), cl)
+	h.serve(h.Proxy.HTTPServer(), h.Proxy.LimitListener(pl))
+	h.serve(ctl.HTTPServer(), control.LimitListener(cl))
 	return h, nil
 }
 

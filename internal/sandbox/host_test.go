@@ -104,7 +104,7 @@ func TestHostServicesStopAndResume(t *testing.T) {
 
 func TestHostStartupUnwindsListener(t *testing.T) {
 	s, pol, ep := hostFixture(t)
-	// A regular file is not a usable Unix listener. Failure occurs after the
+	// An occupied directory is not a usable Unix listener. Failure occurs after the
 	// proxy acquired its listener and storage, so cleanup must unwind both.
 	if err := os.Mkdir(s.ControlSock(), 0o700); err != nil {
 		t.Fatal(err)

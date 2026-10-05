@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"github.com/getjump/airbag/operation"
 	"strconv"
+	"strings"
 )
 
 // MatchResponse checks the returned PR against all frozen fields.
@@ -28,9 +29,11 @@ func MatchResponse(data []byte, p operation.PullRequest) (string, bool) {
 	if err := json.Unmarshal(data, &response); err != nil {
 		return "", false
 	}
+	// GitHub names owners and repositories case-insensitively and answers
+	// with its own spelling of them; branches and the rest are exact.
 	wantURL := "https://github.com/" + p.Repository + "/pull/" + strconv.Itoa(response.Number)
-	valid := response.Number > 0 && response.URL == wantURL && response.Title == p.Title && response.Body == p.Body && response.Draft != nil && *response.Draft == p.Draft &&
+	valid := response.Number > 0 && strings.EqualFold(response.URL, wantURL) && response.Title == p.Title && response.Body == p.Body && response.Draft != nil && *response.Draft == p.Draft &&
 		response.Head.SHA == p.HeadCommit && response.Head.Ref == p.Head && response.Base.Ref == p.Base &&
-		response.Head.Repo.FullName == p.Repository && response.Base.Repo.FullName == p.Repository
+		strings.EqualFold(response.Head.Repo.FullName, p.Repository) && strings.EqualFold(response.Base.Repo.FullName, p.Repository)
 	return response.URL, valid
 }

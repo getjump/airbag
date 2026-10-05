@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/policy"
+	"github.com/getjump/airbag/internal/taint"
 )
 
 func TestAllowlist(t *testing.T) {
@@ -147,13 +149,11 @@ func TestConnectTunnel(t *testing.T) {
 	if err := c.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := br.ReadByte(); err == nil {
-		t.Fatal("Close left the hijacked CONNECT tunnel open")
+	if _, err := br.ReadByte(); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("Close left the hijacked CONNECT tunnel open: %v", err)
 	}
-	stopped := false
-	done := p.track("late.example", "late.example:443", func() { stopped = true })
-	done()
-	if !stopped {
+	rec := httptest.NewRecorder()
+	if flow, done := p.admit(rec, "late.example", "late.example:443"); flow != nil || done != nil || rec.Code != http.StatusServiceUnavailable {
 		t.Fatal("a late flow survived proxy shutdown")
 	}
 }
@@ -229,6 +229,56 @@ func TestCutOnTaint(t *testing.T) {
 	}
 	if len(cuts) != 1 || !strings.HasPrefix(cuts[0], "127.0.0.1:") || !strings.HasSuffix(cuts[0], "secret-taint") {
 		t.Fatalf("cut effects = %v", cuts)
+	}
+}
+
+// A secret read after a connection's checks and before it is
+// registered: the Cut the read runs does not see it, and the check
+// after registration refuses it.
+func TestTaintWhileAdmitted(t *testing.T) {
+	target := listenTCP(t, echoConn)
+	log, path := newLog(t)
+	p := New(Allowlist{"127.0.0.1:*"}, log)
+	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	pol, err := policy.Load(t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := policy.NewGate(pol, t.TempDir())
+	p.Gate = gate
+	gate.Labels().OnAdd(func(l taint.Label, _ string) { // as the session does
+		if l == taint.Secret {
+			p.Cut(DefaultAllow, "secret-taint")
+		}
+	})
+	p.admitting = func() { gate.Mark(taint.Secret, ".env") }
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() { _ = p.Serve(l) }()
+
+	c, _, code := connectVia(t, l.Addr().String(), target)
+	c.Close()
+	if code != http.StatusForbidden {
+		t.Fatalf("CONNECT after a secret read during admit: %d, want 403", code)
+	}
+	if n := openFlows(p, 0, 2*time.Second); n != 0 {
+		t.Fatalf("%d flows open, want 0", n)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	effs, _ := effects.Read(path)
+	var got []string
+	for _, e := range effs {
+		if e.Kind == "net.egress" {
+			got = append(got, e.Verdict+" "+e.Reason)
+		}
+	}
+	if len(got) != 1 || got[0] != "deny secret-taint" {
+		t.Fatalf("net.egress effects = %q, want one deny for secret-taint", got)
 	}
 }
 

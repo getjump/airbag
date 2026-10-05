@@ -38,7 +38,9 @@ daemons to install and no new runtime/plugin protocol.
   objects. The owner manages its HTTP server/listener and calls `Proxy.Close`
   to cancel tracked requests and hijacked tunnels.
 
-No public package imports Airbag's `internal/` packages. The CLI imports and uses
+Public packages do not depend on Airbag session/runtime state or the internal
+policy loader and audit database. Proxy shares the small, stateless internal
+connection limiter with the control server. The CLI imports and uses
 these same implementations; this is not a second policy engine or handler.
 Predicted effects, observed attempts and completed operations retain their
 separate representations. Existing operation/review JSON and SQLite layouts

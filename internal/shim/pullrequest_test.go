@@ -38,4 +38,15 @@ func TestCaptureFreezesFileBodyAndCommit(t *testing.T) {
 	if _, err := capturePullRequest(args, ws); err == nil {
 		t.Fatal("accepted a directory")
 	}
+	// A benign name linked to a secret file is not read through.
+	if err := os.WriteFile(filepath.Join(ws, ".env"), []byte("TOKEN=s3cret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".env", filepath.Join(ws, "linked.md")); err != nil {
+		t.Fatal(err)
+	}
+	args[len(args)-1] = "linked.md"
+	if r, err := capturePullRequest(args, ws); err == nil {
+		t.Fatalf("read a body through a link: %q", r.PullRequest.Body)
+	}
 }

@@ -12,7 +12,7 @@ go mod edit -go=1.27.1 -require=github.com/getjump/airbag@v0.0.0 -replace="githu
 go test -mod=mod -race -v ./...
 # The reusable packages must not acquire dependencies on session/runtime code.
 if go list -mod=mod -deps github.com/getjump/airbag/operation github.com/getjump/airbag/policy github.com/getjump/airbag/outbox github.com/getjump/airbag/proxy github.com/getjump/airbag/githubpr |
-	grep -q '^github.com/getjump/airbag/internal/'; then
+	grep '^github.com/getjump/airbag/internal/' | grep -q -v '^github.com/getjump/airbag/internal/netcap$'; then
 	echo 'public SDK depends on Airbag session/runtime internals' >&2
 	exit 1
 fi
