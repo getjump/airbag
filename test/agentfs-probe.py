@@ -16,7 +16,7 @@ import tempfile
 import time
 
 
-def workload():
+def workload(require_mount=True, original=None):
     root = Path.cwd()
     checks = {}
 
@@ -110,8 +110,18 @@ def workload():
     mounts = subprocess.run(["mount"], capture_output=True, text=True, check=True).stdout
     mounted = any(str(root) in line and ("fuse" in line.lower() or "nfs" in line.lower())
                   for line in mounts.splitlines())
-    checks["real_mount"] = {"passed": mounted, "cwd": str(root),
-                            "mount": [line for line in mounts.splitlines() if str(root) in line]}
+    checks["real_mount" if require_mount else "native_filesystem"] = {
+        "passed": mounted if require_mount else not mounted, "cwd": str(root),
+        "mount": [line for line in mounts.splitlines() if str(root) in line]}
+    if original:
+        def original_denied():
+            assert root != original
+            try:
+                (original / "outside-write").write_text("must be denied")
+            except PermissionError:
+                return
+            raise AssertionError("write to original workspace was allowed")
+        check("original_workspace_write_denied", original_denied)
     for name, operation in [("cow", cow), ("create_fsync_stat_rename_read", basic),
                             ("hardlink_symlink", aliases), ("mmap_read", mapping),
                             ("local_flock", locks), ("readonly_object", readonly_object),
@@ -168,9 +178,15 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--workload", action="store_true")
     parser.add_argument("--cli-only", action="store_true")
+    parser.add_argument("--airbag", type=Path)
+    parser.add_argument("--native-workload", type=Path)
     args = parser.parse_args()
     if args.workload:
         return workload()
+    if args.native_workload:
+        return workload(require_mount=False, original=args.native_workload.resolve())
+    if args.airbag:
+        return airbag_baseline(args.airbag, args.output)
     if not args.agentfs or not args.output:
         parser.error("--agentfs and --output required")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -237,6 +253,44 @@ def main():
     (args.output / "results.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result), flush=True)
     return 1 if result["status"] == "failed" else 0
+
+
+def airbag_baseline(binary, output):
+    if not output:
+        raise ValueError("--output required for Airbag baseline")
+    output.mkdir(parents=True, exist_ok=True)
+    result = {"platform": platform.platform(), "backend": "airbag-native",
+              "status": "failed", "security_equivalence_tested": False}
+    try:
+        with tempfile.TemporaryDirectory(prefix="airbag-native-mac-") as private:
+            base = Path(private).resolve() / "base"
+            home = base.parent / "home"
+            base.mkdir()
+            home.mkdir()
+            for name in ["seed.txt", "removed.txt"]:
+                (base / name).write_text("original\n")
+            env = {"PATH": os.environ["PATH"], "HOME": str(home), "TMPDIR": private,
+                   "AIRBAG_HOME": str(base.parent / "sessions")}
+            proc = subprocess.run([str(binary.resolve()), "run", "--strict", "--",
+                                   sys.executable, str(Path(__file__).resolve()),
+                                   "--native-workload", str(base)], cwd=base, env=env,
+                                  capture_output=True, text=True, timeout=180)
+            (output / "airbag.log").write_text(proc.stdout + proc.stderr)
+            rows = [json.loads(line.split(" ", 1)[1]) for line in proc.stdout.splitlines()
+                    if line.startswith("AGENTFS_PROBE ")]
+            result["exit_code"] = proc.returncode
+            if len(rows) != 1:
+                raise RuntimeError("Airbag workload did not emit one result; see airbag.log")
+            result["checks"] = rows[0]
+            result["host_base_unchanged"] = all((base / name).read_text() == "original\n"
+                                                for name in ["seed.txt", "removed.txt"])
+            if proc.returncode == 0 and result["host_base_unchanged"]:
+                result["status"] = "passed"
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        result["error"] = str(error)
+    (output / "results.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result), flush=True)
+    return 0 if result["status"] == "passed" else 1
 
 
 if __name__ == "__main__":

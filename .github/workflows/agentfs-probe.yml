@@ -13,6 +13,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  airbag-mac:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: build real Airbag and test the same Mac filesystem workload
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag-native" ./cmd/airbag
+          python3 test/agentfs-probe.py --airbag "$RUNNER_TEMP/airbag-native" --output airbag-mac-results
+      - name: preserve Airbag baseline including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: airbag-native-macos
+          path: airbag-mac-results/
+          if-no-files-found: error
   mounted:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
