@@ -120,3 +120,20 @@ func TestOptionalRunRefusesRuntimePolicies(t *testing.T) {
 		t.Fatalf("the workspace was copied first: %v", err)
 	}
 }
+
+// Every signal the native runner forwards reaches the provider, which
+// decides how to end, and airbag goes on to stop the session: one not
+// taken would end airbag first (SIGQUIT would) and leave it running.
+func TestProviderGetsTheSignals(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	for _, sig := range []string{"INT", "QUIT", "TERM", "HUP"} {
+		script := "trap 'exit 7' " + sig + "; kill -" + sig + " $PPID; while :; do sleep 0.05; done"
+		code, err := executeProvider(sh, []string{"-c", script})
+		if err != nil || code != 7 {
+			t.Errorf("SIG%s: code %d, %v", sig, code, err)
+		}
+	}
+}

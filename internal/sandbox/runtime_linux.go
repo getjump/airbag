@@ -308,8 +308,11 @@ func executeProvider(binary string, args []string) (int, error) {
 	cmd.Env = providerEnv()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	// As the native runner does: a signal not taken here ends airbag
+	// itself (SIGQUIT, Ctrl-\, would), Pdeathsig kills the provider, and
+	// the session stays marked running with no stop or cleanup.
 	sigs := make(chan os.Signal, 8)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigs)
 	if err := cmd.Start(); err != nil {
 		return 1, err
