@@ -356,6 +356,13 @@ func TestReportNamesTrustLinks(t *testing.T) {
 	if w := why([]Change{secret}, "i-1"); !strings.Contains(w, "1 links") {
 		t.Errorf("a link to a secret file inside the workspace holds the command too: %s", w)
 	}
+	// Inside by name, outside through a link already in the real files.
+	if err := os.Symlink(t.TempDir(), filepath.Join(ws, "cache")); err != nil {
+		t.Fatal(err)
+	}
+	if w := why([]Change{link("publish", "cache/pkg")}, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("a link out through an existing link is not counted: %s", w)
+	}
 	if w := why([]Change{out}, "i-2"); strings.Contains(w, "trust-links") {
 		t.Errorf("a push names --trust-links, which does not hold it: %s", w)
 	}

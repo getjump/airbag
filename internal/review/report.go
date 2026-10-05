@@ -225,6 +225,10 @@ func linksOut(s *session.Session, cs []Change) int {
 		dir = filepath.Clean(dir)
 		return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
 	}
+	wsReal := s.WorkspaceID.Real
+	if wsReal == "" {
+		wsReal, _ = filepath.EvalSymlinks(s.Workspace)
+	}
 	n := 0
 	for _, c := range cs {
 		if c.Type != fs.ModeSymlink || c.Kind == Deleted {
@@ -238,12 +242,28 @@ func linksOut(s *session.Session, cs []Change) int {
 		if !filepath.IsAbs(t) {
 			t = filepath.Join(filepath.Dir(c.Path), t)
 		}
-		t = filepath.Clean(t)
-		if !in(t, s.Workspace) && !in(t, s.WorkspaceID.Real) || secretfs.IsSecret(strings.ToLower(filepath.Base(t))) {
+		// Through the links already in the real files, as apply will
+		// follow it: publish -> cache/pkg, with cache -> ~/.config.
+		t = resolved(filepath.Clean(t))
+		if !in(t, wsReal) || secretfs.IsSecret(strings.ToLower(filepath.Base(t))) {
 			n++
 		}
 	}
 	return n
+}
+
+// resolved is p with the links in its longest existing part followed.
+func resolved(p string) string {
+	rest := ""
+	for d := p; ; d = filepath.Dir(d) {
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			return filepath.Join(r, rest)
+		}
+		if filepath.Dir(d) == d {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(d), rest)
+	}
 }
 
 func attentionRank(what string) int {

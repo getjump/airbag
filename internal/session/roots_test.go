@@ -86,4 +86,30 @@ func TestCheckComparesBirthTime(t *testing.T) {
 	if err := other.Check(dir); err == nil || !strings.Contains(err.Error(), "another directory") {
 		t.Fatalf("a directory born at another time passed: %v", err)
 	}
+	// The same filesystem mounted again has a new device number: the
+	// creation time still tells it is the same directory.
+	remounted := id
+	remounted.Dev++
+	if err := remounted.Check(dir); err != nil {
+		t.Fatalf("a remount with the creation time unchanged was refused: %v", err)
+	}
+}
+
+// Without a creation time to tell, a device that changed is refused:
+// another filesystem mounted at the path can have a root of the same
+// inode.
+func TestCheckComparesDeviceWithoutBirthTime(t *testing.T) {
+	dir := t.TempDir()
+	id, err := DirIDOf(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id.Born = 0
+	if err := id.Check(dir); err != nil {
+		t.Fatalf("the same directory: %v", err)
+	}
+	id.Dev++
+	if err := id.Check(dir); err == nil || !strings.Contains(err.Error(), "another filesystem") {
+		t.Fatalf("another device passed: %v", err)
+	}
 }
