@@ -418,15 +418,32 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	// A client that stops sending its request body blocks the transport
 	// in a read of that body, and RoundTrip waits for it: neither the
 	// cancel nor closing the upstream ends the read. Stopping the flow
-	// ends it with a read deadline in the past. Only until the handler
-	// returns: a read that failed after that would cancel the context of
-	// the connection's next requests.
-	body := &closer{func() { _ = http.NewResponseController(w).SetReadDeadline(time.Now()) }}
-	if !f.hold(body) {
-		http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
-		return
+	// ends it with a read deadline in the past, only while the handler
+	// runs. That deadline also fails net/http's own read of the
+	// connection, which cancels the context of the connection's next
+	// requests, so once it has fired the connection serves no more: an
+	// error answer says so (stopped, below), and a response already
+	// under way is aborted.
+	wrote := false
+	if r.Body != nil && r.Body != http.NoBody {
+		body := &readStop{rc: http.NewResponseController(w), live: true}
+		if !f.hold(body) {
+			http.Error(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
+			return
+		}
+		defer func() {
+			f.release(body)
+			if body.end() && wrote {
+				panic(http.ErrAbortHandler)
+			}
+		}()
 	}
-	defer f.release(body)
+	// stopped marks an answer to a stopped flow as the connection's last.
+	stopped := func() {
+		if f.isStopped() {
+			w.Header().Set("Connection", "close")
+		}
+	}
 	out := r.Clone(ctx)
 	out.RequestURI = ""
 	for _, h := range []string{"Proxy-Connection", "Proxy-Authorization", "Connection", "Keep-Alive", "Te", "Trailer", "Upgrade"} {
@@ -444,6 +461,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	defer tr.CloseIdleConnections()
 	resp, err := tr.RoundTrip(out)
 	if err != nil {
+		stopped()
 		if !p.refuse(w, r.Host, host, err) {
 			http.Error(w, "airbag: "+err.Error(), http.StatusBadGateway) //nolint:gocritic // the return follows the if
 		}
@@ -461,7 +479,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	if !f.hold(stall) {
 		panic(http.ErrAbortHandler)
 	}
+	stopped()
 	w.WriteHeader(resp.StatusCode)
+	wrote = true
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		// The body broke off (the upstream failed, or was closed as
 		// idle or cut), or the client stopped reading: the client must

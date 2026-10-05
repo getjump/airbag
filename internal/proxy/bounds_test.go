@@ -744,3 +744,63 @@ func TestUpstreamProxyNeverAnswers(t *testing.T) {
 		})
 	}
 }
+
+// A forwarded request whose flow stopped (here: a silent upstream, idle)
+// is the connection's last: the next request on it either finds it
+// closed or is served, never answered for a context the stop canceled.
+func TestForwardStoppedFlowEndsTheConnection(t *testing.T) {
+	silent := listenTCP(t, func(c net.Conn) {
+		defer c.Close()
+		_, _ = io.Copy(io.Discard, c) // reads the request, never answers
+	})
+	good := listenTCP(t, func(c net.Conn) {
+		defer c.Close()
+		br := bufio.NewReader(c)
+		for {
+			req, err := http.ReadRequest(br)
+			if err != nil {
+				return
+			}
+			_, _ = io.Copy(io.Discard, req.Body)
+			_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+		}
+	})
+	lim := testLimits
+	lim.Idle = 300 * time.Millisecond
+	_, pa, _ := boundedProxy(t, lim)
+	for name, first := range map[string]string{
+		"get":  "GET http://" + silent + "/ HTTP/1.1\r\nHost: " + silent + "\r\n\r\n",
+		"post": "POST http://" + silent + "/ HTTP/1.1\r\nHost: " + silent + "\r\nContent-Length: 2\r\n\r\nok",
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", pa)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+			br := bufio.NewReader(c)
+			_, _ = io.WriteString(c, first)
+			resp, err := http.ReadResponse(br, nil)
+			if err != nil {
+				t.Fatalf("no answer for the stopped flow: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadGateway || !resp.Close {
+				t.Fatalf("stopped flow: status %d close %v, want 502 and the connection's last", resp.StatusCode, resp.Close)
+			}
+			for range 3 {
+				_, _ = io.WriteString(c, "GET http://"+good+"/ HTTP/1.1\r\nHost: "+good+"\r\n\r\n")
+				resp, err := http.ReadResponse(br, nil)
+				if err != nil {
+					return // closed: the client opens a new connection
+				}
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("a later request on the connection: %d %q", resp.StatusCode, b)
+				}
+			}
+		})
+	}
+}

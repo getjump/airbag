@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -202,6 +203,33 @@ func closeAll(cs map[io.Closer]bool) {
 type closer struct{ f func() }
 
 func (c *closer) Close() error { c.f(); return nil }
+
+// readStop ends a blocked read of a request body with a read deadline in
+// the past on the client connection, while live; once end has run it
+// does nothing, so it cannot reach the connection's next request.
+type readStop struct {
+	mu          sync.Mutex
+	rc          *http.ResponseController
+	live, fired bool
+}
+
+func (s *readStop) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.live {
+		s.fired = true
+		_ = s.rc.SetReadDeadline(time.Now())
+	}
+	return nil
+}
+
+// end stops s from firing and reports whether it had.
+func (s *readStop) end() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.live = false
+	return s.fired
+}
 
 var errStopped = errors.New("airbag: the connection was closed (cut, or idle too long)")
 
