@@ -2495,3 +2495,21 @@ func TestRollbackDirectoriesWaitOnlyOnTheirRoot(t *testing.T) {
 		t.Fatalf("the directory the apply made is left: %v", err)
 	}
 }
+
+// Only the numbers beginGeneration gives name a generation.
+func TestListGenerationsTakesOnlyItsOwnNames(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	for _, name := range []string{"2", "03", "+4", "-1", "0", "5.new", "6.gone"} {
+		if err := os.MkdirAll(filepath.Join(generationsDir(s), name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gs, err := listGenerations(s)
+	if err != nil || len(gs) != 1 || gs[0].n != 2 {
+		t.Fatalf("generations: %+v %v", gs, err)
+	}
+}

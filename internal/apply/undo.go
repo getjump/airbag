@@ -159,8 +159,9 @@ func listGenerations(s *session.Session) ([]genRef, error) {
 	}
 	var out []genRef
 	for _, e := range es {
+		// Only the names beginGeneration gives: not "03", "+3" or "-1".
 		n, err := strconv.Atoi(e.Name())
-		if err != nil || !e.IsDir() {
+		if err != nil || n < 1 || e.Name() != strconv.Itoa(n) || !e.IsDir() {
 			continue
 		}
 		out = append(out, genRef{n, filepath.Join(generationsDir(s), e.Name())})
