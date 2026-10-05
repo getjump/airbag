@@ -117,27 +117,36 @@ func matchPersist(rel, pat string) bool {
 
 // hostShellState: agent state directories whose entries the agent's CLI
 // sources as shell code, one entry per session: Claude Code's shell
-// snapshots and its sessions' env files. A new entry is the sandbox
-// session's own; a change to one the real $HOME already has is shell
-// code a host session runs, so it is flagged and shown, never folded.
-var hostShellState = []string{".claude/shell-snapshots/", ".claude/session-env/"}
+// snapshots and its sessions' env files. A change to an entry the real
+// $HOME already has is shell code a host session runs, so it is flagged
+// and shown, never folded. A new shell snapshot is the sandbox session's
+// own, under a name no host session uses; a session's env files are
+// found by its id, and the host can resume the sandbox's sessions by id
+// (their transcripts pass through), so every change there counts.
+var hostShellState = []struct {
+	dir string
+	all bool // a new entry counts too
+}{{".claude/shell-snapshots/", false}, {".claude/session-env/", true}}
 
 // shellStateFlag marks such a change; Diff shows its contents.
 const shellStateFlag = "shell code a host session sources"
 
-// touchesHostShellState reports whether a home change is in a
-// hostShellState directory and touches an entry the real $HOME already
-// has (the first name below the directory), or deletes or replaces the
-// directory itself while the real one holds entries.
-func touchesHostShellState(home string, c Change) bool {
-	rel := strings.TrimSuffix(filepath.ToSlash(c.Rel), "/")
+// touchesHostShellState reports whether a home change of the given kind
+// at rel is in a hostShellState directory and touches an entry the real
+// $HOME already has (the first name below the directory), or deletes or
+// replaces the directory itself while the real one holds entries.
+func touchesHostShellState(home, rel, kind string) bool {
+	rel = strings.TrimSuffix(rel, "/")
 	for _, d := range hostShellState {
-		dir := strings.TrimSuffix(d, "/")
+		dir := strings.TrimSuffix(d.dir, "/")
 		if rel == dir {
 			ents, _ := os.ReadDir(filepath.Join(home, dir))
-			return (c.Kind == Deleted || c.Kind == Replaced) && len(ents) > 0
+			return (kind == Deleted || kind == Replaced) && len(ents) > 0
 		}
-		if rest, ok := strings.CutPrefix(rel, d); ok {
+		if rest, ok := strings.CutPrefix(rel, d.dir); ok {
+			if d.all {
+				return true
+			}
 			first, _, _ := strings.Cut(rest, "/")
 			_, err := os.Lstat(filepath.Join(home, dir, first))
 			return err == nil

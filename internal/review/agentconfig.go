@@ -53,12 +53,27 @@ type jsonConfig struct {
 	path    string   // relative to $HOME
 	benign  []string // key paths the CLI rewrites on its own
 	persist []string // key paths that run code or change trust
+	// defaults: for a key path, the value the CLI writes before anything
+	// was decided, the same as no key at all (see diff).
+	defaults map[string]string
+	// shadows: a config this one, once it exists, is read instead of.
+	shadows string
 }
 
 var jsonConfigs = []jsonConfig{
-	{path: ".claude.json", benign: claudeBenign, persist: claudePersist},
+	{path: ".claude.json", benign: claudeBenign, persist: claudePersist, defaults: claudeDefaults},
 	// The legacy place, which Claude Code still reads first when it exists.
-	{path: ".claude/.config.json", benign: claudeBenign, persist: claudePersist},
+	{path: ".claude/.config.json", benign: claudeBenign, persist: claudePersist, defaults: claudeDefaults, shadows: ".claude.json"},
+}
+
+// claudeDefaults: what Claude Code writes in a new project's entry before
+// anything was decided, each in its own type. Only that exact value
+// stands for no key: an empty value of another type is a change ([] or
+// {} where false belongs reads as true in JavaScript).
+var claudeDefaults = map[string]string{
+	"projects.*.allowedTools": "[]", "projects.*.mcpContextUris": "[]", "projects.*.mcpServers": "{}",
+	"projects.*.enabledMcpjsonServers": "[]", "projects.*.disabledMcpjsonServers": "[]",
+	"projects.*.hasTrustDialogAccepted": "false", "projects.*.hasClaudeMdExternalIncludesApproved": "false",
 }
 
 // claudeBenign and claudePersist are Claude Code's global config keys,
@@ -113,10 +128,16 @@ func NoteHostConfigs(s *session.Session) {
 	if !s.OverHome {
 		return
 	}
-	for i := range jsonConfigs {
-		p := filepath.Join(s.Home, jsonConfigs[i].path)
+	note := func(p string) {
 		if _, err := os.Lstat(p); err == nil && !slices.Contains(s.HostConfigs, p) {
 			s.HostConfigs = append(s.HostConfigs, p)
+		}
+	}
+	for i := range jsonConfigs {
+		note(filepath.Join(s.Home, jsonConfigs[i].path))
+		// A config that is a link: the agent's write lands on its target.
+		if t, ok := resolveInHome(s.Home, jsonConfigs[i].path); ok {
+			note(t)
 		}
 	}
 }
@@ -222,8 +243,8 @@ func (cf *jsonConfig) diff(prefix []string, a, b json.RawMessage) []keyChange {
 	}
 	c, listed, below := cf.class(prefix)
 	if listed {
-		if empty(a) && empty(b) {
-			return nil // a listed key the CLI writes with its default, as a new project's entry has
+		if def, ok := cf.defaultFor(prefix); ok && (len(a) == 0 || canon(a) == def) && (len(b) == 0 || canon(b) == def) {
+			return nil // the CLI's own default, as a new project's entry has it: no key at all
 		}
 		return []keyChange{{prefix, c}}
 	}
@@ -241,22 +262,20 @@ func (cf *jsonConfig) diff(prefix []string, a, b json.RawMessage) []keyChange {
 	return []keyChange{{prefix, classUnknown}}
 }
 
-// empty reports an absent value or an empty one: [], {}, false or "".
-// For a key the table lists, going from one to another adds nothing: an
-// empty permission list allows nothing, and an empty deny list is no list.
-// null is not empty, as in object.
-func empty(v json.RawMessage) bool {
-	switch canon(v) {
-	case "", "[]", "{}", "false", `""`:
-		return true
+// defaultFor returns the canonical default the table gives a key path.
+func (cf *jsonConfig) defaultFor(path []string) (string, bool) {
+	for p, def := range cf.defaults {
+		if patternMatch(strings.Split(p, "."), path) {
+			return canon([]byte(def)), true
+		}
 	}
-	return false
+	return "", false
 }
 
 // configAt returns the jsonConfig a home change is: the config itself,
-// or the file a real config that is a symlink points to inside $HOME (a
-// dotfiles directory, say), which the agent's CLI writes through the
-// link. nil when it is neither.
+// or the file a real config that is a symlink, or lies below one, leads
+// to inside $HOME (a dotfiles directory, say), which the agent's CLI
+// writes through the link (resolveInHome). nil when it is neither.
 func configAt(c Change) *jsonConfig {
 	if cf := configFor(filepath.ToSlash(c.Rel)); cf != nil {
 		return cf
@@ -266,15 +285,7 @@ func configAt(c Change) *jsonConfig {
 		return nil
 	}
 	for i := range jsonConfigs {
-		real := filepath.Join(home, jsonConfigs[i].path)
-		t, err := os.Readlink(real)
-		if err != nil {
-			continue
-		}
-		if !filepath.IsAbs(t) {
-			t = filepath.Join(filepath.Dir(real), t)
-		}
-		if filepath.Clean(t) == c.Path {
+		if t, ok := resolveInHome(home, jsonConfigs[i].path); ok && t == c.Path {
 			return &jsonConfigs[i]
 		}
 	}
@@ -343,10 +354,30 @@ func configNotes(c Change) (notes []string, ok bool) {
 	if m := widened(c); m != "" {
 		notes = append(notes, m)
 	}
+	if m := shadowing(c); m != "" {
+		notes = append(notes, m)
+	}
 	if k := byClass[classBenign]; len(k) > 0 {
 		notes = append(notes, benignNote+strings.Join(k, ", "))
 	}
 	return notes, true
+}
+
+// shadowing names a new config that the CLI reads instead of an existing
+// one: the trust and settings in that one stop applying. "" if none.
+func shadowing(c Change) string {
+	cf := configAt(c)
+	if cf == nil || cf.shadows == "" || c.Kind != Added {
+		return ""
+	}
+	home, ok := strings.CutSuffix(c.Path, string(filepath.Separator)+c.Rel)
+	if !ok {
+		return ""
+	}
+	if _, err := os.Lstat(filepath.Join(home, cf.shadows)); err != nil {
+		return ""
+	}
+	return "new, read instead of ~/" + cf.shadows
 }
 
 // widened names a mode change that lets other users write the config,

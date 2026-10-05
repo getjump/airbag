@@ -181,6 +181,10 @@ var buildDirs = []string{"bin/", "build/", "dist/", "target/", "out/", "node_mod
 
 func classify(s *session.Session, cs []Change) {
 	secrets := knownSecrets(s.Workspace)
+	var aliases []homeAlias
+	if s.OverHome {
+		aliases = homeAliases(s.Home)
+	}
 	for i := range cs {
 		c := &cs[i]
 		rel := filepath.ToSlash(c.Rel)
@@ -188,11 +192,22 @@ func classify(s *session.Session, cs []Change) {
 			rel += "/"
 		}
 		table := persistWSTable
+		// The names the change stands for: its own, and in $HOME the
+		// watched paths whose link leads to it (homeAliases).
+		names := []string{rel}
 		if c.Layer == "home" {
 			table = persistHomeTable
 			c.Flags = append(c.Flags, "outside workspace")
+			for _, a := range aliasRels(aliases, c.Path) {
+				if c.IsDir() {
+					a += "/"
+				}
+				names = append(names, a)
+			}
 		}
-		if (persistReason(rel, table) != "" || slices.Contains(persistNames, path.Base(rel))) && !strings.HasSuffix(rel, ".sample") {
+		if slices.ContainsFunc(names, func(n string) bool {
+			return (persistReason(n, table) != "" || slices.Contains(persistNames, path.Base(n))) && !strings.HasSuffix(n, ".sample")
+		}) {
 			c.Flags = append(c.Flags, "persist")
 		}
 		if c.Layer == "home" {
@@ -201,11 +216,13 @@ func classify(s *session.Session, cs []Change) {
 			// or changes trust, unknown keys listed plainly, and benign
 			// counters with no flag, so they need no decision.
 			c.Flags = append(c.Flags, configFlags(*c)...)
-			if touchesHostShellState(s.Home, *c) {
+			if slices.ContainsFunc(names, func(n string) bool { return touchesHostShellState(s.Home, n, c.Kind) }) {
 				c.Flags = append(c.Flags, "persist", shellStateFlag)
 			}
 			// Project memory is loaded into later sessions.
-			if agentMemory(rel) || (c.Kind == Deleted || c.Kind == Replaced) && holdsMemory(c.Path, rel) {
+			if slices.ContainsFunc(names, func(n string) bool {
+				return agentMemory(n) || (c.Kind == Deleted || c.Kind == Replaced) && holdsMemory(c.Path, n)
+			}) {
 				c.Flags = append(c.Flags, "agent instructions")
 			}
 		}

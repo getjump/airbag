@@ -144,7 +144,7 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if cf := Conflicts(s, picked); len(cf) > 0 && !o.Force {
 		fmt.Fprintf(o.Out, "Conflicts: %d files changed on the host while the agent worked:\n", len(cf))
 		for _, c := range cf {
-			fmt.Fprintf(o.Out, "  %s: %s\n", c.Path, c.Reason)
+			fmt.Fprintf(o.Out, "  %s: %s\n", review.OneLine(c.Path), c.Reason)
 		}
 		return fmt.Errorf("nothing applied; leave these out with apply -i or --only, rerun with --force to overwrite them, or discard the session")
 	}

@@ -547,9 +547,10 @@ func TestSymlinkedConfig(t *testing.T) {
 	}
 }
 
-// A change to a shell snapshot or session env file the host already has
-// is shell code a host session sources: flagged, listed and shown. A new
-// one is the sandbox session's own and stays folded.
+// A change to a shell snapshot the host already has is shell code a host
+// session sources: flagged, listed and shown; a new snapshot is the
+// sandbox session's own and stays folded. Any change to a session's env
+// files counts, a new session's too: the host can resume it by id.
 func TestHostShellStateIsFlagged(t *testing.T) {
 	s, _, _ := cfgSession(t)
 	writeCfg(t, filepath.Join(s.Home, ".claude/shell-snapshots/snapshot-bash-1.sh"), "export PATH=/usr/bin\n")
@@ -568,7 +569,7 @@ func TestHostShellStateIsFlagged(t *testing.T) {
 	}
 	want := map[string]bool{
 		".claude/shell-snapshots/snapshot-bash-1.sh": true, ".claude/shell-snapshots/snapshot-bash-2.sh": false,
-		".claude/session-env/host-id/hook-1.sh": true, ".claude/session-env/sandbox-id/hook-0.sh": false,
+		".claude/session-env/host-id/hook-1.sh": true, ".claude/session-env/sandbox-id/hook-0.sh": true,
 	}
 	for _, c := range cs {
 		w, ok := want[c.Rel]
@@ -622,5 +623,93 @@ func TestHoldsMemoryGlobCharacters(t *testing.T) {
 		if !holdsMemory(real, rel) {
 			t.Errorf("%s: memory not found", rel)
 		}
+	}
+}
+
+// Only a key's own default stands for no key: an empty value of another
+// type is a change, since JavaScript reads [] and {} as true.
+func TestDefaultsAreTyped(t *testing.T) {
+	for _, tc := range []struct{ real, branch, key string }{
+		{`{"projects":{"/w":{}}}`, `{"projects":{"/w":{"hasTrustDialogAccepted":[]}}}`, `projects["/w"].hasTrustDialogAccepted`},
+		{`{"projects":{"/w":{"hasTrustDialogAccepted":false}}}`, `{"projects":{"/w":{"hasTrustDialogAccepted":{}}}}`, `projects["/w"].hasTrustDialogAccepted`},
+		{`{}`, `{"projects":{"/w":{"hasClaudeMdExternalIncludesApproved":{}}}}`, `projects["/w"].hasClaudeMdExternalIncludesApproved`},
+		{`{}`, `{"projects":{"/w":{"allowedTools":{}}}}`, `projects["/w"].allowedTools`},
+		{`{}`, `{"bypassPermissionsModeAccepted":[]}`, "bypassPermissionsModeAccepted"},
+		{`{}`, `{"oauthAccount":{}}`, "oauthAccount"},
+		{`{}`, `{"mcpServers":{}}`, "mcpServers"},
+	} {
+		_, realPath, branchPath := cfgSession(t)
+		writeCfg(t, realPath, tc.real)
+		writeCfg(t, branchPath, tc.branch)
+		c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
+		if flags := configFlags(c); !slices.Contains(flags, "persist key(s): "+tc.key) {
+			t.Errorf("%s over %s: flags = %q", tc.branch, tc.real, flags)
+		}
+	}
+}
+
+// A new legacy config is read instead of ~/.claude.json, whose trust and
+// settings then stop applying: that needs a decision.
+func TestLegacyConfigShadows(t *testing.T) {
+	s, realPath, _ := cfgSession(t)
+	writeCfg(t, realPath, `{"numStartups":1}`)
+	writeCfg(t, filepath.Join(s.HomeUpper(), ".claude/.config.json"), `{"numStartups":1}`)
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == ".claude/.config.json" && slices.Contains(c.Flags, "new, read instead of ~/.claude.json") {
+			return
+		}
+	}
+	t.Fatalf("changes = %+v", cs)
+}
+
+// A new config that other users can write is flagged like a widened one.
+func TestNewConfigWritableByOthers(t *testing.T) {
+	_, realPath, branchPath := cfgSession(t)
+	writeCfg(t, branchPath, `{"numStartups":1}`)
+	if err := os.Chmod(branchPath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath, Kind: Added, Mode: 0o666}
+	if flags := strings.Join(configFlags(c), "; "); !strings.Contains(flags, "writable by other users") {
+		t.Errorf("flags = %q", flags)
+	}
+}
+
+// Deleting or replacing a shell-state directory that holds the host's
+// entries is flagged; one with nothing of the host's is not.
+func TestHostShellStateDirectory(t *testing.T) {
+	home := t.TempDir()
+	writeCfg(t, filepath.Join(home, ".claude/shell-snapshots/snapshot-bash-1.sh"), "")
+	for kind, want := range map[string]bool{Deleted: true, Replaced: true, Modified: false} {
+		if got := touchesHostShellState(home, ".claude/shell-snapshots/", kind); got != want {
+			t.Errorf("%s: %v, want %v", kind, got, want)
+		}
+	}
+	if touchesHostShellState(t.TempDir(), ".claude/shell-snapshots/", Deleted) {
+		t.Error("an empty host directory counted")
+	}
+}
+
+// A config reached through a chain of links, or a linked directory on
+// the way, resolves to its real file too.
+func TestLinkedConfigChains(t *testing.T) {
+	s, realPath, _ := cfgSession(t)
+	h := s.Home
+	writeCfg(t, filepath.Join(h, "src/dotfiles/claude.json"), `{"numStartups":1}`)
+	symlink(t, "src/dotfiles", filepath.Join(h, "dotfiles"))
+	symlink(t, "dotfiles/claude.json", filepath.Join(h, ".claude-link"))
+	symlink(t, ".claude-link", realPath)
+	target := filepath.Join(h, "src/dotfiles/claude.json")
+	c := Change{Layer: "home", Rel: "src/dotfiles/claude.json", Path: target, Upper: filepath.Join(s.HomeUpper(), "src/dotfiles/claude.json"), Kind: Modified}
+	writeCfg(t, c.Upper, `{"numStartups":2,"mcpServers":{"x":{"command":"evil"}}}`)
+	if flags := configFlags(c); !slices.Contains(flags, "persist key(s): mcpServers") {
+		t.Errorf("flags = %q", flags)
+	}
+	if d := diffOf(c); strings.Contains(d, "evil") {
+		t.Errorf("diff printed a value: %q", d)
 	}
 }

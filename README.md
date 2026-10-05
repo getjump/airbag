@@ -172,21 +172,26 @@ airbag's anyway. See [docs/bwrap-backend.md](docs/bwrap-backend.md).
   `$HOME` — other projects' transcripts, sessions, shell snapshots, file history,
   todos, caches — goes through the branch: review folds it into one `agent state`
   line and a discard drops it. The exception is shell code Claude Code sources: a
-  change to a shell snapshot or a session's env file the host already has is flagged
-  `persist` and shown in full; the sandbox session's own new ones stay folded. A project's `memory/` (instructions loaded into later
+  change to a shell snapshot the host already has, and any change to a session's env
+  files (the host can resume a session by id), is flagged `persist` and shown in full;
+  the sandbox session's own new snapshots stay folded. A project's `memory/` (instructions loaded into later
   sessions) stays in the branch too, flagged `agent instructions`, so you see it and
   a discard drops it. `~/.claude.json` goes through the branch too, the whole file:
   nothing in it reaches the real file before apply, Claude Code's own counters
   included. Review shows it by key name, never value: keys the CLI rewrites every
   run (counters, ids, migration markers) as `benign key(s)`, which need no decision;
   an MCP server, a tool permission, a trust decision or the logged-in account flagged
-  `persist`; any other key as `unknown key(s)`. A listed key written with an empty
-  default (`[]`, `{}`, `false`), as a new project's entry has, is no change; a mode
+  `persist`; any other key as `unknown key(s)`. A new project's entry, written with the
+  CLI's own defaults (`false`, `[]`, `{}`, each where it belongs), is no change; a mode
   that lets other users write the file is flagged. The legacy `~/.claude/.config.json`
-  is reviewed the same way, and so is the file a symlinked `~/.claude.json` points to
-  inside `$HOME` (apply then writes a regular file in place of the link). If the host
+  is reviewed the same way, and a new one, which the CLI reads instead of
+  `~/.claude.json`, is flagged. If the host
   rewrote or removed the file during the session, apply reports it as a conflict; leave
-  it out with `apply -i` or `--only`. On the macOS prototype,
+  it out with `apply -i` or `--only`. Dotfiles kept as links into a directory inside
+  `$HOME` (`~/.bashrc`, `~/.claude` or `~/.claude.json` pointing into `~/dotfiles`) are
+  followed: a change written through the link is found at the link's target and
+  classified as the path it stands for (apply writes a regular file in place of a link
+  it replaces). On the macOS prototype,
   which has no branch of `$HOME`, this narrowing is only partial; see
   [docs/macos.md](docs/macos.md).
 

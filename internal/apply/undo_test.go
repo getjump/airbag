@@ -1116,3 +1116,43 @@ func TestAppliedConfigDeletionIsNotAHostRemoval(t *testing.T) {
 		t.Fatalf("conflicts for a config the agent created after an applied deletion: %v", cf)
 	}
 }
+
+// A config that is a link into $HOME: the agent's write lands on the
+// link's target, and if the host removes that target during the session,
+// apply reports it rather than bringing it back.
+func TestConflictLinkedConfigRemovedOnHost(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	target := filepath.Join(home, "dotfiles", "claude.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("dotfiles/claude.json", filepath.Join(home, ".claude.json")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review.NoteHostConfigs(s)
+	branch := filepath.Join(s.HomeUpper(), "dotfiles", "claude.json")
+	if err := os.MkdirAll(filepath.Dir(branch), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(branch, []byte(`{"mcpServers":{"x":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, c := range Conflicts(s, mustScan(t, s)) {
+		found = found || c.Path == target && c.Reason == "deleted on the host during the session"
+	}
+	if !found {
+		t.Fatal("no conflict for a linked config's target the host removed")
+	}
+}
