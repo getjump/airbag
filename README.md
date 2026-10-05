@@ -399,11 +399,12 @@ The command runs on your machine, with your environment and credentials, after
   (`/tmp` in the sandbox is not yours); pass text inline or put the file in the
   workspace; a call that names a secret file (`.env`, a key) is refused, and so is
   one that names the session's own storage;
-- while links the session put in your files lead into your home outside the
-  workspace, to a secret file or nowhere (`notes.md -> .env`, `docs -> ~/.config`),
-  the commands wait, whatever their arguments say: an argument that is or runs
-  through such a link would read or write there without showing it; remove or
-  replace the links and they run;
+- while links the session put in your files lead out of the workspace or to a
+  secret file (`notes.md -> .env`, `docs -> ~/.config`, a venv's interpreter in
+  `~/.local`), the commands wait, whatever their arguments say: an argument that
+  is or runs through such a link would read or write there without showing it.
+  Links to system files anyone may read (`/usr/bin/python3`) do not count. Remove
+  or replace the links, or after inspecting them run `airbag apply --trust-links`;
 - after a failure the rest wait, since a pull request without its push means
   nothing; after `apply --branch` they all wait, because the working tree is not
   the result; if the session changed `.git/config` or hooks, they wait for

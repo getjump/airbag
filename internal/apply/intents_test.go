@@ -275,12 +275,18 @@ func TestCmdWaitsForLinksOut(t *testing.T) {
 		{"from home into home", func(_, home string) (string, error) {
 			return filepath.Join(home, "notes.md"), os.Symlink(filepath.Join(home, ".netrc-like"), filepath.Join(home, "notes.md"))
 		}, false},
+		{"to the user's data outside home", func(ws, _ string) (string, error) {
+			// Another disk, or the session's own storage under /var/tmp.
+			elsewhere := t.TempDir()
+			_ = os.WriteFile(filepath.Join(elsewhere, "data.txt"), []byte("mine\n"), 0o600)
+			return filepath.Join(ws, "notes.md"), os.Symlink(filepath.Join(elsewhere, "data.txt"), filepath.Join(ws, "notes.md"))
+		}, false},
+		{"to a system directory above user data", func(ws, home string) (string, error) {
+			return filepath.Join(ws, "all"), os.Symlink(filepath.Dir(home), filepath.Join(ws, "all"))
+		}, false},
 		{"inside the workspace", func(ws, _ string) (string, error) {
 			_ = os.WriteFile(filepath.Join(ws, "body.md"), []byte("ok\n"), 0o644)
 			return filepath.Join(ws, "notes.md"), os.Symlink("body.md", filepath.Join(ws, "notes.md"))
-		}, true},
-		{"to a system file", func(ws, _ string) (string, error) {
-			return filepath.Join(ws, "python"), os.Symlink("/bin/sh", filepath.Join(ws, "python"))
 		}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -317,6 +323,77 @@ func TestCmdWaitsForLinksOut(t *testing.T) {
 				t.Fatalf("held after the link was removed: %q", out.String())
 			}
 		})
+	}
+}
+
+// A link to a system file (a venv's interpreter in /usr/bin) holds
+// nothing: anyone may read it and the user cannot replace it. Root may
+// write anywhere, so for root nothing outside the workspace is public.
+func TestCmdLinkToSystemFileRuns(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("as root every place is writable")
+	}
+	s, box := testBox(t)
+	s.Home = filepath.Dir(s.Workspace)
+	log := tool(t, "pubtool", "0")
+	link := filepath.Join(s.Workspace, "python")
+	if err := os.Symlink("/bin/sh", link); err != nil {
+		t.Fatal(err)
+	}
+	s.Applied = map[string]time.Time{link: time.Now()}
+	_, _ = box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: s.Workspace})
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if ran(log) == "" {
+		t.Fatalf("held by a link to a system file: %q", out.String())
+	}
+}
+
+// Through the real apply: a link the agent made in a new directory is
+// recorded and holds the session's commands until the user trusts it.
+func TestApplyRecordsLinksThatHoldCommands(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	elsewhere := t.TempDir()
+	if err := os.WriteFile(filepath.Join(elsewhere, "python"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(s.CloneDir(), ".venv/bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(elsewhere, "python"), filepath.Join(s.CloneDir(), ".venv/bin/python")); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	log := tool(t, "pubtool", "0")
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: s.CloneDir()})
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if !strings.Contains(out.String(), ".venv/bin/python") || !strings.Contains(out.String(), "--trust-links") {
+		t.Fatalf("not held by the applied link: %q", out.String())
+	}
+	out.Reset()
+	if err := Apply(s, nil, box, Options{TrustLinks: true, In: strings.NewReader("y\n"), Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if ran(log) == "" || status(t, box, it.ID) != outbox.Done {
+		t.Fatalf("--trust-links did not run it: %q", out.String())
 	}
 }
 

@@ -35,8 +35,11 @@ type Options struct {
 	// TrustGit runs the session's pushes although the session changed
 	// .git/config or git hooks; hooks stay disabled.
 	TrustGit bool
-	In       io.Reader
-	Out      io.Writer
+	// TrustLinks runs the session's deferred commands although links it
+	// put in the files lead out of the workspace (linksOut).
+	TrustLinks bool
+	In         io.Reader
+	Out        io.Writer
 }
 
 type Conflict struct {
@@ -356,7 +359,8 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	if err != nil {
 		return err
 	}
-	failed := "" // after a failure the rest wait: a PR without its push means nothing
+	failed := ""       // after a failure the rest wait: a PR without its push means nothing
+	var links []string // the session's links out, looked for once
 	for _, it := range intents {
 		if it.Status == outbox.Running {
 			// A run was recorded but not its end: airbag stopped mid-push.
@@ -385,7 +389,10 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 		case outbox.KindPush:
 			status, err = runPush(s, box, it, risky, in, o)
 		case outbox.KindCmd:
-			status, err = runCmd(s, box, it, risky, linksOut(s), in, o)
+			if links == nil && !o.TrustLinks {
+				links = linksOut(s)
+			}
+			status, err = runCmd(s, box, it, risky, links, in, o)
 		default:
 			status, err = reject(box, it, "unknown kind "+it.Kind, o)
 		}
@@ -507,10 +514,10 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, l
 			"name the file in the workspace instead, or run it yourself", a, s.ID), o)
 	}
 	if len(links) > 0 {
-		fmt.Fprintf(o.Out, "intent %s (`%s`) left pending: session %s put links in your files that lead into your home, "+
-			"to a secret file or nowhere: %s. The command could read or write through them, which its arguments do not show. "+
-			"Remove or replace them, then `airbag apply %s` runs it; or run it yourself\n",
-			it.ID, line, s.ID, strings.Join(links, ", "), s.ID)
+		fmt.Fprintf(o.Out, "intent %s (`%s`) left pending: session %s put links in your files that lead out of the workspace "+
+			"or to a secret file: %s. The command could read or write through them, which its arguments do not show. "+
+			"Inspect them, then remove or replace them, or run `airbag apply --trust-links %s` if they are what you want\n",
+			it.ID, line, s.ID, listLinks(links), s.ID)
 		return outbox.Pending, nil
 	}
 	rels := make([]string, 0, len(it.Files))
@@ -581,21 +588,21 @@ func hostDir(s *session.Session, dir string) string {
 	return dir
 }
 
-// linksOut lists the links this session put in the real files that
-// lead into $HOME outside the workspace, to a secret file, or nowhere
-// (a write would create what they name): link and where it leads. A
-// deferred command is confirmed by its arguments, and an argument that
-// is, or runs through, such a link reads or writes there without
-// showing it (notes.md -> ~/.env, docs -> ~/.config). Each is checked
-// as it is now: one the user removed or replaced no longer counts.
+// linksOut lists the links this session put in the real files that a
+// deferred command could read or write private data through: link and
+// where it leads. A deferred command is confirmed by its arguments, and
+// an argument that is, or runs through, such a link reaches its target
+// without showing it (notes.md -> ~/.env, docs -> ~/.config). A link is
+// harmless only when it stays in the workspace, or leads to a file anyone
+// may read that the user neither owns nor may replace, or to a directory
+// under a system root; all else counts, the user's home, other disks and
+// the session's own storage included. Places are compared as files, not
+// as names, so case and firmlinks on macOS do not matter. Each link is
+// checked as it is now: one the user removed or replaced no longer counts.
 func linksOut(s *session.Session) []string {
-	realWS, err := filepath.EvalSymlinks(s.Workspace)
+	ws, err := os.Stat(s.Workspace)
 	if err != nil {
-		realWS = s.Workspace
-	}
-	realHome, err := filepath.EvalSymlinks(s.Home)
-	if err != nil {
-		realHome = s.Home
+		return []string{s.Workspace + " (missing)"}
 	}
 	paths := make([]string, 0, len(s.Applied))
 	for p := range s.Applied {
@@ -608,27 +615,89 @@ func linksOut(s *session.Session) []string {
 		if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
 			continue
 		}
-		t, err := filepath.EvalSymlinks(p)
-		if err != nil {
-			// Dangling: where a write through it would land.
-			text, rerr := os.Readlink(p)
-			dir, derr := filepath.EvalSymlinks(filepath.Dir(p))
-			ok := rerr == nil && derr == nil
-			if ok {
-				if filepath.IsAbs(text) {
-					dir = "/"
-				}
-				t, ok = follow(dir, text)
-			}
-			if !ok {
-				out = append(out, p+" -> (nowhere)")
-				continue
-			}
-		}
-		home := s.Home != "" && within(t, realHome) && !within(t, realWS)
-		if home || secretfs.IsSecret(strings.ToLower(filepath.Base(t))) {
+		t, ok := linkTarget(p)
+		switch {
+		case !ok:
+			out = append(out, p+" -> (nowhere)")
+		case secretfs.IsSecret(strings.ToLower(filepath.Base(t))):
+			out = append(out, p+" -> "+t)
+		case inside(t, ws):
+		case !public(t):
 			out = append(out, p+" -> "+t)
 		}
+	}
+	return out
+}
+
+// linkTarget is where link p leads, the part that does not exist yet
+// joined on as written; ok is false for a loop or a link on the way
+// that leads nowhere.
+func linkTarget(p string) (string, bool) {
+	if t, err := filepath.EvalSymlinks(p); err == nil {
+		return t, true
+	}
+	text, err := os.Readlink(p)
+	if err != nil {
+		return "", false
+	}
+	dir := "/"
+	if !filepath.IsAbs(text) {
+		if dir, err = filepath.EvalSymlinks(filepath.Dir(p)); err != nil {
+			return "", false
+		}
+	}
+	return follow(dir, text)
+}
+
+// inside reports whether p, or the nearest part of it that exists, is
+// below the directory root, comparing files rather than names.
+func inside(p string, root os.FileInfo) bool {
+	for d := p; ; d = filepath.Dir(d) {
+		if fi, err := os.Stat(d); err == nil && os.SameFile(fi, root) {
+			return true
+		}
+		if filepath.Dir(d) == d {
+			return false
+		}
+	}
+}
+
+// systemRoots hold what the system installs; a directory there is the
+// same on every machine and not the user's.
+var systemRoots = []string{"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/nix/store", "/System"}
+
+// public reports whether p is somewhere a program may read without
+// learning anything of the user's, and may not write: a file anyone may
+// read, owned by someone else, in a directory the user cannot write; or
+// a directory under a system root (what is below another directory, such
+// as /home, is not known). Something that does not exist yet is public
+// only if the user cannot create it.
+func public(p string) bool {
+	var st unix.Stat_t
+	if unix.Stat(p, &st) != nil {
+		d := p
+		for unix.Stat(d, &st) != nil && filepath.Dir(d) != d {
+			d = filepath.Dir(d)
+		}
+		return unix.Access(d, unix.W_OK) != nil
+	}
+	if st.Mode&unix.S_IFMT == unix.S_IFDIR {
+		for _, r := range systemRoots {
+			if p == r || strings.HasPrefix(p, r+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	return int64(st.Uid) != int64(os.Getuid()) && st.Mode&0o004 != 0 && unix.Access(filepath.Dir(p), unix.W_OK) != nil
+}
+
+// listLinks names up to three links, and how many more.
+func listLinks(links []string) string {
+	shown := links[:min(3, len(links))]
+	out := strings.Join(shown, ", ")
+	if n := len(links) - len(shown); n > 0 {
+		out += fmt.Sprintf(" and %d more", n)
 	}
 	return out
 }
