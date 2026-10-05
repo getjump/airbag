@@ -317,6 +317,10 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 			}
 		},
 	}
+	// The server gets the TLS connection inside a watchedConn, not as a
+	// *tls.Conn, so it does not know the connection is TLS: req.TLS is
+	// nil in the handler. Nothing here reads it; the upstream request's
+	// scheme is set in Rewrite.
 	go func() { _ = srv.Serve(&oneConn{c: &watchedConn{Conn: tconn, f: f}}) }()
 	<-closed
 	_ = srv.Close()
