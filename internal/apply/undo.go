@@ -309,7 +309,13 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		// it are gone, and so are the directories the apply made there.
 		// Whatever is still left was added while the rollback ran, and
 		// is not ours to remove.
+		// Each write below is checked again right before it: fingerprint
+		// and leftWhole can take long on a large file or directory.
+		held := func() error { return g.roots.held(e.Layer, e.Path, e.Rel) }
 		if e.Type == fs.ModeDir && e.Saved != "" {
+			if err := held(); err != nil {
+				return stop(i, err)
+			}
 			if moved {
 				// Checked by leftWhole: its temp files are the apply's.
 				removeTemps(e.Path, g.copyingTo())
@@ -331,6 +337,9 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			}
 		}
 		if e.After != "" {
+			if err := held(); err != nil {
+				return stop(i, err)
+			}
 			if err := giveBack(e, g.Clone); err != nil {
 				return left, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err)
 			}
@@ -344,8 +353,14 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		}
 		// What is at the path now is the agent's (or half of it, or
 		// nothing for a deletion); the user's version was moved away.
+		if err := held(); err != nil {
+			return stop(i, err)
+		}
 		if err := os.RemoveAll(e.Path); err != nil && !gone(err) {
 			return left, err
+		}
+		if err := held(); moved && err != nil {
+			return stop(i, err)
 		}
 		if moved {
 			if err := move(e.Saved, e.Path); err != nil {
