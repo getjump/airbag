@@ -7,10 +7,14 @@
 # those are checked instead.
 set -eu
 mac=; [ "$(uname)" = Darwin ] && mac=1
+[ -z "$mac" ] || mkdir -p "$HOME/.claude/projects/-airbag-e2e-$$"
 
 AIRBAG=${AIRBAG:-airbag}
 T=$(mktemp -d "$HOME/.airbag-e2e.XXXXXX")
-trap 'rm -rf "$T" "$HOME/.airbag-e2e-rc"' EXIT
+# A project of Claude Code's with no memory/ yet, for the macOS check
+# that the agent cannot create one.
+P="$HOME/.claude/projects/-airbag-e2e-$$"
+trap 'rm -rf "$T" "$HOME/.airbag-e2e-rc"; [ -z "$mac" ] || rmdir "$P" 2>/dev/null || true' EXIT
 # printf, not echo: macOS sh turns \x1b in output back into the byte.
 fail() { printf 'FAIL: %s\n' "$*"; exit 1; }
 
@@ -27,7 +31,8 @@ git remote add origin "$T/remote.git" && git push -q origin main
 before=$(git -C "$T/remote.git" rev-parse main)
 : > "$HOME/.airbag-e2e-rc"
 
-cat > "$T/agent.sh" <<'EOF'
+printf "real='%s'\n" "$T/proj" > "$T/agent.sh"
+cat >> "$T/agent.sh" <<'EOF'
 echo changed > README.md
 echo new > new.txt
 rm old.txt
@@ -39,17 +44,24 @@ git push origin main
 curl -s --unix-socket "${AIRBAG_CONTROL:-/run/airbag/ctl.sock}" -d '{"kind":"git.push","argv":["rm","-rf","/"]}' http://x/intent | grep -q "only" || echo "LEAK: forged intent accepted"
 git push --receive-pack='touch /tmp/pwn' origin main 2>&1 | grep -q "not allowed" || echo "LEAK: --receive-pack accepted"
 curl -s -o /dev/null --max-time 10 https://example.com && echo "LEAK: example.com reachable"
+curl -s -o /dev/null --max-time 10 --noproxy '*' https://example.com && echo "LEAK: example.com reachable around the proxy"
 if [ "$(uname)" = Darwin ]; then
+	# The agent works in a clone; the real workspace and its secret files
+	# are out of reach.
 	cat .env >/dev/null 2>&1 && echo "LEAK: secret file readable"
+	cat "$real/.env" >/dev/null 2>&1 && echo "LEAK: the real workspace's secret file readable"
+	: > "$real/agent-was-here" 2>/dev/null && echo "LEAK: the real workspace writable"
 	# Every project's memory/ is denied (airbag makes this workspace's
-	# project directory before the run); what a failed check made is
-	# removed again.
+	# project directory before the run, the test one more without
+	# memory/). The probe never replaces a file that is there (noclobber),
+	# and what a failed check made is removed again.
+	probe=airbag-e2e-probe-$$.md
 	for d in "$HOME"/.claude/projects/*/; do
 		[ -d "$d" ] || continue
 		made=
 		[ -d "$d/memory" ] || { mkdir "$d/memory" 2>/dev/null && made=1; }
-		if echo x > "$d/memory/airbag-e2e-probe.md" 2>/dev/null; then
-			rm -f "$d/memory/airbag-e2e-probe.md"
+		if [ ! -e "$d/memory/$probe" ] && (set -C; echo x > "$d/memory/$probe") 2>/dev/null; then
+			rm -f "$d/memory/$probe"
 			echo "LEAK: memory writable in $d"
 		fi
 		if [ -n "$made" ]; then
@@ -65,8 +77,8 @@ exit 0
 EOF
 
 out=$("$AIRBAG" run -- sh "$T/agent.sh" 2>&1)
-echo "$out" | grep -q LEAK && fail "$out"
-echo "$out" | grep -q "queued as intent i-1" || fail "git push was not queued: $out"
+printf '%s\n' "$out" | grep -q LEAK && fail "$out"
+printf '%s\n' "$out" | grep -q "queued as intent i-1" || fail "git push was not queued: $out"
 
 [ "$(cat README.md)" = hello ] || fail "README changed before apply"
 [ -f old.txt ] || fail "old.txt deleted before apply"
@@ -78,11 +90,14 @@ rev=$("$AIRBAG" review)
 # shellcheck disable=SC2088 # "~/" as the review prints it
 home_change="~/.airbag-e2e-rc"
 if [ -n "$mac" ]; then
-	echo "$out" | grep -q "airbag-e2e-rc: Operation not permitted" || fail "~ was writable on macOS: $out"
+	printf '%s\n' "$out" | grep -q "airbag-e2e-rc: Operation not permitted" || fail "~ was writable on macOS: $out"
+	# shellcheck disable=SC2088 # as the review prints it
+	! printf '%s\n' "$rev" | grep -qF "~/.airbag-e2e-rc" || fail "review shows a change in ~ on macOS: $rev"
+	[ ! -e "$T/proj/agent-was-here" ] || fail "the agent wrote to the real workspace"
 	home_change="+ new.txt" # no branch of ~ to show
 fi
 for want in "~ README.md" "+ new.txt" "- old.txt" ".git/hooks/post-checkout  persist" "$home_change" "denied: example.com:443" "git push origin main"; do
-	echo "$rev" | grep -qF -- "$want" || fail "review lacks '$want':
+	printf '%s\n' "$rev" | grep -qF -- "$want" || fail "review lacks '$want':
 $rev"
 done
 
@@ -103,7 +118,7 @@ assert r["network"]["denied"].get("example.com:443"), r["network"]
 # rollback undoes the apply, and the changes come back to the session.
 "$AIRBAG" apply --yes >/dev/null
 rb=$("$AIRBAG" rollback)
-echo "$rb" | grep -q "Rolled back" || fail "rollback: $rb"
+printf '%s\n' "$rb" | grep -q "Rolled back" || fail "rollback: $rb"
 [ "$(cat README.md)" = hello ] || fail "README not restored by rollback"
 [ -f old.txt ] && [ ! -e new.txt ] || fail "files not restored by rollback"
 [ ! -s "$HOME/.airbag-e2e-rc" ] || fail "~ not restored by rollback"
@@ -112,7 +127,7 @@ echo "$rb" | grep -q "Rolled back" || fail "rollback: $rb"
 "$AIRBAG" review | grep -qF "~ README.md" || fail "changes not back in the session after rollback"
 
 applied=$("$AIRBAG" apply --yes)
-echo "$applied" | grep -q "left pending" || fail "intent ran under --yes although the agent added a git hook: $applied"
+printf '%s\n' "$applied" | grep -q "left pending" || fail "intent ran under --yes although the agent added a git hook: $applied"
 [ "$(cat README.md)" = changed ] || fail "README not applied"
 [ ! -f old.txt ] || fail "old.txt not deleted"
 if [ -n "$mac" ]; then
@@ -123,7 +138,7 @@ fi
 [ "$(git -C "$T/remote.git" rev-parse main)" = "$before" ] || fail "remote changed before the intent was confirmed"
 # A later apply keeps the session's pushes untrusted: they wait for --trust-git.
 again=$(printf 'y\n' | "$AIRBAG" apply)
-echo "$again" | grep -q -- "--trust-git" || fail "second apply did not hold the push: $again"
+printf '%s\n' "$again" | grep -q -- "--trust-git" || fail "second apply did not hold the push: $again"
 [ "$(git -C "$T/remote.git" rev-parse main)" = "$before" ] || fail "second apply pushed without --trust-git"
 printf 'y\n' | "$AIRBAG" apply --trust-git >/dev/null
 [ "$(git -C "$T/remote.git" rev-parse main)" = "$(git rev-parse HEAD)" ] || fail "push intent did not run"
@@ -132,10 +147,10 @@ printf 'y\n' | "$AIRBAG" apply --trust-git >/dev/null
 if command -v unshare >/dev/null; then
 	probe='unshare -Ur true 2>/dev/null && echo nested-allowed || echo nested-refused'
 	out=$("$AIRBAG" run -- sh -c "$probe" 2>/dev/null)
-	echo "$out" | grep -q nested-allowed || fail "user namespaces refused by default: $out"
+	printf '%s\n' "$out" | grep -q nested-allowed || fail "user namespaces refused by default: $out"
 	"$AIRBAG" discard --yes >/dev/null
 	out=$("$AIRBAG" run --strict -- sh -c "$probe" 2>/dev/null)
-	echo "$out" | grep -q nested-refused || fail "--strict let the agent create a user namespace: $out"
+	printf '%s\n' "$out" | grep -q nested-refused || fail "--strict let the agent create a user namespace: $out"
 	"$AIRBAG" discard --yes >/dev/null
 fi
 # A host socket named in hide: is out of reach (as the built-in list
@@ -153,11 +168,11 @@ c=socket.socket(socket.AF_UNIX)
 try: c.connect(sys.argv[1]); print("sock-reachable")
 except OSError: print("sock-blocked")'
 	out=$("$AIRBAG" run -- python3 -c "$probe" "$sock" 2>/dev/null)
-	echo "$out" | grep -q sock-reachable || fail "baseline: host socket not reachable without hide: $out"
+	printf '%s\n' "$out" | grep -q sock-reachable || fail "baseline: host socket not reachable without hide: $out"
 	"$AIRBAG" discard --yes >/dev/null
 	printf 'hide: ["%s"]\n' "$sock" > airbag.yaml
 	out=$("$AIRBAG" run -- python3 -c "$probe" "$sock" 2>/dev/null)
-	echo "$out" | grep -q sock-blocked || fail "hidden host socket reachable: $out"
+	printf '%s\n' "$out" | grep -q sock-blocked || fail "hidden host socket reachable: $out"
 	"$AIRBAG" discard --yes >/dev/null
 	rm airbag.yaml
 	kill $lp 2>/dev/null || true

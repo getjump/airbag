@@ -71,10 +71,10 @@ jobs:
   # and on Intel (macOS 26 is Apple's last for it): the unit tests run
   # natively, and airbag-macprobe checks what it relies on (sandbox-exec,
   # APFS clones, a user NFS mount) on a real macOS. The probe's report is
-  # kept; the end-to-end tests run as a first look and do not fail the
-  # job yet.
+  # kept, and test/e2e.sh checks what the prototype promises there.
   macos:
     if: github.event_name != 'schedule'
+    timeout-minutes: 30 # a stale NFS mount in the probe can hang
     strategy:
       fail-fast: false
       matrix:

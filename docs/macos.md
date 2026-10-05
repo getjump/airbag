@@ -110,7 +110,7 @@ first runs (October 2026) gave the same answer on all three:
 | N1 | pass, as that admin user |
 | N2 | fail: the walk saw 1375 of 5000 files, then a stale NFS file handle |
 | N3 | fail: `git commit` could not close a loose object file (permission denied) |
-| C1 | pass: `cp -c -R` 1.6 to 2.0 times and one `clonefile` 26 to 33 times faster than `cp -R` |
+| C1 | pass: `cp -c -R` 1.6 to 2.9 times and one `clonefile` 26 to 38 times faster than `cp -R`, varying between runs |
 | T1 | fail without `trustd`, pass with it, as sandbox-runtime reports |
 
 So the clone stays the branch: an NFS overlay needs a server that keeps file
