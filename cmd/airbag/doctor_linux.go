@@ -91,7 +91,7 @@ func corePattern(pattern string) (covered bool, what string) {
 	switch {
 	case strings.HasPrefix(pattern, "|"):
 		return false, "kernel.core_pattern pipes to a handler (" + pattern + "): airbag's 1-byte core limit " +
-			"stops the agent's core dumps unless something in the sandbox lowers it; --strict refuses that"
+			"stops the agent's core dumps unless something in the sandbox lowers it; --strict skips that change"
 	case strings.HasPrefix(pattern, "@"):
 		return false, "kernel.core_pattern is a socket (" + pattern + "): the kernel ignores the core limit for it, " +
 			"so the agent's core dumps may reach it"

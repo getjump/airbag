@@ -38,9 +38,11 @@ const (
 	offArg0Low = 16 + 8*0
 	offArg1Low = 16 + 8*1
 	offArg2Low = 16 + 8*2
-	// A pointer is not truncated, so prlimit64's new-limit pointer
-	// (arg2) is compared in both halves.
+	offArg3Low = 16 + 8*3
+	// A pointer is not truncated, so prlimit64's new- and old-limit
+	// pointers (arg2, arg3) are compared in both halves.
 	offArg2High = offArg2Low + 4
+	offArg3High = offArg3Low + 4
 
 	// x32SyscallBit marks a syscall made through the x32 ABI; it shares
 	// the AUDIT_ARCH_X86_64 value with 64-bit calls and is told apart
@@ -52,6 +54,8 @@ const (
 	retAllow  = unix.SECCOMP_RET_ALLOW
 	retEPERM  = unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)
 	retENOSYS = unix.SECCOMP_RET_ERRNO | uint32(unix.ENOSYS)
+	// retSkip returns 0 without running the call: an errno of 0.
+	retSkip = unix.SECCOMP_RET_ERRNO
 	// An unknown architecture is killed, not allowed: on the arches we
 	// build for, the only arch values a process can present are the
 	// native one and its compat ABIs, all enumerated below. A value
@@ -136,7 +140,7 @@ type nrSet struct {
 	ioctl, socket, socketpair, personality, socketcall uint32
 
 	// Argument-checked in --strict mode only: a change to RLIMIT_CORE is
-	// refused, a read of it and every other limit pass (see the handler
+	// skipped, a read of it and every other limit pass (see the handler
 	// in agentFilter).
 	setrlimit, prlimit64 uint32
 }
@@ -367,7 +371,7 @@ func (b *bpfBuilder) resolve() []unix.SockFilter {
 }
 
 // agentFilter builds the BPF program for the given ABIs. strict adds the
-// new-mount-API, socketcall and RLIMIT_CORE refusals.
+// new-mount-API and socketcall refusals and skips RLIMIT_CORE changes.
 func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 	b := newBuilder()
 	for i, a := range abis {
@@ -464,18 +468,23 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 	}
 	b.jmp("allow")
 
-	// setrlimit and prlimit64 (--strict): refuse a change to RLIMIT_CORE.
-	// PID 1 sets it to 1 byte, soft and hard (init.go), and the kernel
-	// aborts a pipe core_pattern only at exactly 1; any process may lower
-	// its own soft limit to 0, and the pipe handler would then run again.
+	// setrlimit and prlimit64 (--strict): a change to RLIMIT_CORE is
+	// skipped, so it reports success and the limit stays as it is. PID 1
+	// sets it to 1 byte, soft and hard (init.go), and the kernel aborts a
+	// pipe core_pattern only at exactly 1; any process may lower its own
+	// soft limit to 0, and the pipe handler would then run again. A
+	// program that sets the limit nearly always wants fewer dumps (gpg and
+	// ssh-agent set it to 0 and stop if that fails), and the 1-byte cap
+	// already gives it that, so the call is skipped rather than refused.
 	// A read stays allowed: glibc's getrlimit, and with it `ulimit -c`, is
-	// prlimit64 with no new limit (arg2 NULL). The cost: gpg and a
-	// daemonizing ssh-agent lower their own limit at start and stop when
-	// that is refused.
+	// prlimit64 with no new limit (arg2 NULL). prlimit64 with a new limit
+	// and no old one (arg3 NULL) is glibc's setrlimit, and is skipped;
+	// with both it is refused, because a skipped call would leave the old
+	// limit unfilled.
 	b.label("setrlimit")
 	b.ld(offArg0Low) // resource
 	b.jeqNext(unix.RLIMIT_CORE)
-	b.jmp("eperm")
+	b.jmp("skip")
 	b.jmp("allow")
 
 	b.label("prlimit64")
@@ -485,9 +494,16 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 	for _, off := range []uint32{offArg2Low, offArg2High} { // the new limit
 		b.ld(off)
 		b.jneNext(0)
-		b.jmp("eperm")
+		b.jmp("prlimitset")
 	}
 	b.jmp("allow")
+	b.label("prlimitset")
+	for _, off := range []uint32{offArg3Low, offArg3High} { // the old limit
+		b.ld(off)
+		b.jneNext(0)
+		b.jmp("eperm")
+	}
+	b.jmp("skip")
 
 	b.label("personality")
 	b.ld(offArg0Low)
@@ -504,6 +520,8 @@ func agentFilter(abis []abi, strict bool) []unix.SockFilter {
 	b.ret(retEPERM)
 	b.label("enosys")
 	b.ret(retENOSYS)
+	b.label("skip")
+	b.ret(retSkip)
 
 	return b.resolve()
 }

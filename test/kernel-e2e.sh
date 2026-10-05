@@ -140,14 +140,25 @@ out=$("$AIRBAG" run -- sh -c 'grep "Max core file size" /proc/self/limits' 2>/de
 discard
 echo "$out" | awk '{ exit !($5 == "1" && $6 == "1") }' || fail "RLIMIT_CORE soft/hard not 1 byte: $out"
 
-# --strict refuses a change to the limit (at 0 a pipe core_pattern runs
-# again); by default the kernel lets a process lower it. A read, as
-# `ulimit -c` makes, works in both.
-v=$("$AIRBAG" run -- sh -c 'ulimit -c >/dev/null && echo read; ulimit -S -c 0 2>/dev/null && echo lowered; true' 2>/dev/null); discard
-[ "$v" = "read
-lowered" ] || fail "RLIMIT_CORE without --strict: expected a read and a lowered limit, got: $v"
-v=$("$AIRBAG" run --strict -- sh -c 'ulimit -c >/dev/null && echo read; ulimit -S -c 0 2>/dev/null && echo lowered; true' 2>/dev/null); discard
-[ "$v" = read ] || fail "RLIMIT_CORE under --strict: expected a read and no change, got: $v"
+# --strict skips a change to the limit (at 0 a pipe core_pattern runs
+# again): the call reports success and the limit stays 1 byte. By
+# default the kernel lets a process lower it. A read, as `ulimit -c`
+# makes, works in both. corelimit prints "ok" when the read and the
+# change both report success, then the core line of /proc/self/limits.
+corelimit='ulimit -c >/dev/null && ulimit -S -c 0 && echo ok; grep "Max core file size" /proc/self/limits'
+v=$("$AIRBAG" run -- sh -c "$corelimit" 2>/dev/null); discard
+echo "$v" | awk '$1 == "ok" { ok = 1 } /^Max core/ { s = $5 } END { exit !(ok && s == "0") }' ||
+	fail "RLIMIT_CORE without --strict: expected a read and the soft limit lowered to 0, got: $v"
+v=$("$AIRBAG" run --strict -- sh -c "$corelimit" 2>/dev/null); discard
+echo "$v" | awk '$1 == "ok" { ok = 1 } /^Max core/ { s = $5; h = $6 } END { exit !(ok && s == "1" && h == "1") }' ||
+	fail "RLIMIT_CORE under --strict: expected a read, a change reported as done, and the limit still 1 byte, got: $v"
+
+# gpg lowers its own core limit at start and stops if that fails; under
+# --strict the skipped change keeps it working.
+if command -v gpg >/dev/null; then
+	v=$("$AIRBAG" run --strict -- sh -c 'gpg --version >/dev/null && echo gpg-ok; true' 2>/dev/null); discard
+	[ "$v" = gpg-ok ] || fail "gpg --version failed under --strict: $v"
+fi
 
 # The tools the agents run still work under the filter.
 out=$("$AIRBAG" run -- sh -c 'git --version >/dev/null 2>&1 && echo git-ok; true' 2>/dev/null)

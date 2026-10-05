@@ -233,36 +233,43 @@ func TestSocketcallStrict(t *testing.T) {
 }
 
 // TestRlimitCoreStrict: in --strict mode a change to RLIMIT_CORE is
-// refused through setrlimit and prlimit64 on every ABI, while a read
+// skipped on every ABI (it returns 0 without running), a prlimit64 that
+// sets it and also asks for the old value is refused, and a read
 // (prlimit64 with no new limit) and other limits pass; by default all of
-// it passes. The resource numbers are written out here, not taken from
-// the filter, so dropping or widening the rule fails this test.
+// it passes. The resource numbers and the skip verdict are written out
+// here, not taken from the filter, so dropping, widening or weakening
+// the rule fails this test.
 func TestRlimitCoreStrict(t *testing.T) {
-	const core, nofile = 4, 7    // RLIMIT_CORE, RLIMIT_NOFILE
-	const newLimit = 0x7ffd_1000 // a pointer to the new limit
+	const core, nofile = 4, 7     // RLIMIT_CORE, RLIMIT_NOFILE
+	const ptr = 0x7ffd_1000       // a pointer to a struct rlimit
+	const high = 0x7f00_0000_0000 // a pointer whose low half is zero: not NULL
 	for _, g := range allNumberings() {
 		for _, strict := range []bool{false, true} {
 			p := agentFilter(abisFor(g.goarch), strict)
-			refused := uint32(retAllow)
+			skipped, refused := uint32(retAllow), uint32(retAllow)
 			if strict {
+				skipped = unix.SECCOMP_RET_ERRNO // errno 0: returns 0, the call does not run
 				refused = retEPERM
 			}
 			for _, a := range g.ns {
 				for _, c := range []struct {
-					what             string
-					nr               uint32
-					arg0, arg1, arg2 uint64
-					want             uint32
+					what                   string
+					nr                     uint32
+					arg0, arg1, arg2, arg3 uint64
+					want                   uint32
 				}{
-					{"setrlimit(CORE)", a.n.setrlimit, core, newLimit, 0, refused},
-					{"setrlimit(CORE) high bits", a.n.setrlimit, 1<<32 | core, newLimit, 0, refused},
-					{"setrlimit(NOFILE)", a.n.setrlimit, nofile, newLimit, 0, retAllow},
-					{"prlimit64(CORE, new)", a.n.prlimit64, 0, core, newLimit, refused},
-					// A pointer is full width: a zero low half is not NULL.
-					{"prlimit64(CORE, new above 4 GiB)", a.n.prlimit64, 0, core, 0x7f00_0000_0000, refused},
-					{"prlimit64(CORE, new) high bits", a.n.prlimit64, 0, 1<<32 | core, newLimit, refused},
-					{"prlimit64(CORE, read)", a.n.prlimit64, 0, core, 0, retAllow},
-					{"prlimit64(NOFILE, new)", a.n.prlimit64, 0, nofile, newLimit, retAllow},
+					{"setrlimit(CORE)", a.n.setrlimit, core, ptr, 0, 0, skipped},
+					{"setrlimit(CORE) high bits", a.n.setrlimit, 1<<32 | core, ptr, 0, 0, skipped},
+					{"setrlimit(NOFILE)", a.n.setrlimit, nofile, ptr, 0, 0, retAllow},
+					{"prlimit64(CORE, new, NULL)", a.n.prlimit64, 0, core, ptr, 0, skipped},
+					{"prlimit64(CORE, new above 4 GiB, NULL)", a.n.prlimit64, 0, core, high, 0, skipped},
+					{"prlimit64(CORE, new, NULL) high bits", a.n.prlimit64, 0, 1<<32 | core, ptr, 0, skipped},
+					{"prlimit64(CORE, new, old)", a.n.prlimit64, 0, core, ptr, ptr, refused},
+					{"prlimit64(CORE, new, old above 4 GiB)", a.n.prlimit64, 0, core, ptr, high, refused},
+					{"prlimit64(CORE, new above 4 GiB, old)", a.n.prlimit64, 0, core, high, ptr, refused},
+					{"prlimit64(CORE, NULL, old) read", a.n.prlimit64, 0, core, 0, ptr, retAllow},
+					{"prlimit64(NOFILE, new, NULL)", a.n.prlimit64, 0, nofile, ptr, 0, retAllow},
+					{"prlimit64(NOFILE, new, old)", a.n.prlimit64, 0, nofile, ptr, ptr, retAllow},
 				} {
 					if c.nr == 0 {
 						t.Errorf("%s arch %#x: no number for %s", g.goarch, a.audit, c.what)
@@ -270,6 +277,7 @@ func TestRlimitCoreStrict(t *testing.T) {
 					}
 					d := seccompData(a.audit, c.nr|a.bit, c.arg0, c.arg1)
 					binary.LittleEndian.PutUint64(d[offArg2Low:], c.arg2)
+					binary.LittleEndian.PutUint64(d[offArg3Low:], c.arg3)
 					if got := runBPF(t, p, d); got != c.want {
 						t.Errorf("%s strict=%v arch %#x %s: got %#x want %#x", g.goarch, strict, a.audit, c.what, got, c.want)
 					}

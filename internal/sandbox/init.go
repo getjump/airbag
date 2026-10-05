@@ -561,10 +561,10 @@ func runAgent(s *session.Session, ctl *os.File) int {
 	// and the file path is skipped because 1 < binfmt->min_coredump (a
 	// page). (Linux v6.18.) The limit is inherited across fork and exec.
 	// It does not hold everywhere: any process may lower its own soft
-	// limit, and at 0 the pipe handler runs again (--strict refuses that
-	// change in the seccomp filter); a socket core_pattern ("@" or "@@",
-	// Linux 6.16+) ignores the limit and is not covered. airbag doctor
-	// reports the host's core_pattern.
+	// limit, and at 0 the pipe handler runs again (under --strict the
+	// seccomp filter skips that change, so the limit stays 1); a socket
+	// core_pattern ("@" or "@@", Linux 6.16+) ignores the limit and is not
+	// covered. airbag doctor reports the host's core_pattern.
 	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 1, Max: 1}); err != nil {
 		fmt.Fprintf(os.Stderr, "airbag: warning: could not limit core dumps: %v\n", err)
 	}
