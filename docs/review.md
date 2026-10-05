@@ -47,7 +47,9 @@ already ran is not undone.
 A session records the directories its workspace and `$HOME` were when it began.
 If one is another directory now (moved away, with a link or a new directory at its
 path), apply, rollback, resume and the outbox change nothing there and say so; put
-the directory back first. A directory is told by its path, inode, device and, where
+the directory back first. A rollback that finds it so part way stops there and keeps
+what is left in its journal; until `airbag rollback` is run again to finish it, apply
+refuses. A directory is told by its path, inode, device and, where
 the filesystem keeps them, its creation time, inode generation and filesystem ID.
 On NFS or FUSE, which keep neither of the first two, a directory removed and made
 again with the same inode number passes. A filesystem mounted again under a new

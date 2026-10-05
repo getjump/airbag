@@ -149,6 +149,20 @@ func loadGeneration(dir string) (*generation, error) {
 	return g, json.Unmarshal(b, g)
 }
 
+// rollbackStopped returns the last apply of s if its rollback stopped
+// part way: the real files are some rolled back and some not.
+func rollbackStopped(s *session.Session) *generation {
+	gs, _ := listGenerations(s)
+	if len(gs) == 0 {
+		return nil
+	}
+	g, err := loadGeneration(gs[len(gs)-1].dir)
+	if err != nil || !g.Stopped {
+		return nil
+	}
+	return g
+}
+
 // interrupted returns an apply of s that did not finish, if any.
 func interrupted(s *session.Session) *generation {
 	gs, _ := listGenerations(s)

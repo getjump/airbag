@@ -137,6 +137,11 @@ func changedInside(dir string, since func(string) time.Time) string {
 }
 
 func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) error {
+	// Some real files rolled back and some not: no change, and no intent
+	// (a push, a command), runs on such a tree.
+	if stopped := rollbackStopped(s); stopped != nil {
+		return fmt.Errorf("a rollback of session %s stopped part way; put the directory back and run `airbag rollback %s` to finish it, then apply again", s.ID, s.ID)
+	}
 	if o.Branch != "" {
 		if err := ApplyBranch(s, cs, o.Branch, o); err != nil {
 			return err

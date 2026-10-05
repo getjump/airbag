@@ -1964,12 +1964,19 @@ func TestRollbackRechecksRootBetweenEntries(t *testing.T) {
 			t.Errorf("%s in the moved workspace: %q", n, got)
 		}
 	}
-	// Back in place, the rollback takes what it did not reach.
+	// Back in place, the rollback takes what it did not reach. Until it
+	// has, apply runs no change and no intent on the half rolled-back
+	// tree.
 	if err := os.RemoveAll(ws); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(ws+".old", ws); err != nil {
 		t.Fatal(err)
+	}
+	for _, o := range []Options{{Yes: true, Out: &out}, {Yes: true, Out: &out, Branch: "agent"}} {
+		if err := Apply(s, nil, box, o); err == nil || !strings.Contains(err.Error(), "stopped part way") {
+			t.Fatalf("apply ran after a stopped rollback (branch %q): %v", o.Branch, err)
+		}
 	}
 	out.Reset()
 	if err := Rollback(s, nil, &out); err != nil {
