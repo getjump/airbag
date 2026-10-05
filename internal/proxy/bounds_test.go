@@ -15,6 +15,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -923,33 +924,67 @@ func TestAnswerHasWriteDeadline(t *testing.T) {
 	}
 }
 
-// The mirror's answers have no flow either: each pacedChunk of one goes
-// out within AnswerWrite, so a whole package written at once is bounded
-// per chunk, not as a whole.
+// paceLog records, in order, the write deadlines set on an answer and
+// the writes made to it.
+type paceLog struct {
+	*httptest.ResponseRecorder
+	ev []string
+	at []time.Time
+}
+
+func (l *paceLog) SetWriteDeadline(t time.Time) error {
+	if t.IsZero() {
+		l.ev = append(l.ev, "clear")
+	} else {
+		l.ev, l.at = append(l.ev, "d"), append(l.at, t)
+	}
+	return nil
+}
+
+func (l *paceLog) WriteHeader(code int) {
+	l.ev = append(l.ev, "h")
+	l.ResponseRecorder.WriteHeader(code)
+}
+
+func (l *paceLog) Write(b []byte) (int, error) {
+	l.ev = append(l.ev, "w"+strconv.Itoa(len(b)))
+	return l.ResponseRecorder.Write(b)
+}
+
+// The mirror's answers have no flow either: every write to the socket,
+// at most pacedChunk of an answer, has a deadline of AnswerWrite set
+// just before it, and so does what net/http writes after the mirror
+// returns.
 func TestMirrorAnswerIsPaced(t *testing.T) {
-	log, _ := newLog(t)
-	p := New(nil, log)
-	const size = 3*pacedChunk + 1
-	p.Mirror = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if n, err := w.Write(make([]byte, size)); n != size || err != nil {
-			t.Errorf("write: %d %v", n, err)
+	big := 3*pacedChunk + 1
+	cases := []struct {
+		name  string
+		serve func(http.ResponseWriter)
+		want  string
+	}{
+		{"header and body", func(w http.ResponseWriter) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(make([]byte, big))
+		}, "clear d h d w65536 d w65536 d w65536 d w1 d"},
+		{"body only", func(w http.ResponseWriter) { _, _ = w.Write(make([]byte, 10)) }, "clear d w10 d"},
+		{"header only", func(w http.ResponseWriter) { w.WriteHeader(http.StatusOK) }, "clear d h d"},
+		{"empty write", func(w http.ResponseWriter) { _, _ = w.Write(nil) }, "clear d w0 d"},
+	}
+	for _, c := range cases {
+		log, _ := newLog(t)
+		p := New(nil, log)
+		p.Mirror = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { c.serve(w) })
+		w := &paceLog{ResponseRecorder: httptest.NewRecorder()}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://airbag.mirror/npm/x", nil)
+		before := time.Now()
+		p.ServeHTTP(w, r)
+		if got := strings.Join(w.ev, " "); got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
 		}
-	})
-	w := &deadlines{ResponseRecorder: httptest.NewRecorder()}
-	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://airbag.mirror/npm/x", nil)
-	before := time.Now()
-	p.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || w.Body.Len() != size {
-		t.Fatalf("%d, %d bytes", w.Code, w.Body.Len())
-	}
-	// The request's clear, the header's deadline, then one per chunk.
-	if len(w.set) != 1+1+4 || !w.set[0].IsZero() {
-		t.Fatalf("deadlines %v", w.set)
-	}
-	for _, d := range w.set[1:] {
-		if d.Before(before) || d.After(time.Now().Add(AnswerWrite)) {
-			t.Errorf("deadlines %v", w.set)
+		for _, d := range w.at {
+			if d.Before(before.Add(AnswerWrite)) || d.After(time.Now().Add(AnswerWrite)) {
+				t.Errorf("%s: deadline %v", c.name, d)
+			}
 		}
 	}
 }

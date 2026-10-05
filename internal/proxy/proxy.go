@@ -219,10 +219,16 @@ const pacedChunk = 64 << 10
 // paced writes the mirror's answers, which have no flow to close them
 // either and may be whole packages: each pacedChunk bytes must go out
 // within AnswerWrite. A client that asks for a package and reads none
-// of it would otherwise hold the connection in a blocked write; one
-// that reads slowly keeps going. What net/http writes after the
-// handler returns goes out under the last deadline, which the next
-// request on the connection clears (ServeHTTP).
+// of it would otherwise hold the connection in a blocked write. A
+// chunk goes out once the socket has room, which it gets back only
+// after the client has read most of what it holds (on Linux, about
+// 200 KiB): a client that reads slower than a few KiB a second is cut
+// off too. What net/http writes after the handler returns goes out
+// under the deadline serveMirror renews then, which the next request
+// on the connection clears (ServeHTTP).
+//
+// It has only Header, WriteHeader, Write and Unwrap on purpose: a
+// ReadFrom or WriteString passed through would write without renewing.
 type paced struct {
 	http.ResponseWriter
 	rc *http.ResponseController
@@ -236,6 +242,10 @@ func (w paced) WriteHeader(code int) {
 }
 
 func (w paced) Write(b []byte) (int, error) {
+	if len(b) == 0 { // still sends the header
+		w.renew()
+		return w.ResponseWriter.Write(b)
+	}
 	n := 0
 	for len(b) > 0 {
 		c := min(len(b), pacedChunk)
@@ -252,6 +262,16 @@ func (w paced) Write(b []byte) (int, error) {
 
 // Unwrap lets a ResponseController reach the connection.
 func (w paced) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// serveMirror has the mirror answer r through paced. The mirror may
+// take longer than AnswerWrite after its last write (an upstream body
+// slow to end), so what net/http still holds when it returns gets a
+// fresh deadline.
+func (p *Proxy) serveMirror(w http.ResponseWriter, r *http.Request) {
+	pw := paced{w, http.NewResponseController(w)}
+	p.Mirror.ServeHTTP(pw, r)
+	pw.renew()
+}
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The previous response on this connection may have left a write
@@ -303,7 +323,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	target := r.Host
 	if p.Mirror != nil && host == "airbag.mirror" && r.Method != http.MethodConnect {
-		p.Mirror.ServeHTTP(paced{w, http.NewResponseController(w)}, r)
+		p.serveMirror(w, r)
 		return
 	}
 	if !p.Allow.Allows(host) && (p.Gate == nil || !p.Gate.AllowsHost(host)) {
