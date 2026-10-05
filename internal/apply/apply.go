@@ -169,6 +169,11 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	if gitTouched(picked) {
 		s.GitTouched = true
 	}
+	// A config this apply removed from the real $HOME is not one the host
+	// removed: a later run may create it anew.
+	s.HostConfigs = slices.DeleteFunc(s.HostConfigs, func(p string) bool {
+		return slices.ContainsFunc(picked, func(c review.Change) bool { return c.Kind == review.Deleted && c.Path == p })
+	})
 	if len(picked) > 0 {
 		fmt.Fprintf(o.Out, "Applied %d changes.\n", len(picked))
 	}

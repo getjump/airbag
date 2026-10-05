@@ -1072,3 +1072,47 @@ func TestConflictConfigRemovedOnHost(t *testing.T) {
 		}
 	}
 }
+
+// A config deletion airbag itself applied is not a host removal: when a
+// later run of the session creates the config anew, apply takes it.
+func TestAppliedConfigDeletionIsNotAHostRemoval(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	real := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(real, []byte(`{"numStartups":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	review.NoteHostConfigs(s)
+	branch := filepath.Join(s.HomeUpper(), ".claude.json")
+	if err := os.MkdirAll(filepath.Dir(branch), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mknod(branch, syscall.S_IFCHR, 0); err != nil {
+		t.Skipf("cannot create a whiteout here: %v", err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Lstat(real); !os.IsNotExist(err) {
+		t.Fatalf("apply did not remove the config: %v", err)
+	}
+	// The next run: the host has no config, and the agent writes one.
+	review.NoteHostConfigs(s)
+	if err := os.WriteFile(branch, []byte(`{"numStartups":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cf := Conflicts(s, mustScan(t, s)); len(cf) != 0 {
+		t.Fatalf("conflicts for a config the agent created after an applied deletion: %v", cf)
+	}
+}

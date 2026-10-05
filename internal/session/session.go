@@ -48,7 +48,8 @@ type Meta struct {
 	// HostConfigs: agent config files (~/.claude.json) that were in the
 	// real $HOME when a run of the session began, by real path. A branch
 	// copy of one the host has removed since reads as a new file; apply
-	// reports the removal instead of bringing the file back.
+	// reports the removal instead of bringing the file back. A removal
+	// apply itself carried out drops the entry.
 	HostConfigs []string `json:"host_configs,omitempty"`
 	// Paths under $HOME hidden from the agent (credentials).
 	Hidden []string `json:"hidden"`
