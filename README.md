@@ -144,10 +144,11 @@ The whole threat model, with the limits in numbers: [docs/threat-model.md](docs/
 
 It is if you let Claude Code or Codex run long tasks without permission prompts and
 want to see the whole result before it reaches your files, `~` or a remote, on
-Linux, with your own toolchain and without a VM. It is not for you if:
+Linux, with your own toolchain and, by default, without a VM. It is not for you if:
 
 - you need a hard boundary against code that tries to break out: use a VM or a
-  microVM;
+  microVM (airbag's own experimental gVisor and microVM backends have the limits in
+  [docs/runtime-options.md](docs/runtime-options.md));
 - what the agent reads must not reach the model provider: airbag does not change
   what is sent to the model;
 - you are on Windows, or need macOS today: the macOS port is a prototype, and
@@ -158,9 +159,13 @@ Linux, with your own toolchain and without a VM. It is not for you if:
 
 <details><summary>Is airbag a VM, or a hard security boundary?</summary>
 
-No. airbag puts Linux namespaces, overlayfs and a seccomp filter around the agent,
-on the host's kernel. That guards against accidents and casual exfiltration; it is
-not built to hold code that tries to break out. For that, use a VM or a microVM.
+Not by default. The native backend puts Linux namespaces, overlayfs and a seccomp
+filter around the agent, on the host's kernel. That guards against accidents and
+casual exfiltration; it is not built to hold code that tries to break out. For that,
+use a VM or a microVM. On Linux, the experimental `--backend=gvisor` and
+`--backend=microvm` run the agent on gVisor's kernel or in a Firecracker VM, with
+the same review, apply and outbox, but a narrower profile and their own limits:
+[docs/runtime-options.md](docs/runtime-options.md).
 </details>
 
 <details><summary>How is it different from the sandbox built into Claude Code or Codex?</summary>
