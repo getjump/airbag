@@ -284,6 +284,20 @@ func TestCmdWaitsForLinksOut(t *testing.T) {
 		{"to a system directory above user data", func(ws, home string) (string, error) {
 			return filepath.Join(ws, "all"), os.Symlink(filepath.Dir(home), filepath.Join(ws, "all"))
 		}, false},
+		{"to a system directory", func(ws, _ string) (string, error) {
+			// What lies below a directory is not known, whatever its name.
+			return filepath.Join(ws, "share"), os.Symlink("/usr", filepath.Join(ws, "share"))
+		}, false},
+		{"to a file of the user's that anyone may read", func(ws, _ string) (string, error) {
+			// Read-only, in a directory the user cannot write, so only
+			// the owner tells it from a system file.
+			dir := filepath.Join(t.TempDir(), "ro")
+			_ = os.Mkdir(dir, 0o755)
+			_ = os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("mine\n"), 0o444)
+			_ = os.Chmod(dir, 0o555)
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			return filepath.Join(ws, "notes.md"), os.Symlink(filepath.Join(dir, "notes.txt"), filepath.Join(ws, "notes.md"))
+		}, false},
 		{"to a process's own file", func(ws, _ string) (string, error) {
 			// The user's own process: not a file of someone else's.
 			return filepath.Join(ws, "notes.md"), os.Symlink("/proc/self/status", filepath.Join(ws, "notes.md"))

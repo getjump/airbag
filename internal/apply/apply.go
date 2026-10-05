@@ -361,6 +361,7 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	}
 	failed := ""       // after a failure the rest wait: a PR without its push means nothing
 	var links []string // the session's links out, looked for once
+	looked := o.TrustLinks
 	for _, it := range intents {
 		if it.Status == outbox.Running {
 			// A run was recorded but not its end: airbag stopped mid-push.
@@ -389,8 +390,8 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 		case outbox.KindPush:
 			status, err = runPush(s, box, it, risky, in, o)
 		case outbox.KindCmd:
-			if links == nil && !o.TrustLinks {
-				links = linksOut(s)
+			if !looked {
+				links, looked = linksOut(s), true
 			}
 			status, err = runCmd(s, box, it, risky, links, in, o)
 		default:
@@ -594,15 +595,15 @@ func hostDir(s *session.Session, dir string) string {
 // an argument that is, or runs through, such a link reaches its target
 // without showing it (notes.md -> ~/.env, docs -> ~/.config). A link is
 // harmless only when it stays in the workspace, or leads to a file anyone
-// may read that the user neither owns nor may replace, or to a directory
-// under a system root; all else counts, the user's home, other disks and
-// the session's own storage included. Places are compared as files, not
+// may read that the user neither owns nor may write or replace; all else
+// counts, any directory outside, the user's home, other disks and the
+// session's own storage included. Places are compared as files, not
 // as names, so case and firmlinks on macOS do not matter. Each link is
 // checked as it is now: one the user removed or replaced no longer counts.
 func linksOut(s *session.Session) []string {
 	ws, err := os.Stat(s.Workspace)
 	if err != nil {
-		return []string{s.Workspace + " (missing)"}
+		return []string{"the workspace " + s.Workspace + " itself, which cannot be read"}
 	}
 	paths := make([]string, 0, len(s.Applied))
 	for p := range s.Applied {
@@ -662,16 +663,13 @@ func inside(p string, root os.FileInfo) bool {
 	}
 }
 
-// systemRoots hold what the system installs; a directory there is the
-// same on every machine and not the user's.
-var systemRoots = []string{"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/nix/store", "/System"}
-
 // public reports whether p is somewhere a program may read without
-// learning anything of the user's, and may not write: a file anyone may
-// read, owned by someone else, in a directory the user cannot write; or
-// a directory under a system root (what is below another directory, such
-// as /home, is not known). Something that does not exist yet is public
-// only if the user cannot create it.
+// learning anything of the user's, and may not write: a regular file
+// anyone may read, owned by someone else, that the user can neither write
+// nor replace (its directory is not the user's to write). A directory
+// never is, whatever its name: what lies below it is not known, and on
+// macOS firmlinks join user data into /usr and /System. Something that
+// does not exist yet is public only if the user cannot create it.
 func public(p string) bool {
 	var st unix.Stat_t
 	if unix.Stat(p, &st) != nil {
@@ -681,15 +679,8 @@ func public(p string) bool {
 		}
 		return unix.Access(d, unix.W_OK) != nil
 	}
-	if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-		for _, r := range systemRoots {
-			if p == r || strings.HasPrefix(p, r+"/") {
-				return true
-			}
-		}
-		return false
-	}
-	return int64(st.Uid) != int64(os.Getuid()) && st.Mode&0o004 != 0 && unix.Access(filepath.Dir(p), unix.W_OK) != nil
+	return st.Mode&unix.S_IFMT == unix.S_IFREG && int64(st.Uid) != int64(os.Getuid()) && st.Mode&0o004 != 0 &&
+		unix.Access(p, unix.W_OK) != nil && unix.Access(filepath.Dir(p), unix.W_OK) != nil
 }
 
 // listLinks names up to three links, and how many more.
