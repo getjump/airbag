@@ -1,11 +1,14 @@
 package sdkclient_test
 
 import (
+	"bufio"
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -218,12 +221,7 @@ func TestIndependentProxyCredentialsAndPolicy(t *testing.T) {
 	p.UpstreamRoots = x509.NewCertPool()
 	p.UpstreamRoots.AddCert(upstream.Certificate())
 	p.Gate = gate{engine: mustPolicy(t)}
-	server := httptest.NewServer(p)
-	defer server.Close()
-	proxyURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	proxyURL := &url.URL{Scheme: "http", Host: serveProxy(t, p)}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(p.CA.PEM) {
 		t.Fatal("invalid proxy CA")
@@ -270,6 +268,107 @@ func TestIndependentProxyCredentialsAndPolicy(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("custom recorder did not receive the policy decision")
+	}
+}
+
+// serveProxy serves p as composition.md says: p.Serve, which applies the
+// proxy's connection cap and timeouts. It returns the address.
+func serveProxy(t *testing.T, p *proxy.Proxy) string {
+	t.Helper()
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() { _ = p.Serve(l) }()
+	return l.Addr().String()
+}
+
+// connectVia asks the proxy at addr for a tunnel to target and returns
+// the connection and the answer's status.
+func connectVia(t *testing.T, addr, target string) (net.Conn, int) {
+	t.Helper()
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		c.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return c, resp.StatusCode
+}
+
+// A Proxy made as a struct literal, without proxy.New, is bounded as one
+// New makes: the address guard refuses loopback, a nil Upstream is a
+// direct dial, and admission stops at the default MaxFlows.
+func TestStructLiteralProxyBounded(t *testing.T) {
+	local, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	go func() {
+		for {
+			c, err := local.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(local.Addr().String())
+	guarded := &proxy.Proxy{Allow: proxy.Allowlist{"localhost:*"}, Log: &recorder{}}
+	defer guarded.Close()
+	c, code := connectVia(t, serveProxy(t, guarded), "localhost:"+port)
+	c.Close()
+	if code != http.StatusForbidden {
+		t.Fatalf("CONNECT to loopback: %d, want 403", code)
+	}
+
+	// Each tunnel is admitted, then waits in Upstream: it stays a flow.
+	entered, release := make(chan struct{}, proxy.MaxFlows), make(chan struct{})
+	held := &proxy.Proxy{Allow: proxy.Allowlist{"held.example"}, Log: &recorder{}, Upstream: func(*url.URL) (*url.URL, error) {
+		entered <- struct{}{}
+		<-release
+		return nil, errors.New("released")
+	}}
+	defer held.Close()
+	addr := serveProxy(t, held)
+	conns := make(chan net.Conn, proxy.MaxFlows)
+	defer func() {
+		close(conns)
+		for c := range conns {
+			c.Close()
+		}
+	}()
+	defer close(release)
+	for range proxy.MaxFlows {
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns <- c
+		_, _ = io.WriteString(c, "CONNECT held.example:443 HTTP/1.1\r\nHost: held.example:443\r\n\r\n")
+	}
+	for range proxy.MaxFlows {
+		<-entered
+	}
+	c, code = connectVia(t, addr, "held.example:443")
+	c.Close()
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("CONNECT past the default MaxFlows: %d, want 503", code)
+	}
+}
+
+// Nothing prepared publishes nothing and matches no claim.
+func TestUnpreparedPublication(t *testing.T) {
+	var p *githubpr.Prepared
+	if p.Digest() != "" || p.Publish(t.Context()).Outcome != operation.Denied {
+		t.Fatal("an unprepared request has a digest or publishes")
 	}
 }
 

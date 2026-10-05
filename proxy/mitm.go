@@ -165,7 +165,7 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 // Limits.KeepAlive for its next request, or when a request in progress
 // has moved no byte for Limits.Idle (a host that stalls). A protocol
 // upgrade is refused, so no connection outlives its HTTP exchanges.
-func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, live *creds.Live, f *flow) {
+func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, g Gate, host string, live *creds.Live, f *flow) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		answer(w, "airbag: cannot intercept", http.StatusInternalServerError)
@@ -279,13 +279,13 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 			http.Error(w, "airbag: Host "+req.Host+" is not "+host+", the host this credential is bound to; the credential goes only to that host", http.StatusForbidden)
 			return
 		}
-		if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
+		if read := tainted(g); read != "" && !Allowlist(DefaultAllow).Allows(host) {
 			p.Log.Add(audit.Event{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "secret-taint"})
-			http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted(), http.StatusForbidden)
+			http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+read, http.StatusForbidden)
 			return
 		}
-		if p.Gate != nil {
-			if d, id := p.Gate.Check(policy.Input{Effect: policy.Effect{Kind: "http.request", Target: what, Detail: req.Method}}); d.Verdict != policy.Allow {
+		if g != nil {
+			if d, id := g.Check(policy.Input{Effect: policy.Effect{Kind: "http.request", Target: what, Detail: req.Method}}); d.Verdict != policy.Allow {
 				p.Log.Add(audit.Event{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: d.Verdict, Reason: d.Rule})
 				http.Error(w, policy.Explain(d, id), http.StatusForbidden)
 				return
@@ -313,7 +313,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
-		IdleTimeout:       p.Limits.KeepAlive,
+		IdleTimeout:       p.limits().KeepAlive,
 		ConnState: func(_ net.Conn, s http.ConnState) {
 			if s == http.StateClosed {
 				once.Do(func() { close(closed) })

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -62,6 +63,9 @@ func (a Allowlist) Allows(host string) bool {
 }
 
 // Gate owns policy, approvals and labels independently of the proxy.
+// Tainted must say something (a reason) whenever the labels are not
+// known to be clean, as when they could not be read: "" opens egress
+// past the core hosts.
 type Gate interface {
 	Check(policy.Input) (policy.Decision, string)
 	AllowsHost(string) bool
@@ -69,15 +73,21 @@ type Gate interface {
 	MarkUntrusted(string) bool
 }
 
+// A Proxy made as a struct literal, without New, is bounded as one New
+// makes: the address guard, and each Limits field left zero, are New's
+// (guard, limits); a nil Upstream is no upstream proxy. A nil Log, or a
+// Gate holding a nil pointer, is refused with 503 rather than run with
+// no record or no policy.
 type Proxy struct {
 	Allow Allowlist
 	Log   audit.Recorder
-	// Gate applies policy rules on top of the allowlist (optional).
+	// Gate applies policy rules on top of the allowlist (optional): with
+	// none, the allowlist alone decides.
 	Gate Gate
 	// Mirror serves http://airbag.mirror/ (optional).
 	Mirror http.Handler
 	// Upstream returns the host's own proxy for a target, if any, so
-	// airbag works behind a corporate or sandbox proxy.
+	// airbag works behind a corporate or sandbox proxy. nil is none.
 	Upstream func(*url.URL) (*url.URL, error)
 	// Creds are the credentials bound to hosts; with CA set, TLS to
 	// those hosts is terminated here (mitm.go).
@@ -86,13 +96,15 @@ type Proxy struct {
 	// UpstreamRoots verify the real hosts behind intercepted TLS; nil
 	// means this machine's roots (SSL_CERT_FILE is honoured).
 	UpstreamRoots *x509.CertPool
-	// Limits bound what the agent holds open here (relay.go).
+	// Limits bound what the agent holds open here (relay.go); a field
+	// left zero is New's.
 	Limits Limits
 
 	closed bool
 	mu     sync.Mutex
 	flows  map[*flow]bool // open tunnels, intercepted connections and forwarded requests
-	// forbid vets the address a connection is about to use (guard.go).
+	// forbid vets the address a connection is about to use (guard.go);
+	// nil is forbidden.
 	forbid func(netip.Addr) string
 	// admitting runs as admit starts, when set: a test acts there, after
 	// a connection's checks and before it is registered.
@@ -115,13 +127,14 @@ func (p *Proxy) admit(w http.ResponseWriter, host, target string) (f *flow, done
 	if p.flows == nil {
 		p.flows = map[*flow]bool{}
 	}
-	if n := p.Limits.MaxFlows; n > 0 && len(p.flows) >= n {
+	lim := p.limits()
+	if n := lim.MaxFlows; n > 0 && len(p.flows) >= n {
 		p.mu.Unlock()
 		p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "too many open connections"})
 		answer(w, "airbag: this session has "+strconv.Itoa(n)+" connections open through the proxy, the most it may; close some and retry", http.StatusServiceUnavailable)
 		return nil, nil
 	}
-	f = newFlow(p.Limits.Idle, p.Limits.Drain)
+	f = newFlow(lim.Idle, lim.Drain)
 	f.host, f.target = host, target
 	p.flows[f] = true
 	p.mu.Unlock()
@@ -147,6 +160,9 @@ func (p *Proxy) Close() {
 }
 
 func (p *Proxy) recordAll(events []audit.Event) {
+	if isNil(p.Log) {
+		return // ServeHTTP admits nothing without a log
+	}
 	if bulk, ok := p.Log.(interface{ AddAll([]audit.Event) error }); ok {
 		_ = bulk.AddAll(events)
 		return
@@ -178,6 +194,36 @@ func (p *Proxy) Cut(keep Allowlist, reason string) {
 		}
 	}
 	p.recordAll(logged)
+}
+
+// gate returns the Gate that decides, nil for none; ok is false for a
+// Gate holding a nil pointer, which could answer no check.
+func (p *Proxy) gate() (g Gate, ok bool) {
+	if isNil(p.Gate) {
+		return nil, p.Gate == nil
+	}
+	return p.Gate, true
+}
+
+// isNil reports whether v is nil, or an interface holding a nil pointer
+// (or map, func, chan, slice).
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch rv := reflect.ValueOf(v); rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Func, reflect.Chan, reflect.Slice, reflect.Interface, reflect.UnsafePointer:
+		return rv.IsNil()
+	}
+	return false
+}
+
+// upstream is Upstream, or no upstream proxy when it is nil.
+func (p *Proxy) upstream(u *url.URL) (*url.URL, error) {
+	if p.Upstream == nil {
+		return nil, nil
+	}
+	return p.Upstream(u)
 }
 
 func New(allow Allowlist, log audit.Recorder) *Proxy {
@@ -225,7 +271,7 @@ func isASCII(s string) bool {
 func (p *Proxy) HTTPServer() *http.Server {
 	// A request's header must arrive within 30 s, and a connection
 	// waiting for its next request is closed after Limits.KeepAlive.
-	srv := &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second, IdleTimeout: p.Limits.KeepAlive}
+	srv := &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second, IdleTimeout: p.limits().KeepAlive}
 	return srv
 }
 
@@ -322,7 +368,7 @@ func (p *Proxy) serveMirror(w http.ResponseWriter, r *http.Request) {
 
 // LimitListener applies the configured host connection cap.
 func (p *Proxy) LimitListener(l net.Listener) net.Listener {
-	if n := p.Limits.MaxFlows; n > 0 {
+	if n := p.limits().MaxFlows; n > 0 {
 		return netcap.Limit(l, 2*n)
 	}
 	return l
@@ -333,6 +379,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The previous response on this connection may have left a write
 	// deadline (answer, forward); this request starts without one.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	// Read once: every check below sees this gate, or none.
+	g, ok := p.gate()
+	switch {
+	case isNil(p.Log):
+		answer(w, "airbag: proxy log not configured", http.StatusServiceUnavailable)
+		return
+	case !ok:
+		p.Log.Add(audit.Event{Kind: "net.egress", Target: clipTarget(r.Host), Verdict: "deny", Reason: "proxy gate not configured"})
+		answer(w, "airbag: proxy gate not configured", http.StatusServiceUnavailable)
+		return
+	}
 	host := r.URL.Hostname()
 	if r.Method == http.MethodConnect {
 		host, _, _ = net.SplitHostPort(r.Host)
@@ -378,11 +435,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.URL.Host = r.Host // a proxy request's Host is its URL's
 	}
 	target := r.Host
-	if p.Mirror != nil && host == "airbag.mirror" && r.Method != http.MethodConnect {
+	if !isNil(p.Mirror) && host == "airbag.mirror" && r.Method != http.MethodConnect {
 		p.serveMirror(w, r)
 		return
 	}
-	if !p.Allow.Allows(host) && (p.Gate == nil || !p.Gate.AllowsHost(host)) {
+	if !p.Allow.Allows(host) && (g == nil || !g.AllowsHost(host)) {
 		if Registries.Allows(host) {
 			p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "registry: use the mirror"})
 			answer(w, "airbag: "+host+" is reached through http://airbag.mirror; point the package manager at the mirror (airbag sets GOPROXY, npm_config_registry, PIP_INDEX_URL)", http.StatusForbidden)
@@ -400,11 +457,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		answer(w, "airbag: port "+port+" on "+host+" denied by policy (only 80 and 443 unless the allowlist names the port: --allow "+host+":"+port+")", http.StatusForbidden)
 		return
 	}
-	if p.refuseTainted(w, host, target) {
+	if p.refuseTainted(w, g, host, target) {
 		return
 	}
-	if p.Gate != nil {
-		if d, id := p.Gate.Check(policy.Input{Effect: policy.Effect{Kind: "net.connect", Target: host, Detail: port}}); d.Verdict != policy.Allow {
+	if g != nil {
+		if d, id := g.Check(policy.Input{Effect: policy.Effect{Kind: "net.connect", Target: host, Detail: port}}); d.Verdict != policy.Allow {
 			p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: d.Verdict, Reason: d.Rule})
 			answer(w, policy.Explain(d, id), http.StatusForbidden)
 			return
@@ -419,21 +476,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// already and did not see it. The label is set before Cut takes
 	// p.mu, and admit registered the flow under p.mu, so either Cut saw
 	// the flow or this sees the label.
-	if p.refuseTainted(w, host, target) {
+	if p.refuseTainted(w, g, host, target) {
 		return
 	}
 	p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "allow"})
 	// Talking to a host that is neither a model API nor a registry
 	// brings outside data into the session: label it untrusted, so a
 	// rule can keep that data from driving an irreversible effect.
-	if p.Gate != nil && !Allowlist(DefaultAllow).Allows(host) && !Registries.Allows(host) {
-		if p.Gate.MarkUntrusted(host) {
+	if g != nil && !Allowlist(DefaultAllow).Allows(host) && !Registries.Allows(host) {
+		if g.MarkUntrusted(host) {
 			p.Log.Add(audit.Event{Kind: "label", Target: host, Verdict: "untrusted"})
 		}
 	}
 	if r.Method == http.MethodConnect {
 		if live := p.Creds.For(r.Host); live != nil && p.CA != nil {
-			p.intercept(w, r, host, live, f)
+			p.intercept(w, r, g, host, live, f)
 			return
 		}
 		p.connect(w, r, host, f)
@@ -444,14 +501,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // refuseTainted refuses a connection to a host other than a model API
 // once the session has read a secret.
-func (p *Proxy) refuseTainted(w http.ResponseWriter, host, target string) bool {
-	if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
+func (p *Proxy) refuseTainted(w http.ResponseWriter, g Gate, host, target string) bool {
+	if Allowlist(DefaultAllow).Allows(host) {
+		return false
+	}
+	if read := tainted(g); read != "" {
 		p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "secret-taint"})
-		answer(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted()+
+		answer(w, "airbag: blocked by policy \"secret-taint\": this session read "+read+
 			"; only model APIs and cached packages stay reachable", http.StatusForbidden)
 		return true
 	}
 	return false
+}
+
+// tainted is what g says the session read, "" with no gate.
+func tainted(g Gate) string {
+	if g == nil {
+		return ""
+	}
+	return g.Tainted()
 }
 
 // refuse answers a connection the address guard stopped.
@@ -502,7 +570,7 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string, f *
 // that never answers CONNECT is closed with the flow (idle or cut), and
 // dial then says errStopped, as it does for a direct dial.
 func (p *Proxy) dial(ctx context.Context, f *flow, hostport string, check bool) (net.Conn, error) {
-	pu, err := p.Upstream(&url.URL{Scheme: "https", Host: hostport})
+	pu, err := p.upstream(&url.URL{Scheme: "https", Host: hostport})
 	if err != nil {
 		return nil, err
 	}
@@ -590,7 +658,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 	for _, h := range []string{"Proxy-Connection", "Proxy-Authorization", "Connection", "Keep-Alive", "Te", "Trailer", "Upgrade"} {
 		out.Header.Del(h)
 	}
-	pu, err := p.Upstream(out.URL)
+	pu, err := p.upstream(out.URL)
 	if err != nil {
 		stopped()
 		answer(w, "airbag: "+err.Error(), http.StatusBadGateway)
@@ -639,8 +707,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 		panic(http.ErrAbortHandler)
 	}
 	f.release(stall)
-	if p.Limits.Idle > 0 {
-		_ = rc.SetWriteDeadline(time.Now().Add(p.Limits.Idle))
+	if idle := p.limits().Idle; idle > 0 {
+		_ = rc.SetWriteDeadline(time.Now().Add(idle))
 	}
 }
 

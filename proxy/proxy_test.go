@@ -521,3 +521,48 @@ func TestAllowlistEmptyEntry(t *testing.T) {
 		}
 	}
 }
+
+// A Proxy made without New has New's bounds: each zero limit is the
+// default, a negative one is off, and the address guard is forbidden.
+func TestStructLiteralDefaults(t *testing.T) {
+	var p Proxy
+	if p.limits() != DefaultLimits() || p.HTTPServer().IdleTimeout != KeepAliveIdle {
+		t.Fatalf("limits %+v", p.limits())
+	}
+	p.Limits = Limits{Idle: -1, MaxFlows: 7}
+	if got, want := p.limits(), (Limits{Idle: -1, Drain: Drain, KeepAlive: KeepAliveIdle, MaxFlows: 7}); got != want {
+		t.Fatalf("limits %+v, want %+v", got, want)
+	}
+	if p.guard()(netip.MustParseAddr("127.0.0.1")) == "" {
+		t.Fatal("no address guard without New")
+	}
+	if u, err := p.upstream(&url.URL{Host: "example.com:443"}); u != nil || err != nil {
+		t.Fatalf("upstream %v %v", u, err)
+	}
+}
+
+// With no log, or a Gate holding a nil pointer, nothing could be
+// recorded or decided: the proxy answers 503 instead. Cut records
+// nothing then.
+func TestUnconfiguredProxy(t *testing.T) {
+	serve := func(p *Proxy) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, &http.Request{Method: http.MethodConnect, Host: "api.anthropic.com:443", URL: &url.URL{Host: "api.anthropic.com:443"}})
+		return rec
+	}
+	var none *effects.Log
+	for _, p := range []*Proxy{{Allow: Allowlist{"api.anthropic.com"}}, {Allow: Allowlist{"api.anthropic.com"}, Log: none}} {
+		if rec := serve(p); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "proxy log not configured") {
+			t.Fatalf("no log: %d %q", rec.Code, rec.Body.String())
+		}
+		p.Cut(nil, "test")
+	}
+	log, path := newLog(t)
+	var gate *policy.Gate
+	if rec := serve(&Proxy{Allow: Allowlist{"api.anthropic.com"}, Log: log, Gate: gate}); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "proxy gate not configured") {
+		t.Fatalf("nil gate: %d %q", rec.Code, rec.Body.String())
+	}
+	if effs, _ := effects.Read(path); len(effs) != 1 || effs[0].Verdict != "deny" {
+		t.Fatalf("effects = %+v", effs)
+	}
+}
