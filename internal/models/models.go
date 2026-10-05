@@ -9,6 +9,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/getjump/airbag/policy"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -25,22 +26,7 @@ const (
 	Opaque    = "opaque"
 )
 
-type Effect struct {
-	Kind   string `json:"kind"`
-	Target string `json:"target,omitempty"`
-	Detail string `json:"detail,omitempty"`
-}
-
-func (e Effect) String() string {
-	s := e.Kind
-	if e.Target != "" {
-		s += " " + e.Target
-	}
-	if e.Detail != "" {
-		s += " (" + e.Detail + ")"
-	}
-	return s
-}
+type Effect = policy.Effect
 
 // Background reports whether a script leaves processes running after
 // it returns (cmd &, nohup, setsid, disown).

@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/outbox"
 )
 
 // fakeSession lays out a workspace, a home and their upper layers as
@@ -317,5 +317,33 @@ func TestReportDroppedRefusals(t *testing.T) {
 	Render(&b, s, nil, effs, nil, nil)
 	if !strings.Contains(b.String(), "Not logged 12 refusals, past 50 a second of a kind: net.egress ×12") {
 		t.Errorf("review:\n%s", b.String())
+	}
+}
+
+// The clone of a workspace named through a link is compared with where
+// the link leads, so the agent's deletions show; the real files are
+// named by the workspace's path.
+func TestScanTreeThroughLinkedRoot(t *testing.T) {
+	real, branch := t.TempDir(), t.TempDir()
+	for _, f := range []struct{ dir, name string }{{real, "gone.txt"}, {real, "keep.txt"}, {branch, "keep.txt"}, {branch, "new.txt"}} {
+		if err := os.WriteFile(filepath.Join(f.dir, f.name), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := ScanTree("ws", link, branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range cs {
+		got = append(got, c.Kind+":"+c.Rel+":"+c.Path)
+	}
+	want := []string{Deleted + ":gone.txt:" + filepath.Join(link, "gone.txt"), Added + ":new.txt:" + filepath.Join(link, "new.txt")}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }

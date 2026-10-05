@@ -37,8 +37,9 @@ advisory, with no details in it.
 
 We fix it in private, publish a GitHub security advisory that names the fixed
 version, request a CVE through GitHub when the problem is in scope, and credit
-you unless you would rather not. airbag is a command, not a library: watch the
-repository's releases and security advisories to hear about fixes.
+you unless you would rather not. airbag is a command first, though some of its
+Go packages can be embedded: either way, watch the repository's releases and
+security advisories to hear about fixes.
 
 ## Supported versions
 
@@ -71,6 +72,15 @@ configuration, an agent under `airbag run` that can:
 
 A way to change a release that reaches users (the binaries, `SHA256SUMS`,
 `install.sh` or the release workflow) is in scope too.
+
+So is a public Go package that fails open when it is used as
+[docs/composition.md](docs/composition.md) says: the proxy reaching a host that
+its allowlist, address guard or `Gate` refuse, or handing a bound credential's
+real value to the client; the policy engine allowing what its rules deny; the
+outbox or `githubpr` publishing a request that was not approved and claimed,
+or publishing it twice. What the embedding host owns is not: its isolation
+(whether traffic can get past the proxy), the labels it collects and reports
+through `Gate`, and how durable its `Recorder` is.
 
 ## What does not
 

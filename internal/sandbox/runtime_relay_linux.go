@@ -8,7 +8,7 @@ import (
 
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/netcap"
-	"github.com/getjump/airbag/internal/proxy"
+	"github.com/getjump/airbag/proxy"
 )
 
 // relayLimits bound a relay between the guest and a host server: at most

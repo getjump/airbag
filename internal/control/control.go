@@ -19,11 +19,11 @@ import (
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
 	"github.com/getjump/airbag/internal/netcap"
-	"github.com/getjump/airbag/internal/operation"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/steps"
+	"github.com/getjump/airbag/operation"
+	"github.com/getjump/airbag/outbox"
 )
 
 // SocketInSandbox is where the control socket is mounted for the agent
@@ -49,7 +49,7 @@ type Server struct {
 	Root string
 }
 
-func (s *Server) Serve(l net.Listener) error {
+func (s *Server) HTTPServer() *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /intent", s.intent)
 	mux.HandleFunc("POST /defer", s.deferCmd)
@@ -64,7 +64,7 @@ func (s *Server) Serve(l net.Listener) error {
 	// two.
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: time.Minute,
 		WriteTimeout: time.Minute, IdleTimeout: 2 * time.Minute}
-	return srv.Serve(netcap.Limit(l, MaxConns))
+	return srv
 }
 
 // MaxConns caps the connections to the control socket open at once.
@@ -100,6 +100,10 @@ func (s *Server) intent(w http.ResponseWriter, r *http.Request) {
 	s.Log.Add(effects.Effect{Kind: "intent." + in.Kind, Target: fmt.Sprint(in.Argv), Verdict: "defer", Reason: in.ID})
 	writeJSON(w, in)
 }
+
+// LimitListener retains the control endpoint's connection bound for host owners.
+func LimitListener(l net.Listener) net.Listener { return netcap.Limit(l, MaxConns) }
+func (s *Server) Serve(l net.Listener) error    { return s.HTTPServer().Serve(LimitListener(l)) }
 
 // writeJSON answers with v. Once the status is out, a failed write is
 // the client's to see, as a short body.

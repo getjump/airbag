@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/operation"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/steps"
+	"github.com/getjump/airbag/operation"
+	"github.com/getjump/airbag/outbox"
 )
 
 // Schema names the JSON layout of Report. Fields are only added within

@@ -4,14 +4,22 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
+
+	"github.com/getjump/airbag/internal/session"
 )
 
-// Egress values. Agent traffic goes through airbag's allowlist proxy; a
-// run that leaves the Nix daemon's socket reachable (--nix-daemon) has a
-// second path, the daemon's builds and substitutes, outside the proxy.
+// Egress values. Agent traffic goes through airbag's allowlist proxy. A
+// session can have paths around it, named after "+" in this order: the
+// Nix daemon (--nix-daemon on Linux), whose builds and substitutes reach
+// the network, and tcp:// forwards, connections to HOST:PORT that are not
+// proxied (on Linux airbag dials them from the host).
 const (
 	EgressProxy          = "allowlist-proxy"
-	EgressProxyNixDaemon = "allowlist-proxy+nix-daemon"
+	EgressProxyNixDaemon = EgressProxy + egressNixDaemon
+	EgressProxyForward   = EgressProxy + egressForward
+
+	egressNixDaemon = "+nix-daemon"
+	egressForward   = "+tcp-forward"
 )
 
 // Backend describes the compiled execution boundary, not a successful probe
@@ -46,32 +54,50 @@ func nativeBackend(platform string) Backend {
 		Readiness: "not-probed", Egress: EgressProxy,
 		Limitations: append([]string{
 			"agent code shares the host kernel; kernel exploits are outside this boundary",
-			"--nix-daemon: the Nix daemon's builds and substitutes reach the network outside the proxy; such a session records egress " + EgressProxyNixDaemon,
 			"agent state passthroughs can persist without apply",
 		}, sharedLimitations...),
 	}
 	switch platform {
 	case "linux":
 		b.Mechanism, b.WorkspaceBranch, b.HomeBranch = "namespaces+overlayfs+seccomp", "overlayfs", true
+		b.Limitations = append(b.Limitations,
+			"--nix-daemon: the Nix daemon's builds and substitutes reach the network outside the proxy; such a session records egress "+EgressProxyNixDaemon,
+			"--allow tcp://HOST:PORT: airbag connects to HOST:PORT from the host for the agent, outside the proxy (each connection is policy-checked and logged); such a session records egress "+EgressProxyForward)
 	case "darwin":
 		b.Mechanism, b.WorkspaceBranch = "seatbelt+workspace-clone", "clone"
-		b.Limitations = append(b.Limitations, "macOS is a prototype; HOME has no branch")
+		b.Limitations = append(b.Limitations, "macOS is a prototype; HOME has no branch",
+			"--allow tcp://localhost:PORT: the agent connects to that port directly, outside the proxy and unchecked; such a session records egress "+EgressProxyForward)
 	default:
 		b.Isolation, b.Mechanism, b.Egress = "unsupported", "unsupported", "unsupported"
 	}
 	return b
 }
 
-// ForRun is b as a session with these hidden host paths runs it: one that
-// leaves the Nix daemon's socket reachable does not keep egress in the
-// proxy. A session that hides nothing (an older airbag's) is reported so.
-// Only native execution sees the host's sockets; the optional runtimes
-// mount none of them and refuse --nix-daemon.
-func (b Backend) ForRun(hiddenHost []string) Backend {
-	if b.Name == "native" && b.Egress == EgressProxy && !slices.Contains(hiddenHost, NixDaemonSocket) {
-		b.Egress = EgressProxyNixDaemon
+// ForRun is b as a session with these hidden host paths and tcp://
+// forwards runs it, from what each platform really opens. On Linux a Nix
+// daemon socket the session does not hide is reachable (a session that
+// hides nothing, an older airbag's, is reported so), and every forward is
+// dialed from the host. macOS's profile allows no Nix socket whatever
+// HiddenHost says, and only the forwards to this machine (macForward).
+// The optional runtimes mount no host socket and refuse --nix-daemon and
+// forwards, so their egress is the proxy's.
+func (b Backend) ForRun(hiddenHost []string, forwards []session.Forward) Backend {
+	if b.Name != "native" || b.Egress != EgressProxy {
+		return b
+	}
+	if b.Platform == "linux" && !slices.Contains(hiddenHost, NixDaemonSocket) {
+		b.Egress += egressNixDaemon
+	}
+	if slices.ContainsFunc(forwards, func(f session.Forward) bool { return b.Platform == "linux" || macForward(f) }) {
+		b.Egress += egressForward
 	}
 	return b
+}
+
+// macForward reports whether macOS's profile lets the agent reach f: a
+// port on this machine, which it connects to directly.
+func macForward(f session.Forward) bool {
+	return f.Host == "localhost" || f.Host == "127.0.0.1" || f.Host == "::1"
 }
 
 // SelectBackend never substitutes native execution for an unavailable backend.

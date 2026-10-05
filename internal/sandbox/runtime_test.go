@@ -35,8 +35,13 @@ func TestOptionalBoundaryNeverFallsBack(t *testing.T) {
 				t.Fatalf("%s drops the shared limit %q", name, l)
 			}
 		}
-		if got := b.ForRun(nil).Egress; got != EgressProxy {
-			t.Fatalf("%s reports egress %s; it mounts no host socket", name, got)
+		// No host socket is mounted, and preflight refuses --nix-daemon and
+		// forwards: whatever the session's fields say, egress is the proxy's.
+		if got := b.ForRun(nil, []session.Forward{{Host: "db.internal", Port: 5432}}).Egress; got != EgressProxy {
+			t.Fatalf("%s reports egress %s; it mounts no host socket and dials no forward", name, got)
+		}
+		if slices.ContainsFunc(b.Limitations, func(l string) bool { return strings.Contains(l, "such a session records egress") }) {
+			t.Fatalf("%s lists a path around the proxy it refuses: %q", name, b.Limitations)
 		}
 	}
 }

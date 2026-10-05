@@ -47,7 +47,8 @@ const (
 )
 
 // Limits are the bounds a Proxy applies; New sets the defaults above,
-// tests shorten them.
+// tests shorten them. A field left zero is its default; a negative one
+// turns that bound off.
 type Limits struct {
 	Idle, Drain, KeepAlive time.Duration
 	MaxFlows               int
@@ -56,6 +57,26 @@ type Limits struct {
 // DefaultLimits are the limits New gives a Proxy.
 func DefaultLimits() Limits {
 	return Limits{Idle: TunnelIdle, Drain: Drain, KeepAlive: KeepAliveIdle, MaxFlows: MaxFlows}
+}
+
+// limits is p.Limits with each zero field set to its default, so a
+// Proxy made without New is bounded as one made with it. Every bound is
+// read through it.
+func (p *Proxy) limits() Limits {
+	l, d := p.Limits, DefaultLimits()
+	if l.Idle == 0 {
+		l.Idle = d.Idle
+	}
+	if l.Drain == 0 {
+		l.Drain = d.Drain
+	}
+	if l.KeepAlive == 0 {
+		l.KeepAlive = d.KeepAlive
+	}
+	if l.MaxFlows == 0 {
+		l.MaxFlows = d.MaxFlows
+	}
+	return l
 }
 
 // A flow is one connection relayed for the agent, with the

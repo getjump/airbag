@@ -19,15 +19,15 @@ import (
 	"github.com/getjump/airbag/internal/apply"
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
-	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/review"
 	"github.com/getjump/airbag/internal/sandbox"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/shim"
 	"github.com/getjump/airbag/internal/steps"
 	"github.com/getjump/airbag/internal/term"
+	"github.com/getjump/airbag/outbox"
+	"github.com/getjump/airbag/proxy"
 )
 
 // version is set at release: -ldflags "-X main.version=v0.1.0". A
@@ -198,7 +198,7 @@ func cmdRun(args []string) (int, error) {
 		return 1, err
 	}
 	ws := workspace(cwd)
-	if ws == home || ws == "/" {
+	if wholeHome(ws, home) {
 		return 1, fmt.Errorf("refusing to use %s as the workspace; cd into a project", ws)
 	}
 	pol, err := policy.Load(ws, home)
@@ -254,9 +254,6 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 		s.Backend, s.Isolation = execution.Name, execution.Isolation
-		// What this session reaches is fixed when it is created (HiddenHost),
-		// whatever this run's --nix-daemon says.
-		s.Egress = execution.ForRun(s.HiddenHost).Egress
 		if s.RequireIsolation == "" || *requireIsolation != "any" {
 			s.RequireIsolation = *requireIsolation
 		}
@@ -285,6 +282,10 @@ func cmdRun(args []string) (int, error) {
 				s.Forwards = append(s.Forwards, f)
 			}
 		}
+		// What this session reaches: HiddenHost is fixed when it is
+		// created, whatever this run's --nix-daemon says; this run may add
+		// forwards.
+		s.Egress = execution.ForRun(s.HiddenHost, s.Forwards).Egress
 		if err := s.Save(); err != nil {
 			return 1, err
 		}
@@ -297,7 +298,7 @@ func cmdRun(args []string) (int, error) {
 		pass = append(pass, projPass...)
 		meta := session.Meta{
 			Backend: execution.Name, Isolation: execution.Isolation, RequireIsolation: *requireIsolation, Runtime: runtimeConfig,
-			Egress:    execution.ForRun(hiddenHost).Egress,
+			Egress:    execution.ForRun(hiddenHost, forwards).Egress,
 			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
@@ -383,6 +384,26 @@ func cmdHook(agent, event string) {
 		_, _ = os.Stdout.Write(out)
 	}
 	os.Exit(0)
+}
+
+// wholeHome reports a workspace that is $HOME or /, by the directory
+// it is: git names the top of a repository with links resolved, so a
+// repository at ~ on a system where /home is a link (/var/home) is
+// spelled differently from $HOME.
+func wholeHome(ws, home string) bool {
+	if c := filepath.Clean(ws); c == filepath.Clean(home) || c == "/" {
+		return true
+	}
+	a, err := os.Stat(ws)
+	if err != nil {
+		return false
+	}
+	for _, p := range []string{home, "/"} {
+		if b, err := os.Stat(p); err == nil && os.SameFile(a, b) {
+			return true
+		}
+	}
+	return false
 }
 
 // workspace is the git toplevel, or the current directory.

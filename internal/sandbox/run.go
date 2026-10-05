@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,15 +22,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/getjump/airbag/internal/control"
-	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/mirror"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
-	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/session"
-	"github.com/getjump/airbag/internal/steps"
-	"github.com/getjump/airbag/internal/taint"
+	"github.com/getjump/airbag/proxy"
 )
 
 // stop records the end of a run: resume, apply and discard refuse a
@@ -51,83 +44,28 @@ func stopFailed(s *session.Session, code int, err error) (int, error) {
 }
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
-	if s.Backend != "" && s.Backend != "native" {
+	optional := s.Backend != "" && s.Backend != "native"
+	if optional {
 		if err := prepareRuntimeWorkspace(s); err != nil {
 			return stopFailed(s, 1, err)
 		}
 	}
-	gate := policy.NewGate(pol, s.Dir)
-	restoreLabels(gate, s)
-	log, err := effects.Open(s.EffectsPath())
-	if err != nil {
-		return 1, err
-	}
-	defer func() { _ = log.Close() }()
-
-	pl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ProxySock())
-	if err != nil {
-		return 1, err
-	}
-	defer pl.Close()
-	px := proxy.New(allow, log)
-	px.Gate = gate
-	if px.Creds, px.CA, err = setupCredentials(s, pol.Credentials); err != nil {
-		return 1, err
-	}
-	mr := mirror.New(filepath.Join(session.Root(), "mirror"), log)
-	mr.Tainted = gate.Tainted
-	mr.Pinned = mirror.FindPins(s.Workspace) // read from the real workspace, before the agent starts
-	px.Mirror = mr
-	// tcp:// forwards: one unix socket each, bridged inside the sandbox
-	// to 127.0.0.1:PORT (startForwards).
-	var fws []*forwarder
-	var fls []net.Listener // each serves until the session ends
-	defer func() {
-		for _, l := range fls {
-			_ = l.Close()
-		}
-	}()
-	for i, f := range s.Forwards {
-		_ = os.Remove(s.ForwardSock(i))
-		fl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ForwardSock(i))
-		if err != nil {
-			return 1, err
-		}
-		fls = append(fls, fl)
-		fw := newForwarder(f, gate, log)
-		fws = append(fws, fw)
-		go fw.serve(fl)
-	}
-	// Once the session reads a secret, connections it opened earlier to
-	// hosts outside the core set close before the read returns.
-	gate.Labels().OnAdd(func(l taint.Label, _ string) {
-		if l == taint.Secret {
-			px.Cut(proxy.DefaultAllow, "secret-taint")
-			for _, fw := range fws {
-				fw.cut()
-			}
-		}
-	})
-	go func() { _ = px.Serve(pl) }()
-
-	cl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ControlSock())
-	if err != nil {
-		return 1, err
-	}
-	defer cl.Close()
-	box, err := outbox.Open(s.EffectsPath())
-	if err != nil {
-		return 1, err
-	}
-	defer func() { _ = box.Close() }()
+	// An optional runtime's agent works in the clone; control requests
+	// name its paths.
 	root := s.Workspace
 	if s.Clone {
 		root = s.CloneDir()
 	}
-	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate, Root: root}
-	go func() { _ = ctl.Serve(cl) }()
+	host, err := startHostServices(s, allow, pol, hostEndpoints{ProxyNetwork: "unix", ProxyAddress: s.ProxySock(), ControlRoot: root, Forwards: true})
+	if err != nil {
+		if optional {
+			return stopFailed(s, 1, err)
+		}
+		return 1, err
+	}
+	defer func() { _ = host.Close() }()
 
-	if s.Backend != "" && s.Backend != "native" {
+	if optional {
 		code, err := runOptional(s)
 		if err != nil {
 			return stopFailed(s, code, err)

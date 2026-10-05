@@ -6,7 +6,7 @@ backends intercept attempts, and a successful handler reports a result; these
 are different kinds of evidence. The existing filesystem and network boundaries
 remain responsible for subprocesses.
 
-`internal/operation` starts a versioned, closed set of external action requests.
+The public `operation` package defines a versioned, closed set of external action requests.
 The first variant describes creation of a GitHub pull request: owner/repository,
 base and head branch, exact head commit, title, body bytes and draft status.
 It is data, with no shell or closure to execute. A SHA-256 digest covers all the

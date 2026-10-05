@@ -70,7 +70,7 @@ func PreflightRuntime(b Backend, c session.RuntimeConfig, workspace string, over
 		if err != nil {
 			return c, err
 		}
-		abs = realPrefix(abs) // the session root may not exist yet
+		abs = follow(abs) // the session root may not exist yet
 		if pathWithin(abs, c.RootFS) || pathWithin(c.RootFS, abs) {
 			return c, fmt.Errorf("runtime rootfs must be separate from workspace and sessions")
 		}

@@ -13,9 +13,9 @@ T=$(mktemp -d "$HOME/.airbag-isolation-e2e.XXXXXX")
 R=$(mktemp -d /var/tmp/airbag-isolation.XXXXXX)
 AIRBAG_HOME=$R/sessions
 export AIRBAG_HOME
-id='' id2='' id3=''
+id='' id2='' id3='' id4=''
 cleanup() {
-	for s in $id $id2 $id3; do "$AIRBAG" discard --yes "$s" >/dev/null 2>&1 || true; done
+	for s in $id $id2 $id3 $id4; do "$AIRBAG" discard --yes "$s" >/dev/null 2>&1 || true; done
 	rm -rf "$T" "$R"
 }
 trap cleanup EXIT
@@ -40,13 +40,20 @@ assert any("--nix-daemon" in l for l in b["limitations"]), b
 EOF
 [ ! -e "$AIRBAG_HOME" ] || fail "capabilities created session files"
 
-for flag in --require-isolation=virtual-machine --require-isolation=application-kernel \
-	--require-isolation=typo --backend=microvm --backend=typo; do
+# Each refusal for its own reason: an unknown flag exits 2 as well.
+while IFS='|' read -r flag reason; do
 	code=0
-	"$AIRBAG" run "$flag" -- true >"$T/out" 2>&1 || code=$?
+	"$AIRBAG" run "$flag" -- true </dev/null >"$T/out" 2>&1 || code=$?
 	[ "$code" = 2 ] || fail "run $flag exited $code: $(cat "$T/out")"
+	grep -qF -- "$reason" "$T/out" || fail "run $flag was not refused for \"$reason\": $(cat "$T/out")"
 	[ ! -e "$AIRBAG_HOME" ] || fail "run $flag created session files: $(cat "$T/out")"
-done
+done <<'REFUSALS'
+--require-isolation=virtual-machine|but virtual-machine was required (no fallback)
+--require-isolation=application-kernel|but application-kernel was required (no fallback)
+--require-isolation=typo|unknown isolation requirement "typo"
+--backend=microvm|microvm requires --no-home
+--backend=typo|execution backend "typo" is unavailable
+REFUSALS
 
 "$AIRBAG" run --require-isolation=shared-kernel -- sh -c 'echo run1 >> notes.txt' >"$T/out" 2>&1 ||
 	fail "a met requirement was refused: $(cat "$T/out")"
@@ -98,4 +105,16 @@ id2=$(session_of "$T/out")
 grep -q "egress allowlist-proxy+nix-daemon$" "$T/out" || fail "run --nix-daemon reported proxy-only egress: $(cat "$T/out")"
 grep -q '"egress": "allowlist-proxy+nix-daemon"' "$AIRBAG_HOME/$id2/meta.json" ||
 	fail "session saved proxy-only egress: $(cat "$AIRBAG_HOME/$id2/meta.json")"
+
+# A tcp:// forward is a path around the proxy: airbag dials HOST:PORT.
+"$AIRBAG" run --allow tcp://127.0.0.1:47123 -- true >"$T/out" 2>&1 || fail "run with a forward: $(cat "$T/out")"
+id4=$(session_of "$T/out")
+[ -n "$id4" ] || fail "no session in: $(cat "$T/out")"
+grep -q "egress allowlist-proxy+tcp-forward$" "$T/out" || fail "run with a forward reported proxy-only egress: $(cat "$T/out")"
+grep -q '"egress": "allowlist-proxy+tcp-forward"' "$AIRBAG_HOME/$id4/meta.json" ||
+	fail "session with a forward saved proxy-only egress: $(cat "$AIRBAG_HOME/$id4/meta.json")"
+# A resume can add a forward: the session's egress says so from then on.
+"$AIRBAG" run --session "$id" --allow tcp://127.0.0.1:47124 -- true >"$T/out" 2>&1 || fail "resume with a forward: $(cat "$T/out")"
+grep -q "egress allowlist-proxy+tcp-forward$" "$T/out" || fail "resume with a forward reported proxy-only egress: $(cat "$T/out")"
+grep -q '"egress": "allowlist-proxy+tcp-forward"' "$meta" || fail "resume with a forward saved proxy-only egress: $(cat "$meta")"
 echo PASS

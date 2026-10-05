@@ -8,10 +8,10 @@ import (
 	"testing"
 
 	"github.com/getjump/airbag/internal/policy"
-	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/review"
 	"github.com/getjump/airbag/internal/sandbox"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/proxy"
 )
 
 // An optional runtime that fails after the session exists (here staging a

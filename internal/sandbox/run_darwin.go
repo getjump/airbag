@@ -33,15 +33,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/getjump/airbag/internal/control"
-	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/mirror"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
-	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/session"
-	"github.com/getjump/airbag/internal/steps"
-	"github.com/getjump/airbag/internal/taint"
+	"github.com/getjump/airbag/proxy"
 )
 
 // Init exists on Linux only: macOS has no namespaces to start in.
@@ -54,56 +48,15 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if _, err := os.Stat("/usr/bin/sandbox-exec"); err != nil {
 		return 1, errors.New("sandbox-exec not found: airbag needs macOS's Seatbelt")
 	}
-	gate := policy.NewGate(pol, s.Dir)
-	restoreLabels(gate, s)
-	log, err := effects.Open(s.EffectsPath())
-	if err != nil {
-		return 1, err
-	}
-	defer func() { _ = log.Close() }()
-
 	if err := cloneWorkspace(s); err != nil {
 		return 1, err
 	}
-
-	pl, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	host, err := startHostServices(s, allow, pol, hostEndpoints{ProxyNetwork: "tcp", ProxyAddress: "127.0.0.1:0", ControlRoot: s.CloneDir()})
 	if err != nil {
 		return 1, err
 	}
-	defer pl.Close()
-	port := pl.Addr().(*net.TCPAddr).Port
-	px := proxy.New(allow, log)
-	px.Gate = gate
-	if px.Creds, px.CA, err = setupCredentials(s, pol.Credentials); err != nil {
-		return 1, err
-	}
-	mr := mirror.New(filepath.Join(session.Root(), "mirror"), log)
-	mr.Tainted = gate.Tainted
-	mr.Pinned = mirror.FindPins(s.Workspace) // read from the real workspace, before the agent starts
-	px.Mirror = mr
-	gate.Labels().OnAdd(func(l taint.Label, _ string) {
-		if l == taint.Secret {
-			px.Cut(proxy.DefaultAllow, "secret-taint")
-		}
-	})
-	go func() { _ = px.Serve(pl) }()
-
-	if err := os.MkdirAll(s.RunDir(), 0o700); err != nil {
-		return 1, err
-	}
-	_ = os.Remove(s.ControlSock())
-	cl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ControlSock())
-	if err != nil {
-		return 1, err
-	}
-	defer cl.Close()
-	box, err := outbox.Open(s.EffectsPath())
-	if err != nil {
-		return 1, err
-	}
-	defer func() { _ = box.Close() }()
-	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate, Root: s.CloneDir()}
-	go func() { _ = ctl.Serve(cl) }()
+	defer func() { _ = host.Close() }()
+	port := host.ProxyAddr.(*net.TCPAddr).Port
 
 	self, err := os.Executable()
 	if err != nil {
@@ -187,17 +140,30 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 // instant and takes no space until files change. Off APFS, cp falls
 // back to a full copy.
 func cloneWorkspace(s *session.Session) error {
-	if _, err := os.Stat(s.CloneDir()); err == nil {
-		return nil // a resumed session keeps its clone
+	if fi, err := os.Lstat(s.CloneDir()); err == nil {
+		// A resumed session keeps its clone. An older airbag made the
+		// clone of a workspace named through a link a link to the real
+		// files; the profile would then let the agent write them.
+		if !fi.IsDir() {
+			return fmt.Errorf("the clone of session %s is not a directory (an older airbag made it from a linked workspace); discard the session", s.ID)
+		}
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(s.CloneDir()), 0o700); err != nil {
 		return err
 	}
-	out, err := exec.CommandContext(context.Background(), "/bin/cp", "-c", "-R", s.Workspace, s.CloneDir()).CombinedOutput() //nolint:gosec // absolute paths of the session's own workspace and clone
+	// cp -R copies a link named on its command line as a link, so a
+	// workspace named through one would give a clone that is a link to
+	// the real files. It copies from where the link leads.
+	src, err := filepath.EvalSymlinks(s.Workspace)
+	if err != nil {
+		return fmt.Errorf("resolve the workspace %s: %w", s.Workspace, err)
+	}
+	out, err := exec.CommandContext(context.Background(), "/bin/cp", "-c", "-R", src, s.CloneDir()).CombinedOutput() //nolint:gosec // absolute paths of the session's own workspace and clone
 	if err != nil {
 		_ = os.RemoveAll(s.CloneDir())
 		fmt.Fprintf(os.Stderr, "airbag: APFS clone failed (%s); copying instead\n", strings.TrimSpace(string(out)))
-		if out, err := exec.CommandContext(context.Background(), "/bin/cp", "-R", s.Workspace, s.CloneDir()).CombinedOutput(); err != nil { //nolint:gosec // absolute paths of the session's own workspace and clone
+		if out, err := exec.CommandContext(context.Background(), "/bin/cp", "-R", src, s.CloneDir()).CombinedOutput(); err != nil { //nolint:gosec // absolute paths of the session's own workspace and clone
 			return fmt.Errorf("copy the workspace: %w: %s", err, out)
 		}
 	}

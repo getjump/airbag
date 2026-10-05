@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/getjump/airbag/internal/creds"
+	"github.com/getjump/airbag/creds"
 )
 
 // The proxy runs in the host's network namespace, so an allowed name
@@ -68,6 +68,14 @@ func (e *blockedAddr) Error() string {
 	return fmt.Sprintf("resolves to %s (%s); airbag's proxy does not connect there", e.addr, e.why)
 }
 
+// guard is the address check: forbidden, unless a test set another.
+func (p *Proxy) guard() func(netip.Addr) string {
+	if p.forbid == nil {
+		return forbidden
+	}
+	return p.forbid
+}
+
 // dialer connects to hostport. With check, every address it is about
 // to connect to must pass forbidden.
 func (p *Proxy) dialer(check bool) *net.Dialer {
@@ -78,7 +86,7 @@ func (p *Proxy) dialer(check bool) *net.Dialer {
 			if err != nil {
 				return err
 			}
-			if why := p.forbid(ap.Addr()); why != "" {
+			if why := p.guard()(ap.Addr()); why != "" {
 				return &blockedAddr{addr: ap.Addr().Unmap().String(), why: why}
 			}
 			return nil

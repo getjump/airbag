@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getjump/airbag/internal/creds"
+	"github.com/getjump/airbag/creds"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/policy"
 )

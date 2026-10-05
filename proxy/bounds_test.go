@@ -101,6 +101,12 @@ func (s *ignoresEOF) handle(c net.Conn) {
 	s.eof.Add(1)
 }
 
+func (s *ignoresEOF) accepted() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.held)
+}
+
 func (s *ignoresEOF) close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -371,18 +377,30 @@ func TestForwardStalledUpstream(t *testing.T) {
 		pu, _ := url.Parse("http://" + pa)
 		tr := &http.Transport{Proxy: http.ProxyURL(pu)}
 		defer tr.CloseIdleConnections()
-		cl := &http.Client{Transport: tr, Timeout: 200 * time.Millisecond}
+		cl := &http.Client{Transport: tr}
 		g0, fd0 := usage()
+		// The client gives up once every request has reached the
+		// upstream, so each one tests the proxy's close, not whether a
+		// busy runner dialled it before a timeout.
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
 		var wg sync.WaitGroup
 		for range n {
 			wg.Go(func() {
-				req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+target+"/x", nil)
+				req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+target+"/x", nil)
 				if resp, err := cl.Do(req); err == nil {
 					resp.Body.Close()
 				}
 			})
 		}
+		for wait := time.Now().Add(10 * time.Second); up.accepted() < n && time.Now().Before(wait); {
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
 		wg.Wait()
+		if got := up.accepted(); got != n {
+			t.Fatalf("%d of %d requests reached the upstream", got, n)
+		}
 		tr.CloseIdleConnections()
 		settle(t, g0, fd0, 2, n+2, 3*time.Second) // n: the upstream's side, which it keeps
 		deadline := time.Now().Add(2 * time.Second)
