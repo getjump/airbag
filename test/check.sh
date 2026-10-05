@@ -3,7 +3,7 @@
 #
 #   hygiene  gofmt, go mod tidy and verify, go vet for Linux and macOS
 #   lint     golangci-lint (.golangci.yml) for Linux and macOS
-#   vuln     govulncheck for Linux and macOS
+#   vuln     govulncheck for Linux and macOS, with test/tty's e2e tests
 #   shell    shellcheck on the shell scripts
 #   actions  actionlint on .github/workflows
 #   race     go test -race
@@ -114,6 +114,9 @@ check_vuln() {
 	for os in linux darwin; do
 		echo "== govulncheck GOOS=$os"
 		GOOS=$os "$bin" ./...
+		# The PTY tests' modules are only in test files behind a tag.
+		echo "== govulncheck GOOS=$os -tags e2e -test ./test/tty/..."
+		GOOS=$os "$bin" -tags e2e -test ./test/tty/...
 	done
 }
 
