@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Benign AgentFS release/mount compatibility probe, not a security benchmark."""
 import argparse
+from contextlib import closing
 import fcntl
 import json
 import mmap
@@ -129,7 +130,7 @@ def main():
             cli("fs", str(db), "write", "cli.txt", "hello")
             result["cli_read_back"] = cli("fs", str(db), "cat", "cli.txt").stdout.strip()
             assert result["cli_read_back"] == "hello"
-            with sqlite3.connect(db) as conn:
+            with closing(sqlite3.connect(db)) as conn:
                 result["tool_calls_after_cli_read_write"] = conn.execute("SELECT count(*) FROM tool_calls").fetchone()[0]
             if not args.cli_only:
                 backend = "nfs" if sys.platform == "darwin" else "fuse"
@@ -149,7 +150,7 @@ def main():
                 result["mounted"] = records[0]["real_mount"]["passed"]
                 result["host_base_unchanged"] = all((base / name).read_text() == "original\n"
                                                     for name in ["seed.txt", "removed.txt"])
-                with sqlite3.connect(db) as conn:
+                with closing(sqlite3.connect(db)) as conn:
                     result["tool_calls_after_mounted_operations"] = conn.execute("SELECT count(*) FROM tool_calls").fetchone()[0]
                 if proc.returncode != 0 or not result["host_base_unchanged"]:
                     raise RuntimeError("mounted compatibility check failed; see checks and mount.log")
