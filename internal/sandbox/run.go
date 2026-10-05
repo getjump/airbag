@@ -44,14 +44,25 @@ func stopFailed(s *session.Session, code int, err error) (int, error) {
 }
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
+	optional := s.Backend != "" && s.Backend != "native"
+	fail := func(err error) (int, error) {
+		if optional {
+			return stopFailed(s, 1, err)
+		}
+		return 1, err
+	}
 	// An empty mode is durable: a session from before the option, or one
 	// that never set it.
 	switch s.RuntimeAudit {
 	case "", "durable", "buffered":
 	default:
-		return 1, fmt.Errorf("invalid runtime audit mode %q", s.RuntimeAudit)
+		return fail(fmt.Errorf("invalid runtime audit mode %q", s.RuntimeAudit))
 	}
-	optional := s.Backend != "" && s.Backend != "native"
+	// run refuses these before a session exists, and on resume; a session
+	// that asks for one anyway is not run without it.
+	if optional && UsesRuntimePolicies(s) {
+		return fail(fmt.Errorf("session %s asks for runtime policy options, which %s does not run", s.ID, s.Backend))
+	}
 	if optional {
 		if err := prepareRuntimeWorkspace(s); err != nil {
 			return stopFailed(s, 1, err)

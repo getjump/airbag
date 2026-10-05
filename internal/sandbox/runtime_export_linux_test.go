@@ -118,3 +118,43 @@ func TestAbandonedExportLeavesNoStage(t *testing.T) {
 
 	abandoned(startImport(listen(), filepath.Join(t.TempDir(), "export")))
 }
+
+// A whole export through startImport's connection is the importer's
+// result, as runMicroVM publishes it.
+func TestImportTakesAWholeExport(t *testing.T) {
+	whole, err := sent(t, guestSkipping(guestWorkspace(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(t.TempDir(), "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	stage := filepath.Join(t.TempDir(), "export")
+	im := startImport(l, stage)
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "unix", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(whole); err != nil {
+		t.Fatal(err)
+	}
+	var r exportResult
+	select {
+	case r = <-im.result:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no result for a whole export")
+	}
+	if r.err != nil || r.code != 7 {
+		t.Fatalf("result %+v", r)
+	}
+	var ack [1]byte
+	if _, err := io.ReadFull(conn, ack[:]); err != nil || ack[0] != exportAck {
+		t.Fatalf("the guest is not told the export was taken: %v %x", err, ack)
+	}
+	if b, err := os.ReadFile(filepath.Join(stage, "a.txt")); err != nil || string(b) != "a.txt" {
+		t.Fatalf("a.txt: %q %v", b, err)
+	}
+}

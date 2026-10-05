@@ -71,7 +71,7 @@ func validateRuntimeResume(s *session.Session, b sandbox.Backend) error {
 	if b.Name == "native" {
 		return nil
 	}
-	if s.FilePolicy || s.ExecPolicy || s.RuntimeProfile || s.FileCache != "" && s.FileCache != "off" || s.RuntimeAudit == "buffered" {
+	if sandbox.UsesRuntimePolicies(s) {
 		return fmt.Errorf("session %s runs with runtime policy options, which %s does not run; resume it on the native backend", s.ID, b.Name)
 	}
 	// No copy: run makes it again from the workspace, which

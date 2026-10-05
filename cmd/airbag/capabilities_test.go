@@ -222,8 +222,13 @@ func TestOptionalResumeRefusesASecretInTheCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
-	if err := resume(); err == nil {
-		t.Fatal("a directory the check cannot read is passed")
+	// Root reads it and finds the file; anyone else cannot read it.
+	want := "cannot be checked"
+	if os.Geteuid() == 0 {
+		want = "holds a secret file"
+	}
+	if err := resume(); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("a directory the check cannot read: %v, want %q", err, want)
 	}
 	// Without a copy, run makes one from the checked workspace.
 	if err := os.Chmod(locked, 0o700); err != nil {
@@ -234,5 +239,33 @@ func TestOptionalResumeRefusesASecretInTheCopy(t *testing.T) {
 	}
 	if err := resume(); err != nil {
 		t.Fatalf("a session without a copy is refused: %v", err)
+	}
+}
+
+// A saved session that asks for a runtime policy is not resumed on an
+// optional runtime, which would run it without the policy.
+func TestOptionalResumeRefusesRuntimePolicies(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("optional runtimes are Linux only")
+	}
+	gvisor, err := sandbox.SelectBackend("gvisor", "any")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, meta := range map[string]session.Meta{
+		"fs-policy":       {FilePolicy: true},
+		"exec-policy":     {ExecPolicy: true},
+		"runtime-profile": {RuntimeProfile: true},
+		"fs-cache":        {FileCache: "sealed"},
+		"buffered audit":  {RuntimeAudit: "buffered"},
+	} {
+		meta.ID, meta.Backend = "s-1", "gvisor"
+		err := validateRuntimeResume(&session.Session{Meta: meta, Dir: t.TempDir()}, gvisor)
+		if err == nil || !strings.Contains(err.Error(), "runtime policy") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if err := validateRuntimeResume(&session.Session{Meta: session.Meta{ID: "s-1", Backend: "gvisor", FileCache: "off", RuntimeAudit: "durable"}, Dir: t.TempDir()}, gvisor); err != nil {
+		t.Errorf("the defaults are refused: %v", err)
 	}
 }

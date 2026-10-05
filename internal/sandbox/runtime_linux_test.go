@@ -96,3 +96,27 @@ func TestRootfsCopierIsGNU(t *testing.T) {
 		t.Fatalf("staged with %s, which is not GNU cp", cp)
 	}
 }
+
+// cmd/airbag refuses the runtime policies on an optional runtime; Run
+// does too, before anything is copied or started, for a session that
+// asks for one anyway, and records it stopped.
+func TestOptionalRunRefusesRuntimePolicies(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", filepath.Join(t.TempDir(), "sessions"))
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir(), Backend: "gvisor", Clone: true, ExecPolicy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(s, nil, nil); err == nil || !strings.Contains(err.Error(), "runtime policy") {
+		t.Fatalf("an optional runtime ran a session with a runtime policy: %v", err)
+	}
+	saved, err := session.Load(s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status != session.StatusStopped {
+		t.Fatalf("the refused session is %s", saved.Status)
+	}
+	if _, err := os.Lstat(s.CloneDir()); !os.IsNotExist(err) {
+		t.Fatalf("the workspace was copied first: %v", err)
+	}
+}

@@ -100,6 +100,12 @@ func macForward(f session.Forward) bool {
 	return f.Host == "localhost" || f.Host == "127.0.0.1" || f.Host == "::1"
 }
 
+// UsesRuntimePolicies reports whether s asks for a runtime policy
+// option, which only the native sandbox runs.
+func UsesRuntimePolicies(s *session.Session) bool {
+	return s.FilePolicy || s.ExecPolicy || s.RuntimeProfile || s.FileCache != "" && s.FileCache != "off" || s.RuntimeAudit == "buffered"
+}
+
 // SelectBackend never substitutes native execution for an unavailable backend.
 func SelectBackend(name, isolation string) (Backend, error) {
 	b := NativeBackend()
