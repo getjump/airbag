@@ -231,17 +231,10 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 // more, but still holds them, until a change the session makes to it is
 // applied as well.
 func linksOut(s *session.Session, cs []Change) int {
-	in := func(p, dir string) bool {
-		if dir == "" {
-			return false
-		}
-		dir = filepath.Clean(dir)
-		return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
-	}
-	wsReal := s.WorkspaceID.Real
-	if wsReal == "" {
-		wsReal, _ = filepath.EvalSymlinks(s.Workspace)
-	}
+	// Inside is decided as apply does, by file: on macOS a target can
+	// name the workspace in another case or through a firmlink. A
+	// workspace review cannot read has nothing inside it.
+	ws, wsErr := os.Stat(s.Workspace)
 	// One component at a time from the link's real directory, as apply
 	// will follow it, through the links already in the real files:
 	// publish -> cache/pkg with cache -> ~/.config, or cache/../secret,
@@ -260,7 +253,7 @@ func linksOut(s *session.Session, cs []Change) int {
 		switch {
 		case !ok, secretfs.IsSecret(strings.ToLower(filepath.Base(t))):
 			return true
-		case in(t, wsReal):
+		case wsErr == nil && links.Inside(t, ws):
 			return false
 		}
 		return !links.Installed(t)

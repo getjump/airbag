@@ -476,3 +476,45 @@ func TestScanTreeThroughLinkedRoot(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
+
+// linkReport is the attention line for a deferred command when the
+// session adds a link named name to target in workspace ws.
+func linkReport(t *testing.T, ws, name, target string) string {
+	t.Helper()
+	upper := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(upper, name)); err != nil {
+		t.Fatal(err)
+	}
+	s := &session.Session{Meta: session.Meta{ID: "s-1", Workspace: ws}}
+	c := Change{Layer: "ws", Rel: name, Path: filepath.Join(ws, name), Upper: filepath.Join(upper, name), Kind: Added, Type: fs.ModeSymlink}
+	cmd := outbox.Intent{ID: "i-1", Kind: outbox.KindCmd, Argv: []string{"pubtool", "release"}, Status: outbox.Pending}
+	for _, a := range BuildReport(s, []Change{c}, nil, []outbox.Intent{cmd}, nil).Attention {
+		if a.Target == cmd.ID {
+			return a.Why
+		}
+	}
+	t.Fatal("no attention for the command")
+	return ""
+}
+
+// An absolute target that names the workspace in another case is inside
+// it where the filesystem ignores case, as on macOS by default: apply
+// compares files, and review does too.
+func TestReportComparesTheWorkspaceByFile(t *testing.T) {
+	ws, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := strings.ToUpper(ws)
+	if other == ws {
+		other = strings.ToLower(ws)
+	}
+	a, errA := os.Stat(ws)
+	b, errB := os.Stat(other)
+	if errA != nil || errB != nil || !os.SameFile(a, b) {
+		t.Skip("the filesystem tells case apart")
+	}
+	if w := linkReport(t, ws, "latest", filepath.Join(other, "v2")); strings.Contains(w, "trust-links") {
+		t.Errorf("a link into the workspace, named in another case, holds the command: %s", w)
+	}
+}

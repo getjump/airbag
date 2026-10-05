@@ -9,6 +9,21 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Inside reports whether p is root or below it, compared as files, not
+// as names: on macOS case and firmlinks give one directory several
+// names, and a bind mount does anywhere. p need not exist; its longest
+// existing part is compared.
+func Inside(p string, root os.FileInfo) bool {
+	for d := p; ; d = filepath.Dir(d) {
+		if fi, err := os.Stat(d); err == nil && os.SameFile(fi, root) {
+			return true
+		}
+		if filepath.Dir(d) == d {
+			return false
+		}
+	}
+}
+
 // Installed reports whether p is an installed program, which is what a
 // venv's interpreter links to: a regular file with an execute bit, owned
 // by root, in directories owned by root that anyone may search, none of

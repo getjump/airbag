@@ -709,7 +709,7 @@ func linksOut(s *session.Session) []string {
 			out = append(out, p+" -> (nowhere)")
 		case secretfs.IsSecret(strings.ToLower(filepath.Base(t))):
 			out = append(out, p+" -> "+t)
-		case inside(t, ws):
+		case links.Inside(t, ws):
 		case !links.Installed(t):
 			out = append(out, p+" -> "+t)
 		}
@@ -735,19 +735,6 @@ func linkTarget(p string) (string, bool) {
 		}
 	}
 	return links.Follow(dir, text)
-}
-
-// inside reports whether p, or the nearest part of it that exists, is
-// below the directory root, comparing files rather than names.
-func inside(p string, root os.FileInfo) bool {
-	for d := p; ; d = filepath.Dir(d) {
-		if fi, err := os.Stat(d); err == nil && os.SameFile(fi, root) {
-			return true
-		}
-		if filepath.Dir(d) == d {
-			return false
-		}
-	}
 }
 
 // listLinks names up to three links, and how many more.
