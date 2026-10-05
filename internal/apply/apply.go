@@ -390,9 +390,28 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	if err != nil {
 		return err
 	}
+	// A run was recorded but not its end: airbag stopped mid-push. That
+	// is recorded whatever became of the workspace, so the user can say
+	// what happened (airbag outbox resolve).
+	for i, it := range intents {
+		if it.Status != outbox.Running {
+			continue
+		}
+		it.Status = outbox.Unknown
+		it.Output = "airbag stopped while this ran, so whether it took effect is not known; it is not run again"
+		if it.Kind == outbox.KindPush {
+			it.Output = "airbag stopped while this ran, so it may or may not have reached the remote " +
+				"(check with git ls-remote); it is not run again"
+		}
+		if err := box.Update(it); err != nil {
+			return fmt.Errorf("intent %s: %w", it.ID, err)
+		}
+		fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
+		intents[i] = it
+	}
 	// Pushes and deferred commands run in the workspace.
 	if slices.ContainsFunc(intents, func(it outbox.Intent) bool {
-		return it.Status == outbox.Pending || it.Status == string(operation.Approved) || it.Status == outbox.Running
+		return it.Status == outbox.Pending || it.Status == string(operation.Approved)
 	}) {
 		if err := outboxHeld(s); err != nil {
 			return err
@@ -407,21 +426,6 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	looked := o.TrustLinks
 	for _, it := range intents {
 		if it.Status == outbox.Unknown {
-			unknown = it.ID
-			continue
-		}
-		if it.Status == outbox.Running {
-			// A run was recorded but not its end: airbag stopped mid-push.
-			it.Status = outbox.Unknown
-			it.Output = "airbag stopped while this ran, so whether it took effect is not known; it is not run again"
-			if it.Kind == outbox.KindPush {
-				it.Output = "airbag stopped while this ran, so it may or may not have reached the remote " +
-					"(check with git ls-remote); it is not run again"
-			}
-			if err := box.Update(it); err != nil {
-				return fmt.Errorf("intent %s: %w", it.ID, err)
-			}
-			fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
 			unknown = it.ID
 			continue
 		}

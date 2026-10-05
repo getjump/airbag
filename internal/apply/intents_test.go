@@ -67,6 +67,37 @@ func TestRunningBecomesUnknown(t *testing.T) {
 	}
 }
 
+// One that was running when airbag stopped becomes unknown even with the
+// workspace moved, so its outcome can still be recorded; the rest wait.
+func TestRunningBecomesUnknownWithRootMoved(t *testing.T) {
+	s, box := testBox(t)
+	id, err := session.DirIDOf(s.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.WorkspaceID = id
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindPush, Argv: []string{"git", "push", "origin", "main"}, Cwd: s.Workspace})
+	it.Status = outbox.Running
+	if err := box.Update(it); err != nil {
+		t.Fatal(err)
+	}
+	later, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: s.Workspace})
+	moveRoot(t, s.Workspace)
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, nil, Options{Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("the outbox ran in a moved workspace: %v", err)
+	}
+	if got := status(t, box, it.ID); got != outbox.Unknown {
+		t.Fatalf("status %s, want unknown: %q", got, out.String())
+	}
+	if err := box.Resolve(it.ID, true); err != nil {
+		t.Fatalf("its outcome cannot be recorded: %v", err)
+	}
+	if got := status(t, box, later.ID); got != outbox.Pending {
+		t.Fatalf("the later intent is %s", got)
+	}
+}
+
 // After a session put git config or hooks into the repository, its
 // pushes wait for --trust-git, with or without --yes.
 func TestRiskyWaitsForTrust(t *testing.T) {
