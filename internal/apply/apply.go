@@ -194,6 +194,20 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 		return fmt.Errorf("nothing applied; leave these out with apply -i or --only, rerun with --force to overwrite them, or discard the session")
 	}
+	// Before the undo journal moves anything: the journal would follow
+	// such a link too. --force does not cover it, since the change would
+	// land somewhere else, not overwrite a host edit.
+	var replacing []string
+	for _, c := range picked {
+		if c.Kind == review.Replaced {
+			replacing = append(replacing, c.Path)
+		}
+	}
+	for _, c := range picked {
+		if err := parentsUnlinked(c, replacing); err != nil {
+			return fmt.Errorf("nothing applied: %w", err)
+		}
+	}
 	if len(picked) > 0 {
 		gen, err := beginGeneration(s)
 		if err != nil {
@@ -828,7 +842,7 @@ func confirm(in *bufio.Reader, o Options, q string) bool {
 }
 
 func applyOne(c review.Change) error {
-	if err := parentsUnlinked(c); err != nil {
+	if err := parentsUnlinked(c, nil); err != nil {
 		return err
 	}
 	switch c.Kind {
@@ -868,8 +882,9 @@ func applyOne(c review.Change) error {
 // was a directory (the branch holds an entry below it), so the link is
 // the host's, made while the session ran, and only the entry itself was
 // checked for a conflict: writing or removing through it would land
-// outside the workspace or $HOME.
-func parentsUnlinked(c review.Change) error {
+// outside the workspace or $HOME. A directory in replacing is not looked
+// below: its own change, applied first, makes it a real directory.
+func parentsUnlinked(c review.Change, replacing []string) error {
 	rel := filepath.FromSlash(c.Rel)
 	root, ok := strings.CutSuffix(c.Path, string(filepath.Separator)+rel)
 	if !ok {
@@ -881,9 +896,12 @@ func parentsUnlinked(c review.Change) error {
 			break
 		}
 		d = filepath.Join(d, part)
+		if slices.Contains(replacing, d) {
+			return nil
+		}
 		fi, err := os.Lstat(d)
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil // made below, as a directory
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return nil // made below as a directory, or a file in the way that the apply stops at
 		}
 		if err != nil {
 			return err

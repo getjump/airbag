@@ -1546,3 +1546,58 @@ func TestApplyRefusesLinkedParent(t *testing.T) {
 		t.Fatalf("changed what the link leads to: %v", entries)
 	}
 }
+
+// The check comes before the undo journal moves the previous version
+// away: through Apply nothing is applied, and through a generation the
+// file the link leads to never leaves its place.
+func TestApplyRefusesLinkedParentBeforeJournal(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	outside := t.TempDir()
+	keep := filepath.Join(outside, "keep")
+	if err := os.WriteFile(keep, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, "dir")); err != nil {
+		t.Fatal(err)
+	}
+	upper := filepath.Join(t.TempDir(), "keep")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs := []review.Change{
+		{Layer: "ws", Rel: "dir/keep", Path: filepath.Join(ws, "dir/keep"), Upper: upper, Kind: review.Modified, Mode: 0o644},
+		{Layer: "ws", Rel: "dir/keep", Path: filepath.Join(ws, "dir/keep"), Kind: review.Deleted},
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	for _, c := range cs {
+		if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "became a link") {
+			t.Fatalf("%s applied through a linked parent: %v", c.Kind, err)
+		}
+	}
+	g, err := beginGeneration(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if err := g.apply(c); err == nil {
+			t.Fatalf("%s: the generation applied through a linked parent", c.Kind)
+		}
+		if data, err := os.ReadFile(keep); err != nil || string(data) != "mine\n" {
+			t.Fatalf("%s: the file the link leads to moved: %q %v", c.Kind, data, err)
+		}
+	}
+}
