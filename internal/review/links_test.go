@@ -419,3 +419,31 @@ func TestSnapshotLinkedWithinSnapshots(t *testing.T) {
 	}
 	t.Fatalf("no change in %+v", cs)
 }
+
+// A legacy config linked into the workspace that the agent creates is
+// read instead of the existing ~/.claude.json: the check for that looks
+// in $HOME, not in the workspace the change is in.
+func TestShadowingConfigLinkedIntoWorkspace(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home, ws := t.TempDir(), t.TempDir()
+	writeCfg(t, filepath.Join(home, ".claude.json"), `{"numStartups":1}`)
+	symlink(t, filepath.Join(ws, "legacy.json"), filepath.Join(home, ".claude/.config.json"))
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCfg(t, filepath.Join(s.WSUpper(), "legacy.json"), `{"numStartups":2}`)
+	cs, err := Scan(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Rel == "legacy.json" {
+			if !slices.Contains(c.Flags, "new, read instead of ~/.claude.json") {
+				t.Errorf("flags %v", c.Flags)
+			}
+			return
+		}
+	}
+	t.Fatalf("no change in %+v", cs)
+}

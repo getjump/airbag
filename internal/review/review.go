@@ -38,8 +38,10 @@ type Change struct {
 	Type  fs.FileMode // fs.ModeDir, fs.ModeSymlink or 0 for files
 	Mode  fs.FileMode
 	Flags []string
-	// cfg: the agent config a change is through a link (classify).
-	cfg *jsonConfig
+	// cfg: the agent config a change is through a link, and home the
+	// $HOME it is in (classify).
+	cfg  *jsonConfig
+	home string
 }
 
 func (c Change) IsDir() bool { return c.Type == fs.ModeDir }
@@ -214,7 +216,7 @@ func classify(s *session.Session, cs []Change) {
 			}
 			names = append(names, a)
 			if cf := configFor(strings.TrimSuffix(a, "/")); cf != nil {
-				c.cfg = cf
+				c.cfg, c.home = cf, s.Home
 			}
 		}
 		persists := func(n string, t []persistence) bool {

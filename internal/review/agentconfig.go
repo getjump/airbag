@@ -374,9 +374,13 @@ func shadowing(c Change) string {
 	if cf == nil || cf.shadows == "" || c.Kind != Added {
 		return ""
 	}
-	home, ok := strings.CutSuffix(c.Path, string(filepath.Separator)+c.Rel)
-	if !ok {
-		return ""
+	home := c.home // through a link, the change may be in the workspace
+	if home == "" {
+		h, ok := strings.CutSuffix(c.Path, string(filepath.Separator)+c.Rel)
+		if !ok {
+			return ""
+		}
+		home = h
 	}
 	if _, err := os.Lstat(filepath.Join(home, cf.shadows)); err != nil {
 		return ""
