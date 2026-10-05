@@ -159,6 +159,11 @@ func interrupted(s *session.Session) *generation {
 
 // apply changes one real path, journal first.
 func (g *generation) apply(c review.Change) error {
+	// Checked before the previous version is moved, and again in
+	// applyOne for its own callers.
+	if err := parentsUnlinked(c, nil); err != nil {
+		return err
+	}
 	e := genEntry{Layer: c.Layer, Rel: c.Rel, Path: c.Path, Upper: c.Upper, Kind: c.Kind, Type: c.Type}
 	for d := filepath.Dir(c.Path); ; d = filepath.Dir(d) {
 		if _, err := os.Lstat(d); err == nil || d == filepath.Dir(d) {
@@ -534,6 +539,15 @@ func giveBack(e genEntry, clone bool) error {
 // one, and the session shows none of what the real one holds.
 func markOpaque(dir string) {
 	_ = unix.Setxattr(dir, "user.overlay.opaque", []byte("y"), 0)
+}
+
+// clearOpaque makes dir an ordinary directory of the upper layer: what
+// it replaced is the host's now, and the next scan must not take it for
+// a replacement again.
+func clearOpaque(dir string) {
+	for _, attr := range []string{"user.overlay.opaque", "trusted.overlay.opaque"} {
+		_ = unix.Removexattr(dir, attr)
+	}
 }
 
 // fingerprint describes what is at p: absent, a directory, a symlink

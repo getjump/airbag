@@ -1,0 +1,15 @@
+# Categories for the notes `gh release create --generate-notes` writes
+# (.github/workflows/release.yml), by the labels in .github/labels.yml.
+# A pull request goes under the first category whose label it has.
+changelog:
+  categories:
+    - title: Security
+      labels: [security]
+    - title: Fixes
+      labels: [bug]
+    - title: Features and changes
+      labels: [enhancement]
+    - title: Documentation
+      labels: [docs]
+    - title: Other changes
+      labels: ["*"]

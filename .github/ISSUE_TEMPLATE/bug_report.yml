@@ -1,0 +1,76 @@
+name: Bug report
+description: Something broke, or airbag did something the docs do not say it does
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **If the agent got past the sandbox, do not file it here.** Reading what airbag hides, reaching a host the policy does not allow, writing outside its branch or pushing without review is a vulnerability: report it privately through [Report a vulnerability](https://github.com/getjump/airbag/security/advisories/new). [SECURITY.md](https://github.com/getjump/airbag/blob/main/SECURITY.md) says what counts.
+
+        Please search the [open issues](https://github.com/getjump/airbag/issues) first.
+  - type: checkboxes
+    id: not-an-escape
+    attributes:
+      label: Not a sandbox escape
+      options:
+        - label: This is not a sandbox escape (those go to a private advisory).
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: airbag version
+      description: The output of `airbag version`, or the commit if you built it yourself.
+      placeholder: airbag v0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `airbag doctor`
+      description: All of it. Check it for paths you would rather not post.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and kernel
+      description: "Linux: the distribution and `uname -srm`. macOS: `sw_vers -productVersion` and `uname -m`. Say so if it runs in a VM."
+      placeholder: Ubuntu 24.04, Linux 6.8.0-51-generic x86_64
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      options:
+        - Claude Code
+        - Codex
+        - Another agent (name it below)
+        - None (a shell or a script)
+    validations:
+      required: true
+  - type: input
+    id: agent-version
+    attributes:
+      label: Agent version
+      description: For example `claude --version` or `codex --version`.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The `airbag run` command with its flags, the policy file if there is one (without tokens), and the smallest task that shows it.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Error messages, and `airbag review` output if it matters. Leave out secrets.
+      render: shell
