@@ -140,8 +140,14 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 // instant and takes no space until files change. Off APFS, cp falls
 // back to a full copy.
 func cloneWorkspace(s *session.Session) error {
-	if _, err := os.Stat(s.CloneDir()); err == nil {
-		return nil // a resumed session keeps its clone
+	if fi, err := os.Lstat(s.CloneDir()); err == nil {
+		// A resumed session keeps its clone. An older airbag made the
+		// clone of a workspace named through a link a link to the real
+		// files; the profile would then let the agent write them.
+		if !fi.IsDir() {
+			return fmt.Errorf("the clone of session %s is not a directory (an older airbag made it from a linked workspace); discard the session", s.ID)
+		}
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(s.CloneDir()), 0o700); err != nil {
 		return err
@@ -151,7 +157,7 @@ func cloneWorkspace(s *session.Session) error {
 	// the real files. It copies from where the link leads.
 	src, err := filepath.EvalSymlinks(s.Workspace)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve the workspace %s: %w", s.Workspace, err)
 	}
 	out, err := exec.CommandContext(context.Background(), "/bin/cp", "-c", "-R", src, s.CloneDir()).CombinedOutput() //nolint:gosec // absolute paths of the session's own workspace and clone
 	if err != nil {

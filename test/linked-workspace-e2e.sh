@@ -21,15 +21,19 @@ cd "$T/proj"
 cat > "$T/agent.sh" <<'EOF2'
 bash -c 'cat .env' > read.out 2>/dev/null || echo unreadable > read.out
 echo agent > new.txt
+rm README.md
 EOF2
 out=$("$AIRBAG" run -- sh "$T/agent.sh" 2>&1) || fail "run: $out"
 [ ! -e "$T/real/new.txt" ] || fail "the agent wrote to the real files: $out"
 [ ! -e "$T/real/read.out" ] || fail "the agent wrote to the real files: $out"
+[ -e "$T/real/README.md" ] || fail "the agent removed a real file: $out"
+"$AIRBAG" review --json | grep -A2 '"path": "README.md"' | grep -q '"kind": "deleted"' || fail "review misses the deletion: $("$AIRBAG" review)"
 if [ -n "$mac" ]; then
 	"$AIRBAG" diff read.out | grep -q unreadable || fail "the secret file was readable: $("$AIRBAG" diff read.out)"
 else
 	"$AIRBAG" log | grep 'secret.read' | grep -q '\.env' || fail "reading .env was not recorded: $("$AIRBAG" log)"
 	"$AIRBAG" diff read.out | grep -q 'sk-linked-0123456789' && fail "secret not masked: $("$AIRBAG" diff read.out)"
+	"$AIRBAG" diff read.out | grep -q '^+API_TOKEN=.*masked' || fail "no masked read: $("$AIRBAG" diff read.out)"
 fi
 "$AIRBAG" discard --yes >/dev/null
 [ "$(cat "$T/real/.env")" = "API_TOKEN=sk-linked-0123456789" ] || fail ".env changed"

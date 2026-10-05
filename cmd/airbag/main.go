@@ -334,7 +334,6 @@ func cmdHook(agent, event string) {
 	os.Exit(0)
 }
 
-// workspace is the git toplevel, or the current directory.
 // wholeHome reports a workspace that is $HOME or /, by the directory
 // it is: git names the top of a repository with links resolved, so a
 // repository at ~ on a system where /home is a link (/var/home) is
@@ -355,6 +354,7 @@ func wholeHome(ws, home string) bool {
 	return false
 }
 
+// workspace is the git toplevel, or the current directory.
 func workspace(cwd string) string {
 	out, err := exec.CommandContext(context.Background(), "git", "-C", cwd, "rev-parse", "--show-toplevel").Output() //nolint:gosec // git in the user's own working directory
 	if err == nil {
