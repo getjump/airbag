@@ -10,10 +10,8 @@ package sandbox
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -24,16 +22,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/getjump/airbag/internal/control"
-	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/mirror"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/policy"
-	"github.com/getjump/airbag/internal/proxy"
-	"github.com/getjump/airbag/internal/runtimepolicy"
 	"github.com/getjump/airbag/internal/session"
-	"github.com/getjump/airbag/internal/steps"
-	"github.com/getjump/airbag/internal/taint"
+	"github.com/getjump/airbag/proxy"
 )
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
@@ -44,72 +35,11 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	default:
 		return 1, fmt.Errorf("invalid runtime audit mode %q", s.RuntimeAudit)
 	}
-	gate := policy.NewGate(pol, s.Dir)
-	restoreLabels(gate, s)
-	log, err := effects.Open(s.EffectsPath())
+	host, err := startHostServices(s, allow, pol, hostEndpoints{ProxyNetwork: "unix", ProxyAddress: s.ProxySock(), ControlRoot: s.Workspace, Forwards: true})
 	if err != nil {
 		return 1, err
 	}
-	defer func() { _ = log.Close() }()
-
-	pl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ProxySock())
-	if err != nil {
-		return 1, err
-	}
-	defer pl.Close()
-	px := proxy.New(allow, log)
-	px.Gate = gate
-	if px.Creds, px.CA, err = setupCredentials(s, pol.Credentials); err != nil {
-		return 1, err
-	}
-	mr := mirror.New(filepath.Join(session.Root(), "mirror"), log)
-	mr.Tainted = gate.Tainted
-	mr.Pinned = mirror.FindPins(s.Workspace) // read from the real workspace, before the agent starts
-	px.Mirror = mr
-	// tcp:// forwards: one unix socket each, bridged inside the sandbox
-	// to 127.0.0.1:PORT (startForwards).
-	var fws []*forwarder
-	var fls []net.Listener // each serves until the session ends
-	defer func() {
-		for _, l := range fls {
-			_ = l.Close()
-		}
-	}()
-	for i, f := range s.Forwards {
-		_ = os.Remove(s.ForwardSock(i))
-		fl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ForwardSock(i))
-		if err != nil {
-			return 1, err
-		}
-		fls = append(fls, fl)
-		fw := newForwarder(f, gate, log)
-		fws = append(fws, fw)
-		go fw.serve(fl)
-	}
-	// Once the session reads a secret, connections it opened earlier to
-	// hosts outside the core set close before the read returns.
-	gate.Labels().OnAdd(func(l taint.Label, _ string) {
-		if l == taint.Secret {
-			px.Cut(proxy.DefaultAllow, "secret-taint")
-			for _, fw := range fws {
-				fw.cut()
-			}
-		}
-	})
-	go func() { _ = px.Serve(pl) }()
-
-	cl, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.ControlSock())
-	if err != nil {
-		return 1, err
-	}
-	defer cl.Close()
-	box, err := outbox.Open(s.EffectsPath())
-	if err != nil {
-		return 1, err
-	}
-	defer func() { _ = box.Close() }()
-	ctl := &control.Server{Box: box, Log: log, Steps: steps.NewTracker(s), Gate: gate, Root: s.Workspace}
-	go func() { _ = ctl.Serve(cl) }()
+	defer func() { _ = host.Close() }()
 
 	// Pass-through dirs must exist on the host, or the agent would
 	// create them inside the branch and lose them on discard. A path
@@ -146,7 +76,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	// without them the sandbox starts as it did before they existed.
 	var rt *runtimeHost
 	if runtimeOn(s) {
-		if rt, err = startRuntime(s, gate, log); err != nil {
+		if rt, err = startRuntime(s, host.Gate, host.Log); err != nil {
 			return 1, fmt.Errorf("runtime channel: %w", err)
 		}
 		defer func() { _ = rt.finish(s) }() // an early return; the normal path reports it below
@@ -234,101 +164,6 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	s.ExitCode = code
 	s.Ended = time.Now()
 	return code, errors.Join(rtErr, s.Save())
-}
-
-// runtimeHost serves the runtime channel: PID 1's file and exec checks
-// go through the gate and into the effect log before they are allowed.
-type runtimeHost struct {
-	conn        net.Conn
-	child       *os.File // the sandbox's end, fd 4 in PID 1
-	placeholder *os.File // fd 3 when there is no tty
-	audit       *effects.BufferedAudit
-	opts        runtimepolicy.Options
-	done        chan error
-	finished    bool
-	err         error
-}
-
-func startRuntime(s *session.Session, gate *policy.Gate, log *effects.Log) (*runtimeHost, error) {
-	host, child, err := socketPair()
-	if err != nil {
-		return nil, err
-	}
-	conn, err := net.FileConn(host)
-	_ = host.Close() // FileConn holds its own dup
-	if err != nil {
-		_ = child.Close()
-		return nil, err
-	}
-	placeholder, err := os.Open(os.DevNull)
-	if err != nil {
-		_ = conn.Close()
-		_ = child.Close()
-		return nil, err
-	}
-	rt := &runtimeHost{conn: conn, child: child, placeholder: placeholder, done: make(chan error, 1)}
-	if s.RuntimeAudit == "buffered" {
-		rt.audit = effects.NewBufferedAudit(log, effects.BufferOptions{})
-		rt.opts.Audit = rt.audit
-	}
-	if s.RuntimeProfile {
-		rt.opts.Profile = &runtimepolicy.Profile{}
-	}
-	go func() { rt.done <- runtimepolicy.ServeWithOptions(conn, gate, log, rt.opts) }()
-	return rt, nil
-}
-
-// finish stops the producer before it drains the buffered audit, so a
-// failed flush shows in the result. It runs once; later calls return
-// the first result.
-func (rt *runtimeHost) finish(s *session.Session) error {
-	if rt.finished {
-		return rt.err
-	}
-	rt.finished = true
-	_ = rt.child.Close()
-	_ = rt.placeholder.Close()
-	var errs []error
-	select {
-	case err := <-rt.done:
-		if err != nil {
-			errs = append(errs, fmt.Errorf("runtime controller: %w", err))
-		}
-	case <-time.After(30 * time.Second):
-		_ = rt.conn.Close()
-		errs = append(errs, errors.New("runtime controller shutdown timeout"))
-		<-rt.done
-	}
-	if rt.audit != nil {
-		if err := rt.audit.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if rt.opts.Profile != nil {
-		mode := s.RuntimeAudit
-		if mode == "" {
-			mode = "durable"
-		}
-		profile := struct {
-			Run       int                           `json:"run"`
-			AuditMode string                        `json:"audit_mode"`
-			Runtime   runtimepolicy.ProfileSnapshot `json:"runtime"`
-			Buffered  *effects.BufferStats          `json:"buffered,omitempty"`
-		}{Run: s.Runs, AuditMode: mode, Runtime: rt.opts.Profile.Snapshot()}
-		if rt.audit != nil {
-			stats := rt.audit.Stats()
-			profile.Buffered = &stats
-		}
-		data, err := json.MarshalIndent(profile, "", "  ")
-		if err == nil {
-			err = os.WriteFile(filepath.Join(s.Dir, fmt.Sprintf("runtime-profile-%d.json", s.Runs)), append(data, '\n'), 0o600)
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("write runtime profile: %w", err))
-		}
-	}
-	rt.err = errors.Join(errs...)
-	return rt.err
 }
 
 func userNSHint() string {

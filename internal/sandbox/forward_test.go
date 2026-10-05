@@ -129,6 +129,47 @@ func forwardTest(t *testing.T) (*policy.Gate, *effects.Log, string) {
 	return policy.NewGate(pol, t.TempDir()), log, path
 }
 
+func TestForwarderCloseCancelsDial(t *testing.T) {
+	gate, log, _ := forwardTest(t)
+	fw := newForwarder(session.Forward{Host: "127.0.0.1", Port: 1234}, gate, log)
+	started := make(chan struct{})
+	fw.dial = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan struct{})
+	go func() { fw.serve(l); close(served) }()
+	t.Cleanup(func() { l.Close(); fw.close(); <-served })
+	c := dialTCP(t, l.Addr().String())
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("forward never entered its dial")
+	}
+	closed := make(chan struct{})
+	go func() { fw.close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-ctx.Done():
+		t.Fatal("close did not cancel and wait for the pending dial")
+	}
+	if err := c.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("pending client survived close: %v", err)
+	}
+	fw.close()
+}
+
 // serveTCP serves each connection with handle until the test ends.
 func serveTCP(t *testing.T, handle func(net.Conn)) (net.Listener, int) {
 	t.Helper()

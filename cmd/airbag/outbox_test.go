@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/getjump/airbag/internal/operation"
-	"github.com/getjump/airbag/internal/outbox"
+	"github.com/getjump/airbag/operation"
+	"github.com/getjump/airbag/outbox"
 )
 
 func TestOutboxPreviewIsMachineReadableWithoutCLIExecution(t *testing.T) {

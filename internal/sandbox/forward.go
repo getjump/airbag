@@ -1,5 +1,3 @@
-//go:build linux
-
 package sandbox
 
 import (
@@ -12,8 +10,8 @@ import (
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
 	"github.com/getjump/airbag/internal/policy"
-	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/proxy"
 )
 
 // forwarder relays the agent's connections to a tcp:// target: a dev
@@ -39,9 +37,14 @@ type forwarder struct {
 	idle, drain time.Duration
 	max         int
 
-	mu   sync.Mutex
-	n    int // connections admitted
-	open map[net.Conn]bool
+	mu      sync.Mutex
+	n       int // connections admitted
+	open    map[net.Conn]bool
+	pending map[net.Conn]bool
+	stopped bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 // maxForwardConns caps the connections relayed to one tcp:// target at
@@ -49,8 +52,9 @@ type forwarder struct {
 const maxForwardConns = 256
 
 func newForwarder(f session.Forward, gate *policy.Gate, log *effects.Log) *forwarder {
-	return &forwarder{f: f, gate: gate, log: log, dial: (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
-		idle: proxy.ForwardIdle, drain: proxy.Drain, max: maxForwardConns, open: map[net.Conn]bool{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &forwarder{ctx: ctx, cancel: cancel, f: f, gate: gate, log: log, dial: (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		idle: proxy.ForwardIdle, drain: proxy.Drain, max: maxForwardConns, open: map[net.Conn]bool{}, pending: map[net.Conn]bool{}}
 }
 
 func (fw *forwarder) target() string { return net.JoinHostPort(fw.f.Host, strconv.Itoa(fw.f.Port)) }
@@ -69,7 +73,15 @@ func (fw *forwarder) serve(l net.Listener) {
 		if err != nil {
 			return
 		}
-		go fw.handle(c)
+		fw.mu.Lock()
+		if fw.stopped {
+			fw.mu.Unlock()
+			c.Close()
+			continue
+		}
+		fw.wg.Add(1)
+		fw.mu.Unlock()
+		go func() { defer fw.wg.Done(); fw.handle(c) }()
 	}
 }
 
@@ -81,16 +93,24 @@ func (fw *forwarder) handle(c net.Conn) {
 	// The slot comes first: a connection waiting on the checks (a policy
 	// that asks serializes them) holds a goroutine and a host fd too.
 	fw.mu.Lock()
+	if fw.stopped {
+		fw.mu.Unlock()
+		deny("forward stopped: the session is ending")
+		return
+	}
 	if fw.max > 0 && fw.n >= fw.max {
 		fw.mu.Unlock()
 		deny("too many open connections")
 		return
 	}
 	fw.n++
+	fw.pending[c] = true
 	fw.mu.Unlock()
 	defer func() {
 		fw.mu.Lock()
 		fw.n--
+		delete(fw.open, c)
+		delete(fw.pending, c)
 		fw.mu.Unlock()
 	}()
 	if fw.gate.Tainted() != "" && !fw.local() {
@@ -101,20 +121,20 @@ func (fw *forwarder) handle(c net.Conn) {
 		deny(d.Rule)
 		return
 	}
-	up, err := fw.dial(context.Background(), "tcp", fw.target())
+	up, err := fw.dial(fw.ctx, "tcp", fw.target())
 	if err != nil {
 		fw.log.Add(effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "allow", Reason: "unreachable: " + err.Error()})
 		return
 	}
 	defer up.Close()
 	fw.mu.Lock()
+	delete(fw.pending, c)
+	if fw.stopped {
+		fw.mu.Unlock()
+		return
+	}
 	fw.open[c] = true
 	fw.mu.Unlock()
-	defer func() {
-		fw.mu.Lock()
-		delete(fw.open, c)
-		fw.mu.Unlock()
-	}()
 	// A secret read while this connection was dialled: cut has run
 	// already and did not see it.
 	if fw.gate.Tainted() != "" && !fw.local() {
@@ -138,4 +158,18 @@ func (fw *forwarder) cut() {
 	}
 	fw.mu.Unlock()
 	_ = fw.log.AddAll(logged) // after every close: the read waits for them
+}
+
+func (fw *forwarder) close() {
+	fw.mu.Lock()
+	fw.stopped = true
+	fw.cancel()
+	for c := range fw.open {
+		c.Close()
+	}
+	for c := range fw.pending {
+		c.Close()
+	}
+	fw.mu.Unlock()
+	fw.wg.Wait()
 }

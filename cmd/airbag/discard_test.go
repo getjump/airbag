@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/getjump/airbag/internal/apply"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/review"
 	"github.com/getjump/airbag/internal/session"
+	"github.com/getjump/airbag/outbox"
 )
 
 // After a rollback that left a path, the session holds the user's

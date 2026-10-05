@@ -20,31 +20,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
-	"strings"
 
-	"cel.dev/cel-go/cel"
-	"cel.dev/cel-go/ext"
 	"gopkg.in/yaml.v3"
 
-	"github.com/getjump/airbag/internal/creds"
+	"github.com/getjump/airbag/creds"
 	"github.com/getjump/airbag/internal/models"
+	pure "github.com/getjump/airbag/policy"
 )
 
 const (
-	Allow = "allow"
-	Deny  = "deny"
-	Ask   = "ask"
+	Allow = pure.Allow
+	Deny  = pure.Deny
+	Ask   = pure.Ask
 )
 
-type Rule struct {
-	Name    string `yaml:"name" json:"name"`
-	When    string `yaml:"when" json:"when"`
-	Verdict string `yaml:"verdict" json:"verdict"`
-	Message string `yaml:"message,omitempty" json:"message,omitempty"`
-	Source  string `yaml:"-" json:"source"`
-	prg     cel.Program
-}
+type Rule = pure.Rule
+type Input = pure.Input
+type Decision = pure.Decision
 
 type File struct {
 	Allow []string `yaml:"allow"`
@@ -61,6 +53,7 @@ type File struct {
 }
 
 type Policy struct {
+	engine      *pure.Engine
 	Allow       []string
 	Hide        []string
 	Defer       []Pattern
@@ -83,43 +76,6 @@ var Builtin = []Rule{
 		Verdict: Deny,
 		Message: "publishing a package cannot be undone; publish from the host after review",
 	},
-}
-
-// The variables a rule sees. Field names come from the cel tags.
-type (
-	CELEffect struct {
-		Source string `cel:"source"`
-		Kind   string `cel:"kind"`
-		Target string `cel:"target"`
-		Detail string `cel:"detail"`
-	}
-	CELCommand struct {
-		Argv []string `cel:"argv"`
-		Line string   `cel:"line"`
-	}
-	CELSession struct {
-		Tainted bool     `cel:"tainted"`
-		Labels  []string `cel:"labels"`
-	}
-)
-
-// costLimit bounds one rule's evaluation; rules are small predicates.
-const costLimit = 100_000
-
-var env *cel.Env
-
-func init() {
-	var err error
-	env, err = cel.NewEnv(
-		ext.NativeTypes(reflect.TypeOf(CELEffect{}), reflect.TypeOf(CELCommand{}), reflect.TypeOf(CELSession{}),
-			ext.ParseStructTags(true)),
-		cel.Variable("effect", cel.ObjectType("policy.CELEffect")),
-		cel.Variable("command", cel.ObjectType("policy.CELCommand")),
-		cel.Variable("session", cel.ObjectType("policy.CELSession")),
-	)
-	if err != nil {
-		panic(err)
-	}
 }
 
 // Load reads the policy sources that exist.
@@ -173,7 +129,7 @@ func Load(workspace, home string) (*Policy, error) {
 			}
 			r.Source = path
 			if err := p.add(r); err != nil {
-				return nil, fmt.Errorf("%s: rule %s: %w", path, r.Name, err)
+				return nil, fmt.Errorf("%s: %w", path, err) // the error names the rule
 			}
 		}
 	}
@@ -181,79 +137,31 @@ func Load(workspace, home string) (*Policy, error) {
 }
 
 func (p *Policy) add(r Rule) error {
-	switch r.Verdict {
-	case Allow, Deny, Ask:
-	case "defer":
-		// What waits is chosen by `defer:` entries, which put a shim in
-		// front of the program; a rule cannot reach a call without one.
-		r.Verdict = Ask
-	default:
-		return fmt.Errorf("verdict %q: want allow, deny or ask", r.Verdict)
-	}
-	ast, iss := env.Compile(r.When)
-	if iss.Err() != nil {
-		return iss.Err()
-	}
-	if ast.OutputType() != cel.BoolType {
-		return fmt.Errorf("`when` must be a boolean expression")
-	}
-	prg, err := env.Program(ast, cel.CostLimit(costLimit))
+	rules := append(append([]Rule(nil), p.Rules...), r)
+	engine, err := pure.Compile(rules, Allow)
 	if err != nil {
 		return err
 	}
-	r.prg = prg
+	if r.Verdict == "defer" {
+		r.Verdict = Ask
+	}
 	p.Rules = append(p.Rules, r)
+	p.engine = engine
 	return nil
 }
 
-// Input is one effect with its context.
-type Input struct {
-	Source  string // empty for predictions; fuse or seccomp for observed attempts
-	Effect  models.Effect
-	Argv    []string // the command that produces it, if any
-	Tainted bool     // session holds the "secret" label (kept for brevity)
-	Labels  []string // all session labels, for `session.labels`
-}
-
-type Decision struct {
-	Verdict string `json:"verdict"`
-	Rule    string `json:"rule,omitempty"`
-	Message string `json:"message,omitempty"`
-}
-
-// Decide evaluates every rule; deny beats ask beats allow. No matching
-// rule means allow: the sandbox and the review cover the rest.
+// Decide preserves Airbag's native allow fallback. The public engine requires
+// embedders to choose their own fallback explicitly.
 func (p *Policy) Decide(in Input) Decision {
-	argv, labels := in.Argv, in.Labels
-	if argv == nil {
-		argv = []string{}
-	}
-	if labels == nil {
-		labels = []string{}
-	}
-	vars := map[string]any{
-		"effect":  CELEffect{Source: in.Source, Kind: in.Effect.Kind, Target: in.Effect.Target, Detail: in.Effect.Detail},
-		"command": CELCommand{Argv: argv, Line: strings.Join(argv, " ")},
-		"session": CELSession{Tainted: in.Tainted, Labels: labels},
-	}
-	best := Decision{Verdict: Allow}
-	rank := map[string]int{Allow: 1, Ask: 2, Deny: 3}
-	for _, r := range p.Rules {
-		msg := r.Message
-		out, _, err := r.prg.Eval(vars)
+	engine := p.engine
+	if engine == nil {
+		var err error
+		engine, err = pure.Compile(p.Rules, Allow)
 		if err != nil {
-			if r.Verdict == Allow {
-				continue
-			}
-			msg = fmt.Sprintf("rule %q failed to evaluate (%v); treated as %s", r.Name, err, r.Verdict)
-		} else if hit, ok := out.Value().(bool); !ok || !hit {
-			continue
-		}
-		if best.Rule == "" || rank[r.Verdict] > rank[best.Verdict] {
-			best = Decision{Verdict: r.Verdict, Rule: r.Name, Message: msg}
+			return Decision{Verdict: Deny, Message: err.Error()}
 		}
 	}
-	return best
+	return engine.Decide(in)
 }
 
 // AllowsHost reports whether a rule explicitly allows a network effect

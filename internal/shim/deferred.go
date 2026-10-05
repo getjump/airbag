@@ -12,9 +12,9 @@ import (
 	"syscall"
 
 	"github.com/getjump/airbag/internal/control"
-	"github.com/getjump/airbag/internal/operation"
-	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/secretfs"
+	"github.com/getjump/airbag/operation"
+	"github.com/getjump/airbag/outbox"
 )
 
 // IsDeferred reports whether airbag was started as the shim of a

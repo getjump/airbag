@@ -271,6 +271,9 @@ Before more features comes a measurement on real work against the alternatives:
 - [Status in detail](docs/status.md): hooks, shell models, tests, the effect log
 - [Roadmap and decisions](docs/roadmap.md): what is deferred on purpose, and why
 - [Evaluation plan](docs/evaluation.md): how to tell whether airbag is worth using
+- [Embedding airbag's components](docs/composition.md): the operation contracts,
+  policy evaluator, outbox and credential proxy as public Go packages, the
+  same code the CLI runs
 - [macOS](docs/macos.md), [bubblewrap as a backend](docs/bwrap-backend.md),
   [manual test with a real login](docs/manual-test.md),
   [described operations](docs/effect-contract.md)

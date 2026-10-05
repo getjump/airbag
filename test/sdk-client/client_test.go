@@ -1,0 +1,382 @@
+package sdkclient_test
+
+import (
+	"bufio"
+	"context"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/getjump/airbag/audit"
+	"github.com/getjump/airbag/creds"
+	"github.com/getjump/airbag/githubpr"
+	"github.com/getjump/airbag/operation"
+	"github.com/getjump/airbag/outbox"
+	"github.com/getjump/airbag/policy"
+	"github.com/getjump/airbag/proxy"
+)
+
+func request() operation.Request {
+	return operation.Request{Schema: operation.Schema, Kind: operation.CreatePullRequest, PullRequest: &operation.PullRequest{
+		Repository: "example/repo", Base: "main", Head: "work", HeadCommit: strings.Repeat("a", 40), Title: "Reviewed fix", Body: "Frozen body\n", Draft: true,
+	}}
+}
+
+func TestIndependentOutboxPublication(t *testing.T) {
+	for _, mode := range []string{"ok", "raced", "refused", "server-error"} {
+		t.Run(mode, func(t *testing.T) {
+			r := request()
+			preview, err := r.Preview()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var posts atomic.Int32
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == http.MethodGet && req.URL.Path == "/repos/example/repo/git/ref/heads/work" {
+					_, _ = fmt.Fprintf(w, `{"object":{"sha":%q}}`, r.PullRequest.HeadCommit)
+					return
+				}
+				if req.Method != http.MethodPost || req.URL.Path != "/repos/example/repo/pulls" {
+					http.Error(w, "unexpected method/path", http.StatusBadRequest)
+					return
+				}
+				posts.Add(1)
+				var payload struct {
+					Title      string `json:"title"`
+					Body       string `json:"body"`
+					Head       string `json:"head"`
+					Base       string `json:"base"`
+					Draft      bool   `json:"draft"`
+					Maintainer bool   `json:"maintainer_can_modify"`
+				}
+				d := json.NewDecoder(req.Body)
+				d.DisallowUnknownFields()
+				if err := d.Decode(&payload); err != nil || payload.Title != "Reviewed fix" || payload.Body != "Frozen body\n" || payload.Head != "work" || payload.Base != "main" || !payload.Draft || payload.Maintainer {
+					t.Errorf("POST differs from frozen request: %+v, %v", payload, err)
+				}
+				if mode == "refused" || mode == "server-error" {
+					code := http.StatusUnprocessableEntity
+					if mode == "server-error" {
+						code = http.StatusServiceUnavailable
+					}
+					w.WriteHeader(code)
+					_, _ = io.WriteString(w, `{"message":"fixture refusal"}`)
+					return
+				}
+				sha := r.PullRequest.HeadCommit
+				if mode == "raced" {
+					sha = strings.Repeat("b", 40) // remote head raced the POST
+				}
+				_, _ = fmt.Fprintf(w, `{"number":7,"html_url":"https://github.com/example/repo/pull/7","title":"Reviewed fix","body":"Frozen body\n","draft":true,"head":{"sha":%q,"ref":"work","repo":{"full_name":"example/repo"}},"base":{"ref":"main","repo":{"full_name":"example/repo"}}}`, sha)
+			}))
+			defer api.Close()
+			handler := githubpr.Handler{Call: func(ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {
+				req, err := http.NewRequestWithContext(ctx, method, api.URL+"/"+endpoint, strings.NewReader(string(body)))
+				if err != nil {
+					return nil, err
+				}
+				resp, err := api.Client().Do(req)
+				if err != nil {
+					return nil, err
+				}
+				defer resp.Body.Close()
+				data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+				if err == nil && resp.StatusCode >= 400 {
+					err = &githubpr.HTTPError{StatusCode: resp.StatusCode, Body: data}
+				}
+				return data, err
+			}}
+			path := filepath.Join(t.TempDir(), "outbox.db")
+			box, err := outbox.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = box.Close() }()
+			it, err := box.Push(outbox.Intent{Kind: outbox.KindPullRequest, Request: &r})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result := it.TypedResult(); result.Outcome != operation.Queued || result.Value != "" || posts.Load() != 0 {
+				t.Fatal("queued action masqueraded as publication", result)
+			}
+			if err := box.Approve(it.ID, operation.Hash([]byte("different"))); err == nil {
+				t.Fatal("approval accepted a different request")
+			}
+			if err := box.Approve(it.ID, preview.RequestDigest); err != nil {
+				t.Fatal(err)
+			}
+			// Reopen before execution: approval belongs to storage, not this client.
+			if err := box.Close(); err != nil {
+				t.Fatal(err)
+			}
+			box, err = outbox.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lock, err := box.LockExecution()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = lock.Close() }()
+			prepared, err := handler.Prepare(t.Context(), r)
+			if err != nil || prepared.Digest() != it.RequestDigest || posts.Load() != 0 {
+				t.Fatal("preparation published or changed the request", err)
+			}
+			r.PullRequest.Title = "Mutable caller title"
+			if err := box.Claim(it.ID, prepared.Digest()); err != nil {
+				t.Fatal(err)
+			}
+			result := prepared.Publish(t.Context())
+			if again := prepared.Publish(t.Context()); again != result || posts.Load() != 1 {
+				t.Fatal("prepared interpreter repeated an external effect")
+			}
+			result.Ticket = it.ID
+			it.Status = outbox.Unknown
+			switch result.Outcome {
+			case operation.Succeeded:
+				it.Status = outbox.Done
+			case operation.Failure:
+				it.Status = outbox.Failed
+			}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			it.Output = string(encoded)
+			if err := box.Update(it); err != nil {
+				t.Fatal(err)
+			}
+			if err := box.Claim(it.ID, prepared.Digest()); err == nil || posts.Load() != 1 {
+				t.Fatal("terminal action could be claimed again")
+			}
+			rows, err := box.List()
+			if err != nil || len(rows) != 1 {
+				t.Fatal(rows, err)
+			}
+			want := operation.Succeeded
+			if mode == "raced" || mode == "server-error" {
+				want = operation.Uncertain
+			} else if mode == "refused" {
+				want = operation.Failure
+			}
+			if got := rows[0].TypedResult(); got == nil || got.Outcome != want || got.RequestDigest != preview.RequestDigest {
+				t.Fatal("result not bound to the queued operation", got)
+			}
+		})
+	}
+}
+
+type recorder struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (r *recorder) Add(e audit.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, e)
+}
+
+type gate struct{ engine *policy.Engine }
+
+func (g gate) Check(in policy.Input) (policy.Decision, string) { return g.engine.Decide(in), "" }
+func (g gate) AllowsHost(string) bool                          { return false }
+func (g gate) Tainted() string                                 { return "" }
+func (g gate) MarkUntrusted(string) bool                       { return false }
+
+func TestIndependentProxyCredentialsAndPolicy(t *testing.T) {
+	const token = "host-only-token-1234567890"
+	var gotToken atomic.Value
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		gotToken.Store(r.Header.Get("Authorization"))
+		_, _ = fmt.Fprint(w, token)
+	}))
+	defer upstream.Close()
+	u, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := &recorder{}
+	p := proxy.New(proxy.Allowlist{u.Host}, log)
+	defer p.Close()
+	p.Upstream = func(*url.URL) (*url.URL, error) { return nil, nil }
+	live := &creds.Live{Name: "fixture", Hosts: []string{u.Host}, Value: token, Placeholder: creds.Placeholder(token)}
+	p.Creds = creds.Set{live}
+	p.CA, err = proxy.NewCA([]string{u.Host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.UpstreamRoots = x509.NewCertPool()
+	p.UpstreamRoots.AddCert(upstream.Certificate())
+	p.Gate = gate{engine: mustPolicy(t)}
+	proxyURL := &url.URL{Scheme: "http", Host: serveProxy(t, p)}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(p.CA.PEM) {
+		t.Fatal("invalid proxy CA")
+	}
+	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), TLSClientConfig: upstream.Client().Transport.(*http.Transport).TLSClientConfig.Clone()}
+	transport.TLSClientConfig.RootCAs = roots
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, upstream.URL+"/allowed", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", live.Placeholder)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || gotToken.Load() != token || string(data) != live.Placeholder {
+		t.Fatal("credential substitution or response masking failed", gotToken.Load(), string(data), err)
+	}
+	req, err = http.NewRequestWithContext(t.Context(), http.MethodGet, upstream.URL+"/blocked", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatal("custom policy failed to deny an allowlisted destination", resp.StatusCode)
+	}
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	found := false
+	for _, event := range log.events {
+		if strings.Contains(fmt.Sprint(event), token) {
+			t.Fatal("audit leaked the real credential")
+		}
+		found = found || event.Kind == "http.request" && event.Verdict == policy.Deny
+	}
+	if !found {
+		t.Fatal("custom recorder did not receive the policy decision")
+	}
+}
+
+// serveProxy serves p as composition.md says: p.Serve, which applies the
+// proxy's connection cap and timeouts. It returns the address.
+func serveProxy(t *testing.T, p *proxy.Proxy) string {
+	t.Helper()
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() { _ = p.Serve(l) }()
+	return l.Addr().String()
+}
+
+// connectVia asks the proxy at addr for a tunnel to target and returns
+// the connection and the answer's status.
+func connectVia(t *testing.T, addr, target string) (net.Conn, int) {
+	t.Helper()
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		c.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return c, resp.StatusCode
+}
+
+// A Proxy made as a struct literal, without proxy.New, is bounded as one
+// New makes: the address guard refuses loopback, a nil Upstream is a
+// direct dial, and admission stops at the default MaxFlows.
+func TestStructLiteralProxyBounded(t *testing.T) {
+	local, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	go func() {
+		for {
+			c, err := local.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(local.Addr().String())
+	guarded := &proxy.Proxy{Allow: proxy.Allowlist{"localhost:*"}, Log: &recorder{}}
+	defer guarded.Close()
+	c, code := connectVia(t, serveProxy(t, guarded), "localhost:"+port)
+	c.Close()
+	if code != http.StatusForbidden {
+		t.Fatalf("CONNECT to loopback: %d, want 403", code)
+	}
+
+	// Each tunnel is admitted, then waits in Upstream: it stays a flow.
+	entered, release := make(chan struct{}, proxy.MaxFlows), make(chan struct{})
+	held := &proxy.Proxy{Allow: proxy.Allowlist{"held.example"}, Log: &recorder{}, Upstream: func(*url.URL) (*url.URL, error) {
+		entered <- struct{}{}
+		<-release
+		return nil, errors.New("released")
+	}}
+	defer held.Close()
+	addr := serveProxy(t, held)
+	conns := make(chan net.Conn, proxy.MaxFlows)
+	defer func() {
+		close(conns)
+		for c := range conns {
+			c.Close()
+		}
+	}()
+	defer close(release)
+	for range proxy.MaxFlows {
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns <- c
+		_, _ = io.WriteString(c, "CONNECT held.example:443 HTTP/1.1\r\nHost: held.example:443\r\n\r\n")
+	}
+	for range proxy.MaxFlows {
+		<-entered
+	}
+	c, code = connectVia(t, addr, "held.example:443")
+	c.Close()
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("CONNECT past the default MaxFlows: %d, want 503", code)
+	}
+}
+
+// Nothing prepared publishes nothing and matches no claim.
+func TestUnpreparedPublication(t *testing.T) {
+	var p *githubpr.Prepared
+	if p.Digest() != "" || p.Publish(t.Context()).Outcome != operation.Denied {
+		t.Fatal("an unprepared request has a digest or publishes")
+	}
+}
+
+func mustPolicy(t *testing.T) *policy.Engine {
+	t.Helper()
+	engine, err := policy.Compile([]policy.Rule{{Name: "blocked", When: `effect.kind == "http.request" && effect.target.endsWith("/blocked")`, Verdict: policy.Deny}}, policy.Allow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return engine
+}

@@ -17,22 +17,12 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/getjump/airbag/audit"
 )
 
-// Effect records an observed attempt, outcome, or command prediction.
-type Effect struct {
-	Time    time.Time `json:"t"`
-	Kind    string    `json:"kind"`              // net.egress, intent.git_push, ...
-	Target  string    `json:"target"`            // host:port, argv, path
-	Verdict string    `json:"verdict,omitempty"` // allow, deny, defer
-	Reason  string    `json:"reason,omitempty"`
-	// Predict: what a command model expects this command to do.
-	Predict []string `json:"predict,omitempty"`
-	Source  string   `json:"source,omitempty"`
-	PID     uint32   `json:"pid,omitempty"`
-	Detail  string   `json:"detail,omitempty"`
-	Argv    []string `json:"argv,omitempty"`
-}
+// Effect retains the storage API spelling of a shared audit record.
+type Effect = audit.Event
 
 const schema = `
 CREATE TABLE IF NOT EXISTS events (

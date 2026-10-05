@@ -191,42 +191,42 @@ func realMemory(home string) []string {
 	return out
 }
 
-// follow returns where p leads, with the links on the way followed: the
-// last one by what it says, though nothing may be there yet.
+// follow resolves links component by component, including existing ancestors
+// of a missing target. Seatbelt needs the canonical prefix even when the agent
+// could create the remaining directories later (/private/var, not /var).
 func follow(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
 	for range maxMemoryHops {
-		p = filepath.Join(realPrefix(filepath.Dir(p)), filepath.Base(p))
-		fi, err := os.Lstat(p)
-		if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
-			return p
+		parts := strings.Split(strings.TrimPrefix(filepath.Clean(p), string(filepath.Separator)), string(filepath.Separator))
+		at := string(filepath.Separator)
+		linked := false
+		for i, part := range parts {
+			at = filepath.Join(at, part)
+			fi, err := os.Lstat(at)
+			if err != nil {
+				return filepath.Join(append([]string{at}, parts[i+1:]...)...)
+			}
+			if fi.Mode()&fs.ModeSymlink == 0 {
+				continue
+			}
+			target, err := os.Readlink(at)
+			if err != nil {
+				return filepath.Join(append([]string{at}, parts[i+1:]...)...)
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(at), target)
+			}
+			p = filepath.Join(append([]string{target}, parts[i+1:]...)...)
+			linked = true
+			break
 		}
-		t, err := os.Readlink(p)
-		if err != nil {
-			return p
+		if !linked {
+			return at
 		}
-		if !filepath.IsAbs(t) {
-			t = filepath.Join(filepath.Dir(p), t)
-		}
-		p = t
 	}
 	return p
-}
-
-// realPrefix resolves the links in the longest part of p that exists
-// and joins the rest on as written: Seatbelt checks the path a write
-// resolves to, so a path that does not exist yet is spelled from its
-// real parent (/private/var for /var on macOS).
-func realPrefix(p string) string {
-	rest := ""
-	for d := p; ; d = filepath.Dir(d) {
-		if r, err := filepath.EvalSymlinks(d); err == nil {
-			return filepath.Join(r, rest)
-		}
-		if filepath.Dir(d) == d {
-			return p
-		}
-		rest = filepath.Join(filepath.Base(d), rest)
-	}
 }
 
 // maxMemoryHops bounds the links follow follows, against a loop.
