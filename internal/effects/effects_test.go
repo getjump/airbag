@@ -40,6 +40,149 @@ func TestAppendOnly(t *testing.T) {
 	}
 }
 
+func TestLegacyLogAndRuntimeContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(t.Context(), `CREATE TABLE events (id INTEGER PRIMARY KEY, t TEXT, kind TEXT, target TEXT, verdict TEXT, reason TEXT, predict TEXT);
+ INSERT INTO events VALUES (1, '2026-10-04T00:00:00Z', 'proc.exec', 'old', 'allow', '', '[]')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	old, err := Read(path)
+	if err != nil || len(old) != 1 || old[0].Source != "" {
+		t.Fatalf("legacy read: %+v %v", old, err)
+	}
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	if err := l.AddChecked(Effect{Kind: "proc.exec", Target: "/usr/bin/python3", Source: "seccomp", PID: 7, Detail: "execve", Argv: []string{"python3", "script.py"}, Verdict: "deny"}); err != nil {
+		t.Fatal(err)
+	}
+	es, err := Read(path)
+	if err != nil || len(es) != 2 || es[1].PID != 7 || len(es[1].Argv) != 2 {
+		t.Fatalf("roundtrip: %+v %v", es, err)
+	}
+	for _, q := range []string{`UPDATE event_context SET data='{}'`, `DELETE FROM event_context`} {
+		if _, err := l.db.ExecContext(t.Context(), q); err == nil {
+			t.Fatal("audit context is mutable", q)
+		}
+	}
+}
+
+func TestBatchAtomicAndFullDurability(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	var syncMode int
+	if err := l.db.QueryRowContext(t.Context(), "PRAGMA synchronous").Scan(&syncMode); err != nil || syncMode != 2 {
+		t.Fatalf("synchronous=%d err=%v", syncMode, err)
+	}
+	// Fail the second insert after the first event/context were written.
+	if _, err := l.db.ExecContext(t.Context(), `CREATE TRIGGER reject_test BEFORE INSERT ON events WHEN NEW.target='reject' BEGIN SELECT RAISE(ABORT, 'test failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	batch := []Effect{{Kind: "fs.read", Target: "first", Source: "fuse", PID: 12}, {Kind: "fs.write", Target: "reject", Source: "fuse", PID: 13}}
+	if err := l.AddBatchChecked(batch); err == nil {
+		t.Fatal("partial batch accepted")
+	}
+	got, err := Read(path)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("partial commit: %+v %v", got, err)
+	}
+	var contexts int
+	if err := l.db.QueryRowContext(t.Context(), "SELECT count(*) FROM event_context").Scan(&contexts); err != nil || contexts != 0 {
+		t.Fatalf("orphan context: %d %v", contexts, err)
+	}
+	batch[1].Target = "second"
+	if err := l.AddBatchChecked(batch); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Read(path)
+	if err != nil || len(got) != 2 || got[0].Target != "first" || got[1].PID != 13 {
+		t.Fatalf("batch roundtrip: %+v %v", got, err)
+	}
+}
+
+// A context row adds source, PID, detail and argv to its event and
+// nothing else: one that names a verdict or kind does not change them.
+func TestRuntimeContextCannotChangeVerdict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	if err := l.AddChecked(Effect{Kind: "fs.write", Target: "/w/protected", Verdict: "deny", Source: "fuse", PID: 9}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.db.ExecContext(t.Context(), `INSERT INTO events (t, kind, target, verdict) VALUES ('2026-10-05T00:00:00Z', 'fs.write', '/w/other', 'deny');
+INSERT INTO event_context (id, data) VALUES (last_insert_rowid(), '{"source":"fuse","verdict":"allow","kind":"fs.read","target":"/w/x"}')`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("read: %+v %v", got, err)
+	}
+	if got[0].Source != "fuse" || got[0].PID != 9 {
+		t.Errorf("context lost: %+v", got[0])
+	}
+	if e := got[1]; e.Verdict != "deny" || e.Kind != "fs.write" || e.Target != "/w/other" || e.Source != "fuse" {
+		t.Errorf("context changed the event: %+v", e)
+	}
+}
+
+// Runtime refusals go through the same meter as every refusal; every
+// allowed runtime entry is written with its context.
+func TestRuntimeRefusalsMetered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+	batch := make([]Effect, 0, refuseBurst+15)
+	for range refuseBurst + 5 {
+		batch = append(batch, Effect{Kind: "proc.exec", Target: "/usr/bin/x", Verdict: "deny", Source: "seccomp", PID: 7, Argv: []string{"x"}})
+	}
+	for range 10 {
+		batch = append(batch, Effect{Kind: "fs.read", Target: "/w/f", Verdict: "allow", Source: "fuse", PID: 8})
+	}
+	if err := l.AddBatchChecked(batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deny, allow, dropped := 0, 0, 0
+	for _, e := range got {
+		switch {
+		case e.Kind == Dropped:
+			dropped += DroppedCount(e)
+		case e.Verdict == "deny" && e.Source == "seccomp" && e.PID == 7 && len(e.Argv) == 1:
+			deny++
+		case e.Verdict == "allow" && e.Source == "fuse" && e.PID == 8:
+			allow++
+		}
+	}
+	if deny != refuseBurst || dropped != 5 || allow != 10 {
+		t.Fatalf("deny %d (want %d), dropped %d (want 5), allow %d (want 10)", deny, refuseBurst, dropped, allow)
+	}
+}
+
 // Past the burst, refused entries (deny, ask) of a kind are held to the
 // rate and the
 // rest are counted; the count is written before the kind's next entry

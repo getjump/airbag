@@ -21,9 +21,13 @@ a label that follows a secret read through the rest of the session, and one revi
 that works the same for any agent, on your own toolchain without a VM. The result
 goes onto your files or onto a git branch, and an apply can be rolled back.
 Whether that beats a VM clone or nono for a given team is a matter of measuring,
-not of this table. Tools that govern effects at runtime in depth, such as
+not of this table. Airbag also offers opt-in [runtime filesystem and exec
+policies](runtime-policy.md) on Linux, while keeping outcome review as its
+main workflow. Tools that govern more effects at runtime, such as
 [agentsh](https://github.com/canyonroad/agentsh) (file, process and network policy
-with approvals, an LLM proxy with DLP), go further than airbag's policies do. (As of
+with approvals, an LLM proxy with DLP), cover additional runtime controls and
+model-request content. Airbag's network boundary remains its forced proxy; it
+does not currently offer LLM DLP. (As of
 October 2026, from each project's documentation.)
 
 ## bubblewrap underneath

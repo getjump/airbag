@@ -33,6 +33,12 @@ func runBPF(t *testing.T, p []unix.SockFilter, data []byte) uint32 {
 			} else {
 				pc += int(in.Jf)
 			}
+		case unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K:
+			if a&in.K != 0 {
+				pc += int(in.Jt)
+			} else {
+				pc += int(in.Jf)
+			}
 		case unix.BPF_JMP | unix.BPF_JA:
 			pc += int(in.K) // forward only: resolve rejects anything else
 		case unix.BPF_RET | unix.BPF_K:

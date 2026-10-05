@@ -74,3 +74,21 @@ func TestFallbackNamed(t *testing.T) {
 		}
 	}
 }
+
+// effect.source tells an observed attempt (fuse, seccomp) from a
+// prediction (""), so a rule on one does not match the other.
+func TestEffectSource(t *testing.T) {
+	engine, err := policy.Compile([]policy.Rule{
+		{Name: "observed-exec", When: `effect.source == "seccomp" && effect.kind == "proc.exec"`, Verdict: policy.Deny},
+	}, policy.Allow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := policy.Effect{Kind: "proc.exec", Target: "/usr/bin/curl"}
+	if d := engine.Decide(policy.Input{Source: "seccomp", Effect: exec}); d.Verdict != policy.Deny || d.Rule != "observed-exec" {
+		t.Fatalf("observed exec: %+v", d)
+	}
+	if d := engine.Decide(policy.Input{Effect: exec}); d.Verdict != policy.Allow {
+		t.Fatalf("a prediction matched an observed-source rule: %+v", d)
+	}
+}

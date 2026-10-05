@@ -1,5 +1,12 @@
 # Policies
 
+On Linux, `airbag run --fs-policy --exec-policy -- AGENT` also checks actual
+filesystem entry points and process exec attempts, including those inside
+Python, make and package scripts. Both flags are opt-in and persist on resume.
+`effect.source` distinguishes `"fuse"` / `"seccomp"` observations from shell
+predictions (`""`). See [runtime policy](runtime-policy.md) for examples,
+coverage, compatibility and the seccomp path/argv race limitation.
+
 `airbag.yaml` in the repository (and `~/.config/airbag/airbag.yaml`) adds hosts and
 rules. Rules are [CEL](https://cel.dev) expressions over effects. Some effects are
 observed, so a rule holds whatever program causes them: every connection passes
@@ -35,6 +42,10 @@ Rules are type-checked when airbag starts: a misspelled field (`effect.knd`) is 
 error, not a rule that never matches. A `deny` or `ask` rule that fails while
 evaluating (say `command.argv[0]` on an effect with no command) counts as
 matched, and the message says so; guard such rules with `command.argv.size() > 0`.
+With `--fs-policy` this matters more: file events have no command, so an
+unguarded rule like that denies every file operation. Observed and predicted
+events also differ in their targets and approvals; see
+[runtime policy](runtime-policy.md#policy-and-audit).
 
 Verdicts are `allow`, `deny` and `ask`; a deny anywhere wins. An `ask` blocks the
 command and tells the agent to have you run `airbag approve a-N`; after that the

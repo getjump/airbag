@@ -121,6 +121,37 @@ func TestFailClosed(t *testing.T) {
 	}
 }
 
+func TestRuntimeApprovalScopesArgvAndSource(t *testing.T) {
+	p := &Policy{}
+	if err := p.add(Rule{Name: "exec-approval", When: `effect.source == "seccomp" && effect.kind == "proc.exec"`, Verdict: Ask}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	g := NewGate(p, dir)
+	in := Input{Source: "seccomp", Effect: models.Effect{Kind: "proc.exec", Target: "/usr/bin/python3", Detail: "execve"}, Argv: []string{"python3", "safe.py"}}
+	d, id := g.Check(in)
+	if d.Verdict != Ask || id == "" {
+		t.Fatal("missing ask")
+	}
+	if _, err := Approve(dir, id); err != nil {
+		t.Fatal(err)
+	}
+	d, _ = g.Check(in)
+	if d.Verdict != Allow {
+		t.Fatal("approved retry blocked")
+	}
+	in.Argv = []string{"python3", "other.py"}
+	d, other := g.Check(in)
+	if d.Verdict != Ask || other == id {
+		t.Fatal("approval reused for other argv")
+	}
+	in.Source = ""
+	d, _ = g.Check(in)
+	if d.Verdict != Allow {
+		t.Fatal("observed-source rule matched prediction")
+	}
+}
+
 // An ask the gate cannot record denies instead, and the file of earlier
 // asks and approvals is left as it is, not replaced by the new ask.
 func TestUnreadableAsksAreKept(t *testing.T) {

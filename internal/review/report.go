@@ -36,6 +36,7 @@ type Report struct {
 	Secrets   []ReportSecret `json:"secrets_read"`
 	Untrusted []string       `json:"untrusted_from"`
 	Packages  []string       `json:"packages"`
+	Runtime   map[string]int `json:"runtime,omitempty"`
 	Blocked   []ReportEffect `json:"blocked"`
 	Outbox    []ReportIntent `json:"outbox"`
 	Steps     []steps.Step   `json:"steps"`
@@ -82,10 +83,14 @@ type ReportSecret struct {
 }
 
 type ReportEffect struct {
-	Verdict string `json:"verdict"`
-	Kind    string `json:"kind"`
-	Target  string `json:"target"`
-	Reason  string `json:"reason,omitempty"`
+	Source  string   `json:"source,omitempty"`
+	PID     uint32   `json:"pid,omitempty"`
+	Detail  string   `json:"detail,omitempty"`
+	Argv    []string `json:"argv,omitempty"`
+	Verdict string   `json:"verdict"`
+	Kind    string   `json:"kind"`
+	Target  string   `json:"target"`
+	Reason  string   `json:"reason,omitempty"`
 }
 
 type ReportIntent struct {
@@ -115,6 +120,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 		Untrusted: []string{},
 		Packages:  []string{},
 		Blocked:   []ReportEffect{},
+		Runtime:   map[string]int{},
 		Outbox:    []ReportIntent{},
 		Steps:     sts,
 	}
@@ -153,6 +159,9 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	seenU, seenPkg := map[string]bool{}, map[string]bool{}
 	dropped := map[string]int{}
 	for _, e := range effs {
+		if e.Source != "" {
+			r.Runtime[e.Source+":"+e.Kind]++
+		}
 		switch {
 		case e.Kind == effects.Dropped:
 			dropped[e.Target] += effects.DroppedCount(e)
@@ -182,7 +191,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			r.Packages = append(r.Packages, e.Target)
 		}
 		if (e.Verdict == "deny" || e.Verdict == "ask") && e.Kind != "net.egress" {
-			r.Blocked = append(r.Blocked, ReportEffect{Verdict: e.Verdict, Kind: e.Kind, Target: e.Target, Reason: e.Reason})
+			r.Blocked = append(r.Blocked, ReportEffect{Verdict: e.Verdict, Kind: e.Kind, Target: e.Target, Reason: e.Reason, Source: e.Source, PID: e.PID, Detail: e.Detail, Argv: e.Argv})
 			r.Attention = append(r.Attention, ReportItem{What: "blocked", Target: e.Target, Why: e.Verdict + " by " + orUnnamed(e.Reason)})
 		}
 	}
