@@ -53,8 +53,9 @@ func Guest(args []string) int {
 	}
 	vm := c.Backend == "microvm"
 	code := 125
-	if err := guestSetup(c, vm); err != nil {
-		fmt.Fprintln(os.Stderr, "airbag guest setup:", err)
+	setupErr := guestSetup(c, vm)
+	if setupErr != nil {
+		fmt.Fprintln(os.Stderr, "airbag guest setup:", setupErr)
 	} else {
 		code = guestAgent(c, vm)
 	}
@@ -62,7 +63,7 @@ func Guest(args []string) int {
 		// Kill agent descendants before reading the exported tree; no process may
 		// keep mutating it after the main command exits.
 		_ = syscall.Kill(-1, syscall.SIGKILL)
-		if err := guestExport(c.Workspace, code); err != nil {
+		if err := guestExport(code, exportOf(c.Workspace, setupErr)); err != nil {
 			fmt.Fprintln(os.Stderr, "airbag guest export:", err)
 		}
 		unix.Sync()
@@ -72,19 +73,30 @@ func Guest(args []string) int {
 	return code
 }
 
-// guestExport sends the workspace on the result stream and waits for the
+// guestExport sends the export on the result stream and waits for the
 // host's answer, so the VM does not reboot under a stream in flight.
-// Sockets and FIFOs the agent left are listed, not exported.
-func guestExport(workspace string, code int) error {
+func guestExport(code int, export func(io.Writer) (exportStats, error)) error {
 	conn, err := dialVsock(4002)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(6 * time.Minute)) // the host allows five
-	return sendExport(conn, code, func(w io.Writer) (exportStats, error) {
-		return exportWorkspace(workspace, w, true)
-	})
+	return sendExport(conn, code, export)
+}
+
+// exportOf is what the guest exports: the workspace, its sockets and
+// FIFOs listed rather than exported, once setup is done. After a failed
+// setup the agent never ran, and what is at the workspace's path may be
+// the rootfs's empty placeholder rather than the branch (the disk not
+// mounted): the export fails, and the host keeps the branch as it was.
+func exportOf(workspace string, setupErr error) func(io.Writer) (exportStats, error) {
+	if setupErr != nil {
+		return func(io.Writer) (exportStats, error) {
+			return exportStats{}, fmt.Errorf("guest setup: %w", setupErr)
+		}
+	}
+	return func(w io.Writer) (exportStats, error) { return exportWorkspace(workspace, w, true) }
 }
 
 func guestSetup(c guestConfig, vm bool) error {

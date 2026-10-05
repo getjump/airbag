@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -156,5 +157,41 @@ func TestImportTakesAWholeExport(t *testing.T) {
 	}
 	if b, err := os.ReadFile(filepath.Join(stage, "a.txt")); err != nil || string(b) != "a.txt" {
 		t.Fatalf("a.txt: %q %v", b, err)
+	}
+}
+
+// A guest whose setup failed sends a failed export, whatever is at the
+// workspace's path (an empty placeholder when the disk is not mounted):
+// the host keeps the branch. Once set up, the workspace is exported.
+func TestGuestExportsOnlyAfterSetup(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", filepath.Join(t.TempDir(), "s"))
+	placeholder := t.TempDir()
+	failed, err := sent(t, exportOf(placeholder, errors.New("mount /dev/vdb: no such device")))
+	if err == nil {
+		t.Fatal("the guest reports no failure")
+	}
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir(), Backend: "microvm", Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(s.CloneDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.CloneDir(), "kept.txt"), []byte("branch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := &stream{Reader: bytes.NewReader(failed)}
+	r := receiveExport(h, exportStage(s))
+	if r.err == nil || h.answer() == exportAck {
+		t.Fatalf("the host took a failed setup's export: %+v", r)
+	}
+	if _, err := publishExport(s, r); err == nil {
+		t.Fatal("a failed setup's export is published")
+	}
+	if b, err := os.ReadFile(filepath.Join(s.CloneDir(), "kept.txt")); err != nil || string(b) != "branch\n" {
+		t.Fatalf("the branch is not kept: %q %v", b, err)
+	}
+	if _, err := sent(t, exportOf(guestWorkspace(t), nil)); err != nil {
+		t.Fatalf("a set-up guest's export: %v", err)
 	}
 }
