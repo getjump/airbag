@@ -275,8 +275,8 @@ func TestProjectPersistAndUnknownSubKeys(t *testing.T) {
 		got[ch.String()] = ch.class
 	}
 	want := map[string]keyClass{
-		"projects[/home/me/api].allowedTools": classPersist,
-		"projects[/home/me/api].somethingNew": classUnknown,
+		`projects["/home/me/api"].allowedTools`: classPersist,
+		`projects["/home/me/api"].somethingNew`: classUnknown,
 	}
 	if len(got) != len(want) {
 		t.Errorf("changes = %v, want %v", got, want)
@@ -303,7 +303,7 @@ func TestNewProjectEntryKeepsTrustInBranch(t *testing.T) {
 	}
 	c := Change{Layer: "home", Rel: ".claude.json", Path: realPath, Upper: branchPath}
 	keys, persist, _ := configKeyChange(c)
-	if !persist || !slices.Equal(keys, []string{"projects[/home/me/new].hasTrustDialogAccepted"}) {
+	if !persist || !slices.Equal(keys, []string{`projects["/home/me/new"].hasTrustDialogAccepted`}) {
 		t.Errorf("review: keys=%v persist=%v", keys, persist)
 	}
 }
@@ -311,7 +311,7 @@ func TestNewProjectEntryKeepsTrustInBranch(t *testing.T) {
 func TestKeyPathString(t *testing.T) {
 	for path, want := range map[string]string{
 		"mcpServers":                           "mcpServers",
-		"projects\x00/home/me/a.b\x00lastCost": "projects[/home/me/a.b].lastCost",
+		"projects\x00/home/me/a.b\x00lastCost": `projects["/home/me/a.b"].lastCost`,
 		"tipsHistory\x00new-user-warmup":       "tipsHistory.new-user-warmup",
 	} {
 		if got := (keyChange{path: strings.Split(path, "\x00")}).String(); got != want {
@@ -1062,8 +1062,17 @@ func TestKeyNamesStayOneLine(t *testing.T) {
 			t.Errorf("key %q renders as %q", path, got)
 		}
 	}
-	if got := (keyChange{path: []string{"projects", "/home/me/api", "allowedTools"}}).String(); got != "projects[/home/me/api].allowedTools" {
+	if got := (keyChange{path: []string{"projects", "/home/me/api", "allowedTools"}}).String(); got != `projects["/home/me/api"].allowedTools` {
 		t.Errorf("an ordinary path renders as %q", got)
+	}
+	// A key that only looks like a path, or a list, is told apart.
+	for path, want := range map[string]string{
+		"projects.foo.allowedTools": `["projects.foo.allowedTools"]`,
+		"mcpServers, hooks":         `["mcpServers, hooks"]`,
+	} {
+		if got := (keyChange{path: []string{path}}).String(); got != want {
+			t.Errorf("top-level key %q renders as %q, want %q", path, got, want)
+		}
 	}
 }
 

@@ -17,7 +17,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
@@ -125,27 +124,24 @@ type keyChange struct {
 }
 
 // String renders a path for review: keys that are plain identifiers
-// joined with dots, any other key in brackets, since project keys are
-// paths (projects[/home/me/api].allowedTools). Names only, never values.
+// joined with dots, any other key quoted in brackets, since project
+// keys are paths (projects["/home/me/api"].allowedTools). The agent
+// names the keys, so a key that is not a plain identifier is always
+// quoted: it stays on one line and cannot pass for a path of several
+// keys or a list of them. Names only, never values.
 func (k keyChange) String() string {
 	if len(k.path) == 0 {
 		return "(whole file)"
 	}
 	var b strings.Builder
 	for i, seg := range k.path {
-		// The agent names the keys: one with a control character, a
-		// quote or a bracket is quoted, so it stays one line in review
-		// and cannot pass for another key.
-		if strings.ContainsFunc(seg, func(r rune) bool { return !unicode.IsPrint(r) || strings.ContainsRune(`"[]`, r) }) {
-			seg = strconv.Quote(seg)
-		}
 		switch {
-		case i == 0:
+		case plainKey(seg) && i == 0:
 			b.WriteString(seg)
 		case plainKey(seg):
 			b.WriteString("." + seg)
 		default:
-			b.WriteString("[" + seg + "]")
+			b.WriteString("[" + strconv.Quote(seg) + "]")
 		}
 	}
 	return b.String()
