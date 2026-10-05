@@ -203,8 +203,10 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	// create it anew.
 	s.HostConfigs = slices.DeleteFunc(s.HostConfigs, func(p string) bool {
 		return slices.ContainsFunc(picked, func(c review.Change) bool {
-			return c.Kind == review.Deleted && c.Path == p ||
-				(c.Kind == review.Deleted || c.Kind == review.Replaced) && strings.HasPrefix(p, c.Path+string(filepath.Separator))
+			// A file or link in place of a directory removes it too,
+			// though Scan calls that Modified.
+			removed := c.Kind == review.Deleted || c.Kind == review.Replaced || c.Kind == review.Modified && !c.IsDir()
+			return c.Kind == review.Deleted && c.Path == p || removed && strings.HasPrefix(p, c.Path+string(filepath.Separator))
 		})
 	})
 	if len(picked) > 0 {

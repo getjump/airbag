@@ -1171,6 +1171,45 @@ func TestAppliedDirDeletionClearsHostConfig(t *testing.T) {
 	}
 }
 
+// So is one removed by a link put in place of the directory above it,
+// which Scan calls Modified.
+func TestAppliedLinkOverDirClearsHostConfig(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	legacy := filepath.Join(home, ".claude/.config.json")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte(`{"numStartups":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home, OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	review.NoteHostConfigs(s)
+	if err := os.MkdirAll(s.HomeUpper(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "elsewhere"), filepath.Join(s.HomeUpper(), ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if slices.Contains(s.HostConfigs, legacy) {
+		t.Errorf("still noted after a link replaced ~/.claude: %v", s.HostConfigs)
+	}
+}
+
 // A config that is a link into $HOME: the agent's write lands on the
 // link's target, and if the host removes that target during the session,
 // apply reports it rather than bringing it back.
