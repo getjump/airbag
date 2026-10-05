@@ -20,10 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/getjump/airbag/internal/creds"
-	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/models"
-	"github.com/getjump/airbag/internal/policy"
+	"github.com/getjump/airbag/audit"
+	"github.com/getjump/airbag/creds"
+	"github.com/getjump/airbag/policy"
 )
 
 // CA signs the certificates the proxy shows for the hosts it
@@ -166,7 +165,7 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 // Limits.KeepAlive for its next request, or when a request in progress
 // has moved no byte for Limits.Idle (a host that stalls). A protocol
 // upgrade is refused, so no connection outlives its HTTP exchanges.
-func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, live *creds.Live, f *flow) {
+func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, g Gate, host string, live *creds.Live, f *flow) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		answer(w, "airbag: cannot intercept", http.StatusInternalServerError)
@@ -193,7 +192,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 	_ = tconn.SetDeadline(time.Now().Add(15 * time.Second))
 	if err := tconn.HandshakeContext(context.Background()); err != nil {
 		conn.Close()
-		p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "TLS to airbag's proxy failed (does the tool trust airbag's CA?): " + err.Error()})
+		p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "TLS to airbag's proxy failed (does the tool trust airbag's CA?): " + err.Error()})
 		return
 	}
 	_ = tconn.SetDeadline(time.Time{})
@@ -257,7 +256,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			var b *blockedAddr
 			if errors.As(err, &b) {
-				p.Log.Add(effects.Effect{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "address: " + b.why})
+				p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "address: " + b.why})
 				http.Error(w, "airbag: "+host+" "+b.Error(), http.StatusForbidden)
 				return
 			}
@@ -276,18 +275,18 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 		// (domain fronting). The value goes only to the host it is bound to.
 		// An HTTP/1.0 request may name no host; it goes to the bound one.
 		if req.Host != "" && !sameHost(req.Host, target) {
-			p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "Host " + clipTarget(req.Host) + " is not the bound host"})
+			p.Log.Add(audit.Event{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "Host " + clipTarget(req.Host) + " is not the bound host"})
 			http.Error(w, "airbag: Host "+req.Host+" is not "+host+", the host this credential is bound to; the credential goes only to that host", http.StatusForbidden)
 			return
 		}
-		if p.Gate != nil && p.Gate.Tainted() != "" && !Allowlist(DefaultAllow).Allows(host) {
-			p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "secret-taint"})
-			http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+p.Gate.Tainted(), http.StatusForbidden)
+		if read := tainted(g); read != "" && !Allowlist(DefaultAllow).Allows(host) {
+			p.Log.Add(audit.Event{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "secret-taint"})
+			http.Error(w, "airbag: blocked by policy \"secret-taint\": this session read "+read, http.StatusForbidden)
 			return
 		}
-		if p.Gate != nil {
-			if d, id := p.Gate.Check(policy.Input{Effect: models.Effect{Kind: "http.request", Target: what, Detail: req.Method}}); d.Verdict != policy.Allow {
-				p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: d.Verdict, Reason: d.Rule})
+		if g != nil {
+			if d, id := g.Check(policy.Input{Effect: policy.Effect{Kind: "http.request", Target: what, Detail: req.Method}}); d.Verdict != policy.Allow {
+				p.Log.Add(audit.Event{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: d.Verdict, Reason: d.Rule})
 				http.Error(w, policy.Explain(d, id), http.StatusForbidden)
 				return
 			}
@@ -299,7 +298,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 			// value starts with "g"); without that, a host that echoes
 			// would hand the value to the agent. The request is refused
 			// before it reaches the host.
-			p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "protocol upgrade: the stream cannot be checked for the credential"})
+			p.Log.Add(audit.Event{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "deny", Reason: "protocol upgrade: the stream cannot be checked for the credential"})
 			http.Error(w, "airbag: "+host+" is reached with a credential, and airbag does not pass a protocol upgrade (websocket) there: it could not keep the value out of the upgraded stream", http.StatusForbidden)
 			return
 		}
@@ -307,14 +306,14 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, host string, l
 		if live.Substitute(req.Header.Clone(), cloneURL(req)) {
 			reason = live.Name
 		}
-		p.Log.Add(effects.Effect{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "allow", Reason: reason})
+		p.Log.Add(audit.Event{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "allow", Reason: reason})
 		rp.ServeHTTP(w, req)
 	})
 
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
-		IdleTimeout:       p.Limits.KeepAlive,
+		IdleTimeout:       p.limits().KeepAlive,
 		ConnState: func(_ net.Conn, s http.ConnState) {
 			if s == http.StateClosed {
 				once.Do(func() { close(closed) })

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,10 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getjump/airbag/internal/operation"
-	"github.com/getjump/airbag/internal/outbox"
+	"github.com/getjump/airbag/githubpr"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/term"
+	"github.com/getjump/airbag/operation"
+	"github.com/getjump/airbag/outbox"
 )
 
 // runPullRequest executes only the typed payload, never the queued argv. A
@@ -49,34 +49,22 @@ func runPullRequest(s *session.Session, box *outbox.Box, it outbox.Intent, in *b
 	if err := selectedCommit(s, *it.Request.PullRequest); err != nil {
 		return pendingPR(it, o, err)
 	}
-	p := it.Request.PullRequest
-	endpoint := "repos/" + p.Repository
-	data, _, err := githubAPI(s, gh, "GET", endpoint+"/git/ref/heads/"+url.PathEscape(p.Head), nil)
+	handler := githubpr.Handler{Call: func(ctx context.Context, method, endpoint string, payload []byte) ([]byte, error) {
+		body, code, err := githubAPI(ctx, s, gh, method, endpoint, payload)
+		if err != nil && code >= 400 && code < 500 {
+			return body, &githubpr.HTTPError{StatusCode: code, Body: body}
+		}
+		return body, err
+	}}
+	prepared, err := handler.Prepare(context.Background(), *it.Request)
 	if err != nil {
-		return pendingPR(it, o, fmt.Errorf("cannot verify GitHub head: %w", err))
-	}
-	var ref struct {
-		Object struct {
-			SHA string `json:"sha"`
-		} `json:"object"`
-	}
-	if err := json.Unmarshal(data, &ref); err != nil || ref.Object.SHA != p.HeadCommit {
-		return pendingPR(it, o, fmt.Errorf("GitHub head does not match the approved commit; push that exact commit to %s first", p.Head))
-	}
-	// Recheck the local selection after the potentially slow remote read.
-	if err := selectedCommit(s, *p); err != nil {
 		return pendingPR(it, o, err)
 	}
-	payload, err := json.Marshal(struct {
-		Title               string `json:"title"`
-		Body                string `json:"body"`
-		Head                string `json:"head"`
-		Base                string `json:"base"`
-		Draft               bool   `json:"draft"`
-		MaintainerCanModify bool   `json:"maintainer_can_modify"`
-	}{Title: p.Title, Body: p.Body, Head: p.Head, Base: p.Base, Draft: p.Draft})
-	if err != nil {
-		return "", err
+	if err := selectedCommit(s, *it.Request.PullRequest); err != nil {
+		return pendingPR(it, o, err)
+	}
+	if prepared.Digest() != it.RequestDigest {
+		return "", fmt.Errorf("prepared request differs from the queued request")
 	}
 	if it.Status == outbox.Pending {
 		if err := box.Approve(it.ID, it.RequestDigest); err != nil {
@@ -86,24 +74,14 @@ func runPullRequest(s *session.Session, box *outbox.Box, it outbox.Intent, in *b
 	if err := box.Claim(it.ID, it.RequestDigest); err != nil {
 		return "", err
 	}
-	data, code, err := githubAPI(s, gh, "POST", endpoint+"/pulls", payload)
-	result := operation.Result{Outcome: operation.Uncertain, Ticket: it.ID, RequestDigest: it.RequestDigest}
+	result := prepared.Publish(context.Background())
+	result.Ticket = it.ID
 	it.Status = outbox.Unknown
-	switch {
-	case err != nil && code >= 400 && code < 500:
-		// GitHub answered and refused (a PR already open, no commits
-		// between the branches, no permission): nothing was created.
-		it.Status, result.Outcome = outbox.Failed, operation.Failure
-		result.Value = fmt.Sprintf("GitHub refused the request (HTTP %d): %s", code, apiMessage(data))
-	case err == nil:
-		if prURL, valid := exactPR(data, *p); valid {
-			it.Status, result.Outcome, result.Value = outbox.Done, operation.Succeeded, prURL
-		} else {
-			result.Value = "GitHub response did not attest the exact request; reconcile the remote PR manually"
-		}
-	default:
-		// CLI failure/timeout does not establish whether GitHub accepted POST.
-		result.Value = "publication may have reached GitHub; inspect the remote before making another request"
+	switch result.Outcome {
+	case operation.Succeeded:
+		it.Status = outbox.Done
+	case operation.Failure:
+		it.Status = outbox.Failed
 	}
 	encoded, encodeErr := json.Marshal(result)
 	if encodeErr != nil {
@@ -198,8 +176,8 @@ func (w *boundedOutput) Write(data []byte) (int, error) {
 
 // githubAPI returns the response body and its HTTP status: 0 when gh
 // printed no status line, as when it failed before GitHub answered.
-func githubAPI(s *session.Session, prog, method, endpoint string, payload []byte) ([]byte, int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func githubAPI(ctx context.Context, s *session.Session, prog, method, endpoint string, payload []byte) ([]byte, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	args := []string{"api", "--hostname", "github.com", "--method", method, "https://api.github.com/" + endpoint, "--include"}
 	if payload != nil {
@@ -248,55 +226,6 @@ func splitResponse(out []byte) (int, []byte) {
 	return code, body
 }
 
-// apiMessage is the message of a GitHub error response, shortened.
-func apiMessage(body []byte) string {
-	var e struct {
-		Message string `json:"message"`
-		Errors  []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if json.Unmarshal(body, &e) != nil || e.Message == "" {
-		return "no message"
-	}
-	m := e.Message
-	for _, d := range e.Errors {
-		if d.Message != "" {
-			m += ": " + d.Message
-		}
-	}
-	if len(m) > 300 {
-		m = m[:300] + "…"
-	}
-	return m
-}
-
 func exactPR(data []byte, p operation.PullRequest) (string, bool) {
-	type repo struct {
-		FullName string `json:"full_name"`
-	}
-	type branch struct {
-		Ref  string `json:"ref"`
-		SHA  string `json:"sha"`
-		Repo repo   `json:"repo"`
-	}
-	var response struct {
-		Number int    `json:"number"`
-		URL    string `json:"html_url"`
-		Title  string `json:"title"`
-		Body   string `json:"body"`
-		Draft  *bool  `json:"draft"`
-		Head   branch `json:"head"`
-		Base   branch `json:"base"`
-	}
-	if err := json.Unmarshal(data, &response); err != nil {
-		return "", false
-	}
-	// GitHub names owners and repositories case-insensitively and answers
-	// with its own spelling of them; branches and the rest are exact.
-	wantURL := "https://github.com/" + p.Repository + "/pull/" + strconv.Itoa(response.Number)
-	valid := response.Number > 0 && strings.EqualFold(response.URL, wantURL) && response.Title == p.Title && response.Body == p.Body && response.Draft != nil && *response.Draft == p.Draft &&
-		response.Head.SHA == p.HeadCommit && response.Head.Ref == p.Head && response.Base.Ref == p.Base &&
-		strings.EqualFold(response.Head.Repo.FullName, p.Repository) && strings.EqualFold(response.Base.Repo.FullName, p.Repository)
-	return response.URL, valid
+	return githubpr.MatchResponse(data, p)
 }
