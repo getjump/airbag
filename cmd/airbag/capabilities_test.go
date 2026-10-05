@@ -126,3 +126,27 @@ func TestCapabilitiesDoesNotProbeOrCreateSessions(t *testing.T) {
 		t.Fatalf("capabilities created session files: %v", err)
 	}
 }
+
+// Doctor checks native only, so an optional backend's text names the
+// check run makes instead.
+func TestCapabilitiesNamesTheBackendsCheck(t *testing.T) {
+	var out bytes.Buffer
+	if err := cmdCapabilities(nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "(use airbag doctor)") {
+		t.Errorf("native does not point to doctor:\n%s", out.String())
+	}
+	if runtime.GOOS != "linux" {
+		return
+	}
+	for _, name := range []string{"gvisor", "microvm"} {
+		out.Reset()
+		if err := cmdCapabilities([]string{"--backend=" + name}, &out); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), "(use airbag doctor)") || !strings.Contains(out.String(), "airbag run --backend="+name+" checks the runtime") {
+			t.Errorf("%s points to doctor, which does not check it:\n%s", name, out.String())
+		}
+	}
+}

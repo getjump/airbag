@@ -28,8 +28,14 @@ func cmdCapabilities(args []string, out io.Writer) error {
 	if *jsonOutput {
 		return json.NewEncoder(out).Encode(b)
 	}
-	fmt.Fprintf(out, "backend: %s (%s)\nisolation: %s\nmechanism: %s\nworkspace: %s; HOME branch: %t\negress: %s\nreadiness: %s (use airbag doctor)\n",
-		b.Name, b.Platform, b.Isolation, b.Mechanism, b.WorkspaceBranch, b.HomeBranch, b.Egress, b.Readiness)
+	// Doctor checks what native needs. An optional runtime's files, KVM,
+	// cp and mkfs.ext4 are checked by run, before the session starts.
+	check := "use airbag doctor"
+	if b.Name != "native" {
+		check = "airbag run --backend=" + b.Name + " checks the runtime before the session starts; airbag doctor checks native only"
+	}
+	fmt.Fprintf(out, "backend: %s (%s)\nisolation: %s\nmechanism: %s\nworkspace: %s; HOME branch: %t\negress: %s\nreadiness: %s (%s)\n",
+		b.Name, b.Platform, b.Isolation, b.Mechanism, b.WorkspaceBranch, b.HomeBranch, b.Egress, b.Readiness, check)
 	for _, limitation := range b.Limitations {
 		fmt.Fprintln(out, "limit: "+limitation)
 	}
