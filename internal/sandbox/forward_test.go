@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"net"
@@ -346,4 +347,57 @@ func TestForwarderSlotBeforeChecks(t *testing.T) {
 	if len(got) == 0 || got[0] != "deny too many open connections" {
 		t.Fatalf("net.tcp effects = %q, want the second connection refused for the cap first", got)
 	}
+}
+
+// cut closes every connection before it writes the log, which another
+// writer may hold up: a secret read waits for the closes, not the log.
+func TestForwarderCutClosesBeforeLogging(t *testing.T) {
+	_, port := serveTCP(t, func(c net.Conn) {
+		_, _ = io.Copy(struct{ io.Writer }{c}, struct{ io.Reader }{c})
+		c.Close()
+	})
+	gate, log, path := forwardTest(t)
+	fw := newForwarder(session.Forward{Host: "db.example.test", Port: port}, gate, log)
+	dial := fw.dial
+	fw.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return dial(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(port))) // stands in for db.example.test
+	}
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait) // after the pipes close, which cleanups do first
+	var as []net.Conn
+	for range 3 {
+		a, b := net.Pipe()
+		t.Cleanup(func() { a.Close() })
+		wg.Go(func() { fw.handle(b) })
+		_, _ = a.Write([]byte("x"))
+		if _, err := a.Read(make([]byte, 1)); err != nil {
+			t.Fatal(err)
+		}
+		as = append(as, a)
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	cut := make(chan struct{})
+	go func() { fw.cut(); close(cut) }()
+	for i, a := range as {
+		_ = a.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := a.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+			t.Errorf("connection %d open while the log was held: %v", i, err)
+		}
+	}
+	if _, err := conn.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	<-cut
 }

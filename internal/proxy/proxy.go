@@ -142,7 +142,7 @@ func (p *Proxy) Cut(keep Allowlist, reason string) {
 			logged = append(logged, effects.Effect{Kind: "net.egress", Target: f.target, Verdict: "cut", Reason: reason})
 		}
 	}
-	p.Log.AddAll(logged)
+	_ = p.Log.AddAll(logged)
 }
 
 func New(allow Allowlist, log *effects.Log) *Proxy {

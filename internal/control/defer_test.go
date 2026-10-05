@@ -3,12 +3,16 @@ package control
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
@@ -113,6 +117,55 @@ func TestIntentBodyBounded(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.intent(w, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/intent", strings.NewReader(big)))
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("%d %s", w.Code, w.Body.String())
+		t.Errorf("status %d", w.Code)
+	}
+}
+
+// A secret read is answered only once its entry is in the log, which a
+// resumed session reads the label back from.
+func TestTaintFailsWhenNotLogged(t *testing.T) {
+	s := deferServer(t, "")
+	_ = s.Log.Close()
+	w := httptest.NewRecorder()
+	s.taint(w, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/taint", strings.NewReader(`{"file":".env","exe":"/bin/cat"}`)))
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status %d", w.Code)
+	}
+}
+
+// Past MaxConns connections open, one more is closed at once.
+func TestControlSocketCapped(t *testing.T) {
+	s := deferServer(t, "")
+	sock := filepath.Join(t.TempDir(), "ctl.sock")
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = s.Serve(l); close(done) }()
+	defer func() { l.Close(); <-done }()
+	var conns []net.Conn
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	dial := func() net.Conn {
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+		return c
+	}
+	for range MaxConns {
+		dial()
+	}
+	// The server has accepted them once a request on the last is answered.
+	last := dial()
+	_ = last.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err = last.Read(make([]byte, 1))
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("connection past the cap: %v", err)
 	}
 }

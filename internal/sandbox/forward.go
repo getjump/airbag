@@ -137,5 +137,5 @@ func (fw *forwarder) cut() {
 		logged = append(logged, effects.Effect{Kind: "net.tcp", Target: fw.target(), Verdict: "cut", Reason: "secret-taint"})
 	}
 	fw.mu.Unlock()
-	fw.log.AddAll(logged) // after every close: the read waits for them
+	_ = fw.log.AddAll(logged) // after every close: the read waits for them
 }

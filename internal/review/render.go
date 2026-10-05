@@ -101,7 +101,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 			host = e.Target
 		}
 		switch e.Verdict {
-		case "deny":
+		case "deny", "ask":
 			denied[e.Target]++
 		case "cut":
 			cut[e.Target]++

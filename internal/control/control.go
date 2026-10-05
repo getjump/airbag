@@ -269,7 +269,12 @@ func (s *Server) taint(w http.ResponseWriter, r *http.Request) {
 	if s.Gate != nil {
 		s.Gate.Taint(t.File)
 	}
-	s.Log.Add(effects.Effect{Kind: "secret.read", Target: t.File, Verdict: "taint", Reason: t.Exe})
+	// A resumed session reads the label back from this entry
+	// (restoreLabels): the read goes on only once it is written.
+	if err := s.Log.AddAll([]effects.Effect{{Kind: "secret.read", Target: t.File, Verdict: "taint", Reason: t.Exe}}); err != nil {
+		http.Error(w, "the read could not be logged: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	_, _ = w.Write([]byte("{}"))
 }
 

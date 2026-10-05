@@ -151,7 +151,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 				host = e.Target
 			}
 			switch e.Verdict {
-			case "deny":
+			case "deny", "ask":
 				r.Network.Denied[e.Target]++
 			case "cut":
 				r.Network.Cut[e.Target]++

@@ -70,10 +70,12 @@ func (s *Set) Add(label Label, source string) bool {
 		<-done
 		return false
 	}
-	defer close(done)
 	for _, f := range hooks {
 		f(label, source)
 	}
+	// Not deferred: a hook that panicked did not finish, and a later Add
+	// must not go on as if it had.
+	close(done)
 	return true
 }
 

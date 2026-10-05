@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -920,4 +921,46 @@ func TestAnswerHasWriteDeadline(t *testing.T) {
 			t.Errorf("%s: deadlines %v", target, w.set)
 		}
 	}
+}
+
+// Cut closes every flow before it writes the log, which another writer
+// may hold up: a secret read waits for the closes, not for the log.
+func TestCutClosesBeforeLogging(t *testing.T) {
+	target := listenTCP(t, echoConn)
+	p, addr, path := boundedProxy(t, DefaultLimits())
+	var cs []net.Conn
+	for range 3 {
+		c, _, code := connectVia(t, addr, target)
+		t.Cleanup(func() { c.Close() })
+		if code != http.StatusOK {
+			t.Fatalf("CONNECT: %d", code)
+		}
+		cs = append(cs, c)
+	}
+	// Another writer holds the database: the log's writes wait for it.
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	cut := make(chan struct{})
+	go func() { p.Cut(nil, "test"); close(cut) }()
+	for i, c := range cs {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+			t.Errorf("flow %d open while the log was held: %v", i, err)
+		}
+	}
+	if _, err := conn.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	<-cut
 }

@@ -57,7 +57,9 @@ func TestRefusalsMetered(t *testing.T) {
 	for i := range batch {
 		batch[i] = deny
 	}
-	l.AddAll(batch)
+	if err := l.AddAll(batch); err != nil {
+		t.Fatal(err)
+	}
 	l.Add(Effect{Kind: "net.egress", Target: "y:443", Verdict: "allow"})
 	l.Add(Effect{Kind: "proc.exec", Target: "rm", Verdict: "deny"})
 	l.Add(Effect{Kind: "net.egress", Target: "x:443", Verdict: "ask", Reason: "ask-rule"})
@@ -117,5 +119,60 @@ func TestRefusalKindsBounded(t *testing.T) {
 	}
 	if len(l.refusals) != maxMetered+1 {
 		t.Errorf("%d meters", len(l.refusals))
+	}
+}
+
+// Once a flood stops, its count goes in with the next write of any
+// kind a second or more later, so a review of a running session sees
+// it before the log closes.
+func TestDroppedCountedAfterFlood(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+	es := make([]Effect, refuseBurst+10)
+	for i := range es {
+		es[i] = Effect{Kind: "net.egress", Target: "x:443", Verdict: "deny"}
+	}
+	if err := l.AddAll(es); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(1500 * time.Millisecond)
+	if err := l.AddAll([]Effect{{Kind: "tool.call", Target: "Read", Verdict: "allow"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range got {
+		n += DroppedCount(e)
+	}
+	if n != 10 {
+		t.Fatalf("%d counted before Close, want 10", n)
+	}
+}
+
+// A write after Close fails rather than going nowhere unnoticed, and a
+// second Close is harmless.
+func TestAddAllAfterClose(t *testing.T) {
+	l, err := Open(filepath.Join(t.TempDir(), "effects.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.AddAll([]Effect{{Kind: "secret.read", Target: ".env", Verdict: "taint"}}); err == nil {
+		t.Fatal("a write after Close reported success")
+	}
+	l.Add(Effect{Kind: "x"}) // and does not panic
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

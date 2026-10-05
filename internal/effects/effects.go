@@ -47,11 +47,12 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 `
 
 type Log struct {
-	mu sync.Mutex
-	db *sql.DB
+	mu     sync.Mutex
+	db     *sql.DB
+	closed bool
 	// refusals meter the refused entries (deny, ask) of each kind (Add).
 	refusals map[string]*meter
-	now     func() time.Time
+	now      func() time.Time
 }
 
 // The agent decides how many refusals it provokes (a deny, or an ask
@@ -59,8 +60,9 @@ type Log struct {
 // refuseBurst, the refused entries of one kind are written at most
 // refuseRate a second; those not written are counted, and the count
 // goes in as a log.dropped entry before that kind's next written one,
-// or when the log closes. Every other entry is written: allowed ones
-// are what the agent did.
+// with any later write a second or more after its last count (so a
+// review of a running session sees it), and when the log closes. Every
+// other entry is written: allowed ones are what the agent did.
 const (
 	refuseBurst = 1000
 	refuseRate  = 50
@@ -76,6 +78,7 @@ type meter struct {
 	tokens  float64
 	last    time.Time
 	dropped int
+	counted time.Time // when the count last went in
 }
 
 // take reports whether one more entry may be written at t.
@@ -103,30 +106,58 @@ func Open(path string) (*Log, error) {
 	return &Log{db: db, refusals: map[string]*meter{}, now: time.Now}, nil
 }
 
-// Add writes e, unless it is a refusal past its kind's rate.
-func (l *Log) Add(e Effect) { l.AddAll([]Effect{e}) }
+// Add writes e, unless it is a refusal past its kind's rate. A failure
+// to write is not reported; AddAll reports it.
+func (l *Log) Add(e Effect) { _ = l.AddAll([]Effect{e}) }
+
+var errClosed = errors.New("effect log closed")
 
 // AddAll writes es in one transaction: a batch costs one sync to disk,
-// not one each.
-func (l *Log) AddAll(es []Effect) {
+// not one each. It reports whether they were written; a refusal past
+// its rate is counted, not an error.
+func (l *Log) AddAll(es []Effect) error {
 	if len(es) == 0 {
-		return
+		return nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closed {
+		return errClosed
+	}
 	tx, err := l.db.BeginTx(context.Background(), nil)
 	if err != nil {
-		return
+		return err
 	}
 	for _, e := range es {
-		l.add(tx, e)
+		if err := l.add(tx, e); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
 	}
-	_ = tx.Commit()
+	now := l.now()
+	for kind, m := range l.refusals {
+		if m.dropped > 0 && now.Sub(m.counted) >= time.Second {
+			if err := l.count(tx, kind, m, now); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// count writes the count of m's entries not written. l.mu is held.
+func (l *Log) count(tx *sql.Tx, kind string, m *meter, now time.Time) error {
+	if err := insert(tx, dropped(kind, m.dropped, now)); err != nil {
+		return err
+	}
+	m.dropped, m.counted = 0, now
+	return nil
 }
 
 // add writes e through tx, with the count of the entries of its kind
 // that were not, if any. l.mu is held.
-func (l *Log) add(tx *sql.Tx, e Effect) {
+func (l *Log) add(tx *sql.Tx, e Effect) error {
 	now := l.now()
 	if e.Time.IsZero() {
 		e.Time = now
@@ -138,18 +169,19 @@ func (l *Log) add(tx *sql.Tx, e Effect) {
 		}
 		m := l.refusals[key]
 		if m == nil {
-			m = &meter{tokens: refuseBurst, last: now}
+			m = &meter{tokens: refuseBurst, last: now, counted: now}
 			l.refusals[key] = m
 		}
 		if !m.take(now) {
-			return
+			return nil
 		}
 		if m.dropped > 0 {
-			insert(tx, dropped(key, m.dropped, now))
-			m.dropped = 0
+			if err := l.count(tx, key, m, now); err != nil {
+				return err
+			}
 		}
 	}
-	insert(tx, e)
+	return insert(tx, e)
 }
 
 func dropped(kind string, n int, t time.Time) Effect {
@@ -174,21 +206,27 @@ func DroppedCount(e Effect) int {
 // keeps past its burst.
 const RefuseRate = refuseRate
 
-func insert(tx *sql.Tx, e Effect) {
+func insert(tx *sql.Tx, e Effect) error {
 	pred := []byte("[]")
 	if e.Predict != nil {
 		if b, err := json.Marshal(e.Predict); err == nil {
 			pred = b
 		}
 	}
-	_, _ = tx.ExecContext(context.Background(), `INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
+	_, err := tx.ExecContext(context.Background(), `INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
 		e.Time.UTC().Format(time.RFC3339Nano), e.Kind, e.Target, e.Verdict, e.Reason, string(pred))
+	return err
 }
 
 // Close writes the counts of the refused entries still held back, then
-// closes the database.
+// closes the database; later writes fail.
 func (l *Log) Close() error {
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
 	var es []Effect
 	for kind, m := range l.refusals {
 		if m.dropped > 0 {
@@ -199,12 +237,11 @@ func (l *Log) Close() error {
 	if len(es) > 0 {
 		if tx, err := l.db.BeginTx(context.Background(), nil); err == nil {
 			for _, e := range es {
-				insert(tx, e)
+				_ = insert(tx, e)
 			}
 			_ = tx.Commit()
 		}
 	}
-	l.mu.Unlock()
 	return l.db.Close()
 }
 
