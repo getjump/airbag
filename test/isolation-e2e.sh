@@ -13,9 +13,9 @@ T=$(mktemp -d "$HOME/.airbag-isolation-e2e.XXXXXX")
 R=$(mktemp -d /var/tmp/airbag-isolation.XXXXXX)
 AIRBAG_HOME=$R/sessions
 export AIRBAG_HOME
-id='' id2=''
+id='' id2='' id3=''
 cleanup() {
-	for s in $id $id2; do "$AIRBAG" discard --yes "$s" >/dev/null 2>&1 || true; done
+	for s in $id $id2 $id3; do "$AIRBAG" discard --yes "$s" >/dev/null 2>&1 || true; done
 	rm -rf "$T" "$R"
 }
 trap cleanup EXIT
@@ -84,6 +84,11 @@ cat "$T/meta" > "$meta"
 "$AIRBAG" run --session "$id" -- true >"$T/out" 2>&1 || fail "resume refused: $(cat "$T/out")"
 grep -q "resuming session $id (run 2)" "$T/out" || fail "not resumed: $(cat "$T/out")"
 [ "$(cat notes.txt)" = base ] || fail "the real file changed before apply"
+
+# A default run's output stays as it was: no boundary line.
+"$AIRBAG" run -- true >"$T/out" 2>&1 || fail "default run: $(cat "$T/out")"
+id3=$(session_of "$T/out")
+! grep -q "^airbag: backend" "$T/out" || fail "a default run printed its boundary: $(cat "$T/out")"
 
 # --nix-daemon: the daemon's builds reach the network outside the proxy,
 # and the session says so.
