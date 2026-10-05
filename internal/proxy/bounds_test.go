@@ -989,6 +989,42 @@ func TestMirrorAnswerIsPaced(t *testing.T) {
 	}
 }
 
+// A request that declares a body and sends none still gets the
+// proxy's own answer, a refusal or the mirror's: net/http would first
+// read the body, with no deadline.
+func TestAnswerToUnsentBody(t *testing.T) {
+	log, _ := newLog(t)
+	p := New(Allowlist{"api.anthropic.com"}, log)
+	p.Mirror = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() { _ = p.Serve(l) }()
+	g0, fd0 := usage()
+	for target, want := range map[string]int{"paste.example.net": http.StatusForbidden, "airbag.mirror": http.StatusOK} {
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", l.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second)) // a failing run ends too
+		_, _ = fmt.Fprintf(c, "POST http://%s/x HTTP/1.1\r\nHost: %s\r\nContent-Length: 10\r\n\r\n", target, target)
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil {
+			t.Errorf("%s: %v", target, err)
+		} else {
+			if resp.StatusCode != want || !resp.Close {
+				t.Errorf("%s: %d, close %v", target, resp.StatusCode, resp.Close)
+			}
+			resp.Body.Close()
+		}
+		c.Close()
+	}
+	// The proxy lets go of both connections once they are closed.
+	settle(t, g0, fd0, 0, 0, 3*time.Second)
+}
+
 // Cut closes every flow before it writes the log, which another writer
 // may hold up: a secret read waits for the closes, not for the log.
 func TestCutClosesBeforeLogging(t *testing.T) {

@@ -206,9 +206,14 @@ func (p *Proxy) Serve(l net.Listener) error {
 // connection in a blocked write.
 const AnswerWrite = 30 * time.Second
 
-// answer is http.Error within AnswerWrite.
+// answer is http.Error within AnswerWrite, as the connection's last
+// answer. Before net/http writes an answer it reads what is left of the
+// request's body, with no deadline; a client that declares a body and
+// sends none would hold the answer there. On a connection it closes
+// after the answer, it does not read.
 func answer(w http.ResponseWriter, msg string, code int) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(AnswerWrite))
+	w.Header().Set("Connection", "close")
 	http.Error(w, msg, code)
 }
 
@@ -268,6 +273,11 @@ func (w paced) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // slow to end), so what net/http still holds when it returns gets a
 // fresh deadline.
 func (p *Proxy) serveMirror(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength != 0 {
+		// The mirror reads no body; one left unsent would hold the
+		// answer, as in answer.
+		w.Header().Set("Connection", "close")
+	}
 	pw := paced{w, http.NewResponseController(w)}
 	p.Mirror.ServeHTTP(pw, r)
 	pw.renew()

@@ -499,7 +499,8 @@ host and parse what the agent sends. airbag closes the connections there that
 stop carrying data (a request header must arrive within 30 seconds at the
 proxy and 10 at the control socket; the other bounds are
 [above](#what-the-agent-gets)). A refusal the proxy answers before it relays
-anything closes the connection if the agent does not read it within 30 seconds.
+anything is the last answer on its connection, and closes it if the agent does
+not read it within 30 seconds.
 So does an answer from the mirror that the agent stops reading: each 64 KiB of
 it must go out within 30 seconds, and the socket takes more only once the agent
 has read most of what it holds (about 200 KiB on Linux), so a reader slower
