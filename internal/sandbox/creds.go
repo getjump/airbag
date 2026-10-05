@@ -55,11 +55,11 @@ func setupCredentials(s *session.Session, bindings []creds.Binding) (creds.Set, 
 	if err := os.MkdirAll(s.RunDir(), 0o700); err != nil {
 		return nil, nil, err
 	}
-	if err := os.WriteFile(s.CACert(), ca.PEM, 0o644); err != nil {
+	if err := os.WriteFile(s.CACert(), ca.PEM, 0o644); err != nil { //nolint:gosec // a certificate, without its key: public by design
 		return nil, nil, err
 	}
 	if roots := machineRoots(); roots != nil {
-		if err := os.WriteFile(s.CABundle(), append(roots, ca.PEM...), 0o644); err != nil {
+		if err := os.WriteFile(s.CABundle(), append(roots, ca.PEM...), 0o644); err != nil { //nolint:gosec // certificates only: public by design
 			return nil, nil, err
 		}
 	} else {
@@ -95,7 +95,7 @@ func machineRoots() []byte {
 	var out []byte
 	sys := false
 	for _, p := range paths {
-		b, err := os.ReadFile(p)
+		b, err := os.ReadFile(p) //nolint:gosec // CA bundles the user's environment or this machine names
 		if err != nil || len(b) == 0 {
 			continue
 		}

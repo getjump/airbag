@@ -5,6 +5,7 @@ package effects_test
 // measure durability cost; an overlay mounted fsync=volatile only measures CPU.
 
 import (
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
@@ -52,32 +53,33 @@ func openFlatSQLite(path string) (*flatSQLite, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`CREATE TABLE events (id INTEGER PRIMARY KEY, data TEXT NOT NULL)`); err != nil {
-		db.Close()
+	if _, err := db.ExecContext(context.Background(), `CREATE TABLE events (id INTEGER PRIMARY KEY, data TEXT NOT NULL)`); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
-	stmt, err := db.Prepare(`INSERT INTO events (data) VALUES (?)`)
+	stmt, err := db.PrepareContext(context.Background(), `INSERT INTO events (data) VALUES (?)`)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return &flatSQLite{db: db, stmt: stmt, path: path}, nil
 }
 
 func (s *flatSQLite) add(es []effects.Effect) error {
-	tx, err := s.db.Begin()
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	stmt := tx.Stmt(s.stmt)
-	defer stmt.Close()
+	defer func() { _ = tx.Rollback() }() // after Commit, a no-op
+	stmt := tx.StmtContext(ctx, s.stmt)
+	defer func() { _ = stmt.Close() }()
 	for _, e := range es {
 		data, err := json.Marshal(e)
 		if err != nil {
 			return err
 		}
-		if _, err := stmt.Exec(string(data)); err != nil {
+		if _, err := stmt.ExecContext(ctx, string(data)); err != nil {
 			return err
 		}
 	}
@@ -86,7 +88,7 @@ func (s *flatSQLite) add(es []effects.Effect) error {
 
 func (s *flatSQLite) close() error {
 	if err := s.stmt.Close(); err != nil {
-		s.db.Close()
+		_ = s.db.Close()
 		return err
 	}
 	return s.db.Close()
@@ -97,12 +99,12 @@ func (s *flatSQLite) read() ([]effects.Effect, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
-	rows, err := db.Query(`SELECT data FROM events ORDER BY id`)
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(context.Background(), `SELECT data FROM events ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []effects.Effect
 	for rows.Next() {
 		var data string
@@ -136,11 +138,11 @@ func openAppendJournal(path string) (*appendJournal, error) {
 		return nil, err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	if err := syncDirectory(filepath.Dir(path)); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	return &appendJournal{f: f, path: path}, nil
@@ -153,9 +155,9 @@ func (s *appendJournal) add(es []effects.Effect) error {
 	}
 	frame := make([]byte, frameHeaderSize+len(data))
 	binary.LittleEndian.PutUint32(frame[0:4], frameMagic)
-	binary.LittleEndian.PutUint32(frame[4:8], uint32(len(data)))
+	binary.LittleEndian.PutUint32(frame[4:8], uint32(len(data))) //nolint:gosec // a benchmark batch, far below 4 GiB
 	binary.LittleEndian.PutUint64(frame[8:16], s.next)
-	binary.LittleEndian.PutUint32(frame[16:20], uint32(len(es)))
+	binary.LittleEndian.PutUint32(frame[16:20], uint32(len(es))) //nolint:gosec // a benchmark batch of at most 64
 	copy(frame[frameHeaderSize:], data)
 	checksum := crc32.NewIEEE()
 	checksum.Write(frame[8:20])
@@ -185,7 +187,7 @@ func (s *appendJournal) read() ([]effects.Effect, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var out []effects.Effect
 	var header [frameHeaderSize]byte
 	for {
@@ -225,7 +227,7 @@ func syncDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	return d.Sync()
 }
 
@@ -302,8 +304,8 @@ func BenchmarkAuditStorage(b *testing.B) {
 		b.Fatal(err)
 	}
 	var sqliteVersion string
-	if err := versionDB.QueryRow("SELECT sqlite_version()").Scan(&sqliteVersion); err != nil {
-		versionDB.Close()
+	if err := versionDB.QueryRowContext(b.Context(), "SELECT sqlite_version()").Scan(&sqliteVersion); err != nil {
+		_ = versionDB.Close()
 		b.Fatal(err)
 	}
 	if err := versionDB.Close(); err != nil {
@@ -337,7 +339,7 @@ func BenchmarkAuditStorage(b *testing.B) {
 				closed := false
 				defer func() {
 					if !closed {
-						store.close()
+						_ = store.close()
 					}
 				}()
 				if err := syncDirectory(dir); err != nil {

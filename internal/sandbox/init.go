@@ -3,14 +3,15 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/diagnostic"
 	"github.com/getjump/airbag/internal/policyfs"
+	"github.com/getjump/airbag/internal/proxy"
 	"github.com/getjump/airbag/internal/runtimepolicy"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
@@ -48,18 +50,27 @@ func Init(dir string, tty bool) {
 	if err != nil {
 		fatal("load session", err)
 	}
-	// Raw backing fds and the private policy channel must not be accessible
-	// through /proc/1/fd, ptrace or process_vm_readv from an agent.
+	// PID 1 is the supervisor: it holds the raw proxy, control and
+	// forward sockets, the FUSE backing fds and, with a runtime policy,
+	// the private runtime channel and the exec listener. The agent cannot
+	// ptrace it or read /proc/1/mem mainly because the agent's own user
+	// namespace has no CAP_SYS_PTRACE over PID 1, which lives in the
+	// parent namespace. Setting PR_SET_DUMPABLE=0 is defense in depth:
+	// it also blocks the same access where the agent shares the user
+	// namespace, and keeps /proc/1 owned by root so hidepid can hide it.
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		fatal("protect supervisor", err)
 	}
+	// The channel exists only for the opt-in runtime options (run.go).
+	var client *runtimepolicy.Client
 	var profile *runtimepolicy.Profile
-	if s.RuntimeProfile {
-		profile = &runtimepolicy.Profile{}
-	}
-	client, err := runtimeClient(profile)
-	if err != nil {
-		fatal("runtime channel", err)
+	if runtimeOn(s) {
+		if s.RuntimeProfile {
+			profile = &runtimepolicy.Profile{}
+		}
+		if client, err = runtimeClient(profile); err != nil {
+			fatal("runtime channel", err)
+		}
 	}
 	if err := buildWorld(s, client, profile); err != nil {
 		fatal("build sandbox", err)
@@ -139,17 +150,126 @@ func buildWorld(s *session.Session, client *runtimepolicy.Client, profile *runti
 	}
 
 	if s.OverHome {
+		// Paths pass through only when no component is a symlink: a
+		// symlink in ~/.claude, say, would make the bind and its
+		// read-write flag reach whatever it points at, outside the
+		// branch. Such a path is not passed through and stays in the
+		// branch (or read-only, where the link leads out of $HOME).
+		realhome := s.MountDir("realhome")
+		var pass []string
 		for _, p := range s.Passthrough {
 			p = strings.TrimSuffix(p, "/")
-			src, dst := filepath.Join(s.MountDir("realhome"), p), filepath.Join(s.Home, p)
-			if _, err := os.Lstat(src); err != nil {
+			// Checked before the path need exist: one that is missing
+			// because run.go would not create it behind a symlink gets
+			// the warning too.
+			if err := noSymlinkSoFar(realhome, p); err != nil {
+				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (%v); it stays in the branch\n", p, err)
 				continue
 			}
+			if _, err := os.Lstat(filepath.Join(realhome, p)); err != nil {
+				continue // not there: nothing to pass through
+			}
+			// A hole below it (the project's memory/) that is a link
+			// cannot be kept in the branch: the whole directory stays
+			// there instead.
+			if i := slices.IndexFunc(s.BranchHoles, func(h string) bool {
+				return strings.HasPrefix(h, p+"/") && noSymlinkSoFar(realhome, h) != nil
+			}); i >= 0 {
+				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (~/%s is a link); it stays in the branch\n", p, s.BranchHoles[i])
+				continue
+			}
+			// Nor a file in it with another name: written through the
+			// name here, it would change for real wherever the other is.
+			linked, full := hardLinks(realhome, p)
+			if len(linked) > 0 {
+				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (~/%s has another hard link); it stays in the branch\n", p, linked[0])
+				continue
+			}
+			if !full {
+				fmt.Fprintf(os.Stderr, "airbag: warning: ~/%s is not passed through (it cannot be checked in full for hard links); it stays in the branch\n", p)
+				continue
+			}
+			pass = append(pass, p)
+		}
+		// A branch hole (a passed-through project's memory/) must stay a
+		// copy-on-write view: the real files as lower, the branch as
+		// upper, so the agent sees existing memory and its edits and
+		// deletions land in the branch. That view is the home overlay's
+		// own at the hole's path, which the passthrough bind below would
+		// cover, so take a bind of it first and put it back after. A hole
+		// whose parent does not pass through needs nothing: it is in the
+		// branch already. A hole that cannot be set up fails the session:
+		// its parent would pass through whole, and the hole's writes with
+		// it.
+		type hole struct{ rel, view string }
+		var holes []hole
+		for i, h := range s.BranchHoles {
+			if !slices.ContainsFunc(pass, func(p string) bool { return strings.HasPrefix(h, p+"/") }) {
+				continue
+			}
+			src := filepath.Join(s.Home, h)
+			if err := noSymlinkSoFar(s.Home, h); err != nil {
+				return fmt.Errorf("branch hole ~/%s: %w", h, err)
+			}
+			if _, err := os.Lstat(src); errors.Is(err, os.ErrNotExist) {
+				// An earlier run of this session deleted the hole or its
+				// parent (a project directory that was not passed through
+				// then): a whiteout hides the real directory. New
+				// directories there are opaque, so the deletion of what
+				// was in them stands and the view has a mountpoint again.
+				if err := os.MkdirAll(src, 0o700); err != nil {
+					return fmt.Errorf("branch hole ~/%s: %w", h, err)
+				}
+			}
+			if err := noSymlink(s.Home, h); err != nil {
+				return fmt.Errorf("branch hole ~/%s: %w", h, err)
+			}
+			if st, err := os.Lstat(src); err != nil || !st.IsDir() {
+				return fmt.Errorf("branch hole ~/%s: not a directory", h)
+			}
+			view := s.MountDir(fmt.Sprintf("hole-%d", i))
+			if err := os.MkdirAll(view, 0o700); err != nil {
+				return err
+			}
+			if err := bind(src, view, true); err != nil {
+				return err
+			}
+			// The view must be the home overlay itself, never a real
+			// directory that a path could lead to.
+			var fs unix.Statfs_t
+			if err := unix.Statfs(view, &fs); err != nil || fs.Type != unix.OVERLAYFS_SUPER_MAGIC {
+				_ = unix.Unmount(view, unix.MNT_DETACH)
+				return fmt.Errorf("branch hole ~/%s: not on the branch of $HOME", h)
+			}
+			holes = append(holes, hole{h, view})
+		}
+		for _, p := range pass {
+			src, dst := filepath.Join(realhome, p), filepath.Join(s.Home, p)
 			if err := bind(src, dst, true); err != nil {
 				return err
 			}
 			if err := setRO(dst, true, false); err != nil {
 				return err
+			}
+		}
+		// The mount taken above keeps its own reference to the overlay,
+		// so it survives /tmp and the session root being hidden below.
+		for _, h := range holes {
+			dst := filepath.Join(s.Home, h.rel)
+			if err := noSymlink(s.Home, h.rel); err != nil {
+				return fmt.Errorf("branch hole ~/%s: %w", h.rel, err)
+			}
+			if st, err := os.Lstat(dst); err != nil || !st.IsDir() {
+				return fmt.Errorf("branch hole ~/%s: not a directory under the passed-through parent", h.rel)
+			}
+			if err := bind(h.view, dst, true); err != nil {
+				return err
+			}
+			if err := setRO(dst, true, false); err != nil {
+				return err
+			}
+			if err := unix.Unmount(h.view, unix.MNT_DETACH); err != nil {
+				return fmt.Errorf("unmount %s: %w", h.view, err)
 			}
 		}
 	}
@@ -159,6 +279,16 @@ func buildWorld(s *session.Session, client *runtimepolicy.Client, profile *runti
 		}
 	}
 	for _, p := range s.HiddenHost {
+		if err := hide(p); err != nil {
+			return fmt.Errorf("hide %s: %w", p, err)
+		}
+	}
+	// Device nodes that are a read into the kernel the filter does not
+	// cover: /dev/kmsg is the kernel log (syslog() is refused, but the
+	// log is also a readable device), and /dev/userfaultfd opens a
+	// userfaultfd without the userfaultfd() syscall. hide() is a no-op
+	// when the node is absent.
+	for _, p := range []string{"/dev/kmsg", "/dev/userfaultfd"} {
 		if err := hide(p); err != nil {
 			return fmt.Errorf("hide %s: %w", p, err)
 		}
@@ -180,7 +310,7 @@ func buildWorld(s *session.Session, client *runtimepolicy.Client, profile *runti
 		if err != nil {
 			for _, f := range secrets {
 				if herr := hide(filepath.Join(s.Workspace, f.Rel)); herr != nil {
-					return fmt.Errorf("secret %s is neither tracked (%v) nor hidden: %w", f.Rel, err, herr)
+					return fmt.Errorf("secret %s is neither tracked (%w) nor hidden: %w", f.Rel, err, herr)
 				}
 			}
 			fmt.Fprintf(os.Stderr, "airbag: warning: %d secret files are hidden from the agent: reads cannot be tracked (%v)\n", len(secrets), err)
@@ -202,14 +332,14 @@ func buildWorld(s *session.Session, client *runtimepolicy.Client, profile *runti
 			if err := syscall.Stat(filepath.Join(s.Workspace, f.Rel), &st); err != nil {
 				return err
 			}
-			secretInodes[identity{uint64(st.Dev), st.Ino}] = f.Rel
+			secretInodes[identity{st.Dev, st.Ino}] = f.Rel
 		}
 		beforeRead := func(_ string, pid uint32, fd int) error {
 			var st syscall.Stat_t
 			if err := syscall.Fstat(fd, &st); err != nil {
 				return err
 			}
-			if rel, ok := secretInodes[identity{uint64(st.Dev), st.Ino}]; ok {
+			if rel, ok := secretInodes[identity{st.Dev, st.Ino}]; ok {
 				return report(rel, pid)
 			}
 			return nil
@@ -224,7 +354,7 @@ func buildWorld(s *session.Session, client *runtimepolicy.Client, profile *runti
 		options := policyfs.Options{DataCache: policyfs.CacheMode(s.FileCache)}
 		if profile != nil {
 			options.Observe = func(stat policyfs.OperationStats) {
-				profile.Record("fuse."+stat.Operation, stat.Duration, uint64(stat.Requests))
+				profile.Record("fuse."+stat.Operation, stat.Duration, uint64(stat.Requests)) //nolint:gosec // a count, never negative
 				if stat.Errno != 0 {
 					profile.Record("fuse.error."+stat.Operation, 0, 1)
 				}
@@ -259,8 +389,21 @@ func buildWorld(s *session.Session, client *runtimepolicy.Client, profile *runti
 			return fmt.Errorf("hide session root: %w", err)
 		}
 	}
-	if err := unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
-		fmt.Fprintf(os.Stderr, "airbag: warning: private /proc unavailable (%v); host processes stay visible\n", err)
+	// hidepid=2 hides from the agent every process it cannot access,
+	// PID 1 (the supervisor, in the parent user namespace) included, so
+	// /proc/1 and other processes' /proc entries are invisible. The
+	// agent still sees /proc/self and its own descendants. subset=pid is
+	// deliberately NOT set: it would also hide /proc/cpuinfo,
+	// /proc/meminfo, /proc/stat and /proc/sys, which node, go and build
+	// tools read. Older kernels reject the option, so fall back to a
+	// plain mount.
+	flags := uintptr(unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC)
+	if err := unix.Mount("proc", "/proc", "proc", flags, "hidepid=2"); err != nil {
+		if err2 := unix.Mount("proc", "/proc", "proc", flags, ""); err2 != nil {
+			fmt.Fprintf(os.Stderr, "airbag: warning: private /proc unavailable (%v); host processes stay visible\n", err2)
+		} else {
+			fmt.Fprintf(os.Stderr, "airbag: warning: /proc without hidepid (%v); other processes stay visible to the agent\n", err)
+		}
 	}
 	return nil
 }
@@ -273,10 +416,10 @@ func agentConfig(s *session.Session) error {
 		return fmt.Errorf("/etc overlay: %w", err)
 	}
 	dir := agents.ClaudeManagedSettingsDir
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // /etc in the sandbox: the agent reads its managed settings here
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "90-airbag.json"), agents.ClaudeManagedSettings(), 0o444); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "90-airbag.json"), agents.ClaudeManagedSettings(), 0o444); err != nil { //nolint:gosec // managed settings the agent must read and must not change
 		return err
 	}
 	top := filepath.Dir(dir)
@@ -293,10 +436,10 @@ func agentConfig(s *session.Session) error {
 		fmt.Fprintf(os.Stderr, "airbag: note: %s exists on this host; Codex hooks are not installed\n", req)
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(req), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(req), 0o755); err != nil { //nolint:gosec // /etc in the sandbox: the agent reads its requirements here
 		return err
 	}
-	if err := os.WriteFile(req, agents.CodexRequirements(), 0o444); err != nil {
+	if err := os.WriteFile(req, agents.CodexRequirements(), 0o444); err != nil { //nolint:gosec // requirements the agent must read and must not change
 		return err
 	}
 	cdir := filepath.Dir(req)
@@ -358,7 +501,7 @@ func privateRun(s *session.Session) error {
 	if err := unix.Mount("tmpfs", "/run", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755"); err != nil {
 		return fmt.Errorf("tmpfs /run: %w", err)
 	}
-	if err := os.MkdirAll(shim.BinDir, 0o755); err != nil {
+	if err := os.MkdirAll(shim.BinDir, 0o755); err != nil { //nolint:gosec // the shims' directory, which every program in the sandbox searches
 		return err
 	}
 	socks := map[string]string{
@@ -390,6 +533,29 @@ func privateRun(s *session.Session) error {
 	return os.MkdirAll(fmt.Sprintf(runtimeDirFormat, s.UID), 0o700)
 }
 
+// closeInheritedFDs marks every open descriptor above stdio
+// close-on-exec, so none survives into the agent across its exec. The
+// supervisor keeps the descriptors open for itself; it does not exec
+// again. CLOSE_RANGE_CLOEXEC (kernel 5.11+) does the whole range at
+// once; a kernel without it falls back to walking /proc/self/fd.
+func closeInheritedFDs() {
+	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err == nil {
+		return
+	}
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "airbag: warning: could not list open fds to close before exec: %v\n", err)
+		return
+	}
+	for _, e := range ents {
+		fd, err := strconv.Atoi(e.Name())
+		if err != nil || fd < 3 {
+			continue
+		}
+		_, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC)
+	}
+}
+
 func bind(src, dst string, rec bool) error {
 	flags := uintptr(unix.MS_BIND)
 	if rec {
@@ -397,6 +563,23 @@ func bind(src, dst string, rec bool) error {
 	}
 	if err := unix.Mount(src, dst, "", flags, ""); err != nil {
 		return fmt.Errorf("bind %s -> %s: %w", src, dst, err)
+	}
+	return nil
+}
+
+// noSymlink checks that no component of rel under root is a symlink,
+// so a bind of root/rel stays where the path names.
+func noSymlink(root, rel string) error {
+	p := root
+	for _, part := range strings.Split(filepath.Clean(rel), "/") {
+		p = filepath.Join(p, part)
+		st, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("~/%s is a symlink", strings.TrimPrefix(p, root+"/"))
+		}
 	}
 	return nil
 }
@@ -431,7 +614,7 @@ func overlay(lower, upper, work, target string) error {
 func hide(p string) error {
 	st, err := os.Lstat(p)
 	if err != nil || st.Mode()&os.ModeSymlink != 0 {
-		return nil
+		return nil //nolint:nilerr // what PID 1 cannot stat, the agent, with fewer rights, cannot open either
 	}
 	if st.IsDir() {
 		return unix.Mount("tmpfs", p, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0700")
@@ -441,12 +624,14 @@ func hide(p string) error {
 
 // loopbackUp brings up lo in the new network namespace. There is no
 // other interface: the only way out is the proxy bridge.
+//
+//nolint:gosec // unsafe: SIOC[GS]IFFLAGS take a pointer to the ifreq, whose flags sit after the name
 func loopbackUp() error {
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	var ifr [unix.IFNAMSIZ + 24]byte
 	copy(ifr[:], "lo")
 	if _, _, e := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.SIOCGIFFLAGS, uintptr(unsafe.Pointer(&ifr[0]))); e != 0 {
@@ -463,7 +648,7 @@ func loopbackUp() error {
 // startBridge forwards 127.0.0.1:3128 inside the sandbox to the host
 // proxy's unix socket.
 func startBridge() error {
-	l, err := net.Listen("tcp", ProxyAddr)
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", ProxyAddr)
 	if err != nil {
 		return err
 	}
@@ -475,15 +660,13 @@ func startBridge() error {
 			}
 			go func() {
 				defer c.Close()
-				up, err := net.Dial("unix", proxySockInside)
+				up, err := (&net.Dialer{}).DialContext(context.Background(), "unix", proxySockInside)
 				if err != nil {
 					return
 				}
-				defer up.Close()
-				done := make(chan struct{}, 2)
-				go func() { _, _ = io.Copy(up, c); done <- struct{}{} }()
-				go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
-				<-done
+				// The host side bounds idle connections; here an end
+				// is passed on as a half-close, and bounded.
+				proxy.Relay(c, up, 0, proxy.Drain)
 			}()
 		}
 	}()
@@ -505,7 +688,7 @@ func startForwards(s *session.Session) error {
 		if strconv.Itoa(f.Port) == strings.TrimPrefix(ProxyAddr, "127.0.0.1:") {
 			return fmt.Errorf("%s: port %d is airbag's proxy inside the sandbox", f, f.Port)
 		}
-		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", f.Port))
+		l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", f.Port))
 		if err != nil {
 			return fmt.Errorf("%s: %w", f, err)
 		}
@@ -518,15 +701,11 @@ func startForwards(s *session.Session) error {
 				}
 				go func() {
 					defer c.Close()
-					up, err := net.Dial("unix", sock)
+					up, err := (&net.Dialer{}).DialContext(context.Background(), "unix", sock)
 					if err != nil {
 						return
 					}
-					defer up.Close()
-					done := make(chan struct{}, 2)
-					go func() { _, _ = io.Copy(up, c); done <- struct{}{} }()
-					go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
-					<-done
+					proxy.Relay(c, up, 0, proxy.Drain)
 				}()
 			}
 		}()
@@ -548,8 +727,10 @@ func startForwards(s *session.Session) error {
 // pseudo-terminal, so Ctrl-C and Ctrl-Z reach it and not PID 1.
 func runAgent(s *session.Session, ctl *os.File, client *runtimepolicy.Client) int {
 	if s.Strict {
+		// The limit is what --strict asks for, so failing to set it stops
+		// the run, as a failed filter install does below.
 		if err := os.WriteFile("/proc/sys/user/max_user_namespaces", []byte("1"), 0); err != nil {
-			fmt.Fprintf(os.Stderr, "airbag: warning: the agent can create user namespaces: %v\n", err)
+			fatal("limit user namespaces", err)
 		}
 	}
 	env := agentEnv(s)
@@ -562,8 +743,11 @@ func runAgent(s *session.Session, ctl *os.File, client *runtimepolicy.Client) in
 		}
 		path = p
 	}
-	cmd := exec.Command(path, s.Argv[1:]...)
+	cmd := exec.CommandContext(context.Background(), path, s.Argv[1:]...) //nolint:gosec // the command the user asked to run in the sandbox
 	cmd.Args[0] = s.Argv[0]
+	// --exec-policy: airbag's exec helper installs the notifying filter
+	// in the agent's own process, sends its listener back over fd 3 and
+	// execs the agent; PID 1 answers every execve after that.
 	var execHost, execChild *os.File
 	if s.ExecPolicy {
 		var err error
@@ -572,10 +756,11 @@ func runAgent(s *session.Session, ctl *os.File, client *runtimepolicy.Client) in
 			fmt.Fprintln(os.Stderr, "airbag: exec controller:", err)
 			return 125
 		}
-		defer execHost.Close()
-		defer execChild.Close()
-		cmd = exec.Command(airbagBinInside, append([]string{ExecInitArg, path}, s.Argv...)...)
-		cmd.ExtraFiles = []*os.File{execChild} // private startup channel, fd 3
+		defer func() { _ = execHost.Close() }()
+		defer func() { _ = execChild.Close() }()
+		cmd = exec.CommandContext(context.Background(), airbagBinInside, append([]string{ExecInitArg, path}, s.Argv...)...) //nolint:gosec // airbag's exec helper, then the command the user asked to run
+		// fd 3: the private startup channel.
+		cmd.ExtraFiles = []*os.File{execChild}
 	}
 	cmd.Env = env
 	cmd.Dir = s.Cwd
@@ -591,7 +776,49 @@ func runAgent(s *session.Session, ctl *os.File, client *runtimepolicy.Client) in
 		cmd.SysProcAttr.Foreground = true
 		cmd.SysProcAttr.Ctty = 0
 	}
-	if err := restrictAgent(); err != nil {
+	// Core dumps are capped at 1 byte: a dump could hold secrets the agent
+	// had in memory. The limit (soft and hard) is set to 1, not 0,
+	// because 0 does not stop a core_pattern that pipes to a handler
+	// (systemd-coredump, apport), which the kernel runs regardless of
+	// RLIMIT_CORE; dumpable=0 does not carry over either, since exec
+	// resets it for the agent. A limit of exactly 1 stops both file dumps
+	// and pipe handlers: fs/coredump.c coredump_pipe() aborts a pipe dump
+	// when cprm->limit == 1 ("RLIMIT_CORE is set to 1, aborting core"),
+	// and the file path is skipped because 1 < binfmt->min_coredump (a
+	// page). (Linux v6.18.) The limit is inherited across fork and exec.
+	// It does not hold everywhere: any process may lower its own soft
+	// limit, and at 0 the pipe handler runs again (under --strict the
+	// seccomp filter skips that change, so the limit stays 1); a socket
+	// core_pattern ("@" or "@@", Linux 6.16+) ignores the limit and is not
+	// covered. airbag doctor reports the host's core_pattern.
+	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 1, Max: 1}); err != nil {
+		// Started with a hard limit of 0, which an unprivileged process
+		// cannot raise, the limit stays 0, and a pipe core_pattern runs
+		// at 0: --strict, which also skips the agent's own changes to the
+		// limit, stops the run rather than keep it there.
+		if s.Strict {
+			fatal("limit core dumps", err)
+		}
+		fmt.Fprintf(os.Stderr, "airbag: warning: could not limit core dumps: %v\n", err)
+	}
+	// Close every inherited fd above stdio before the agent starts, so
+	// a descriptor leaked from airbag's caller cannot reach it (the runc
+	// CVE-2024-21626 class). CLOSE_RANGE_CLOEXEC marks them close-on-exec
+	// rather than closing them here: the supervisor keeps its own
+	// sockets and the FUSE fd (it never exec()s again), while the agent,
+	// which does exec, loses all of them. The ones airbag passes on
+	// purpose are stdio (0,1,2) and, under tty, the control fd, which is
+	// already close-on-exec; the agent inherits none of them. With
+	// --exec-policy the exec helper gets its startup channel as fd 3 and
+	// closes it before it execs the agent.
+	closeInheritedFDs()
+	if err := restrictAgent(s.Strict); err != nil {
+		// In --strict mode the filter is part of what the user asked for,
+		// so a failure to install it stops the run rather than silently
+		// leaving the surface open; by default it is best effort.
+		if s.Strict {
+			fatal("install seccomp filter", err)
+		}
 		fmt.Fprintf(os.Stderr, "airbag: warning: %v\n", err)
 	}
 	if err := cmd.Start(); err != nil {
@@ -600,7 +827,7 @@ func runAgent(s *session.Session, ctl *os.File, client *runtimepolicy.Client) in
 	}
 	pgrp := -cmd.Process.Pid
 	if s.ExecPolicy {
-		execChild.Close()
+		_ = execChild.Close()
 		listener, err := receiveListener(execHost)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "airbag: exec controller:", err)
@@ -608,17 +835,18 @@ func runAgent(s *session.Session, ctl *os.File, client *runtimepolicy.Client) in
 			return 125
 		}
 		controllerDone := make(chan struct{})
-		defer func() { close(controllerDone); unix.Close(listener) }()
+		defer func() { close(controllerDone); _ = unix.Close(listener) }()
 		go func() {
-			if err := serveExec(listener, client.Check); err != nil {
-				select {
-				case <-controllerDone:
-					return
-				default:
-				}
-				fmt.Fprintln(os.Stderr, "airbag: exec controller stopped:", err)
-				_ = syscall.Kill(pgrp, syscall.SIGKILL)
+			// serveExec returns only on an error. Past it no execve could
+			// be answered, so the agent stops rather than run unchecked.
+			err := serveExec(listener, client.Check)
+			select {
+			case <-controllerDone:
+				return
+			default:
 			}
+			fmt.Fprintln(os.Stderr, "airbag: exec controller stopped:", err)
+			_ = syscall.Kill(pgrp, syscall.SIGKILL)
 		}()
 	}
 	// Signals airbag forwards from outside go to the agent's group, as

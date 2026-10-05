@@ -1,0 +1,66 @@
+# The labels this repository uses. .github/workflows/labels.yml creates
+# or updates each of them on a push to main that changes this file; a
+# label that is not listed here is left alone, so removing an entry does
+# not delete the label. The issue forms apply only labels that exist.
+#
+# A color is six lowercase hex digits without "#", quoted so that YAML
+# reads it as text; a description is at most 100 characters.
+
+# Type
+- name: bug
+  color: "d73a4a"
+  description: Something does not work as the docs say
+- name: enhancement
+  color: "a2eeef"
+  description: A new feature or a change in behaviour
+- name: docs
+  color: "0075ca"
+  description: README, docs/ and other text
+- name: security
+  color: "b60205"
+  description: Hardening, in public; a way past the sandbox goes to a private advisory
+- name: compat
+  color: "1d76db"
+  description: How airbag works with an agent or on a platform
+
+# Triage
+- name: needs-triage
+  color: "ededed"
+  description: Not looked at yet
+- name: good first issue
+  color: "7057ff"
+  description: Small and self-contained, for people new to the code
+- name: help wanted
+  color: "008672"
+  description: Help from outside the project is welcome
+
+# Agents. Triggers are applied by the owner only, and a workflow removes
+# them once it has run. State labels are set by workflows. AGENTS.md has
+# the rules agents follow.
+- name: "ai:implement"
+  color: "5319e7"
+  description: "Owner's trigger: an agent implements this issue as a draft pull request"
+- name: "ai:review"
+  color: "5319e7"
+  description: "Owner's trigger: an agent reviews this pull request once"
+- name: "ai:fix"
+  color: "5319e7"
+  description: "Owner's trigger: an agent makes one round of fixes on this pull request"
+- name: "ai:working"
+  color: "d4c5f9"
+  description: "State: an agent is working on it"
+- name: "ai:done"
+  color: "d4c5f9"
+  description: "State: the agent finished; a person reviews the result"
+- name: "ai:blocked"
+  color: "d4c5f9"
+  description: "State: the agent stopped without finishing"
+- name: agent-created
+  color: "c5def5"
+  description: Opened by an agent; nothing acts on it until the owner adds a trigger
+- name: needs-human
+  color: "fbca04"
+  description: An agent stopped here; only the owner removes this
+- name: no-agent
+  color: "000000"
+  description: No agent acts on this issue or pull request

@@ -10,14 +10,16 @@
     in
     {
       packages = forAll (pkgs: rec {
-        airbag = pkgs.buildGoModule {
+        # The go.mod minimum (1.27.1) is newer than nixpkgs' default go.
+        airbag = pkgs.buildGo127Module rec {
           pname = "airbag";
           version = "0.1.0-dev";
           src = pkgs.lib.cleanSource ./.;
-          vendorHash = "sha256-cXg1ad6JfXgR2Ot8JUHvOumstEGrhLEvCkKEVZu4pJo=";
+          vendorHash = "sha256-Ek0AUKLb/49k6YaO2osZ6pSL5M05tdKLSeCHSWzWVoI=";
           subPackages = [ "cmd/airbag" ];
           env.CGO_ENABLED = 0;
-          ldflags = [ "-s" "-w" ];
+          # airbag version prints this, as for a release: v0.1.0-dev.
+          ldflags = [ "-s" "-w" "-X main.version=v${version}" ];
           # Unit tests run in checks.unit; the sandbox ones need user
           # namespaces and FUSE, which the build sandbox does not give.
           doCheck = false;
@@ -50,7 +52,7 @@
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          packages = [ pkgs.go pkgs.gopls pkgs.git pkgs.python3 pkgs.diffutils ];
+          packages = [ pkgs.go_1_27 pkgs.gopls pkgs.git pkgs.python3 pkgs.diffutils ];
         };
       });
 

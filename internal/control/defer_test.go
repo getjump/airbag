@@ -3,11 +3,16 @@ package control
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/models"
@@ -34,15 +39,18 @@ func deferServer(t *testing.T, yaml string) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { log.Close(); box.Close() })
+	t.Cleanup(func() { _ = log.Close(); _ = box.Close() })
 	return &Server{Box: box, Log: log, Gate: policy.NewGate(pol, dir), Root: ws}
 }
 
 func ask(t *testing.T, s *Server, in outbox.Intent) DeferReply {
 	t.Helper()
-	body, _ := json.Marshal(in)
+	body, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
 	w := httptest.NewRecorder()
-	s.deferCmd(w, httptest.NewRequest("POST", "/defer", bytes.NewReader(body)))
+	s.deferCmd(w, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/defer", bytes.NewReader(body)))
 	var d DeferReply
 	if err := json.NewDecoder(w.Body).Decode(&d); err != nil {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
@@ -51,9 +59,9 @@ func ask(t *testing.T, s *Server, in outbox.Intent) DeferReply {
 }
 
 func TestDeferQueues(t *testing.T) {
-	s := deferServer(t, "defer: [gh pr create]\n")
+	s := deferServer(t, "defer: [pubtool release]\n")
 	notes := filepath.Join(s.Root, "docs", "notes.md")
-	d := ask(t, s, outbox.Intent{Argv: []string{"gh", "pr", "create", "--body-file", notes}, Cwd: s.Root,
+	d := ask(t, s, outbox.Intent{Argv: []string{"pubtool", "release", "--body-file", notes}, Cwd: s.Root,
 		Files: map[string]string{notes: "abc"}})
 	if d.Queued == nil || d.Queued.Kind != outbox.KindCmd || d.Queued.Files["docs/notes.md"] != "abc" {
 		t.Fatalf("not queued: %+v", d)
@@ -98,5 +106,66 @@ func TestJudgeDeferred(t *testing.T) {
 	}
 	if d, _ := s.judge(models.Command{Argv: []string{"/usr/bin/npm", "publish"}, Effects: []models.Effect{{Kind: models.NetEgress, Detail: "publish"}}}); d.Verdict != policy.Deny {
 		t.Fatalf("a publish by full path is not deferred, so it is denied: %+v", d)
+	}
+}
+
+// An intent's body is read up to maxBody: one larger is refused, not
+// held in the host's memory.
+func TestIntentBodyBounded(t *testing.T) {
+	s := deferServer(t, "")
+	big := `{"kind":"` + outbox.KindPush + `","argv":["git","push","origin","` + strings.Repeat("a", maxBody) + `"]}`
+	w := httptest.NewRecorder()
+	s.intent(w, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/intent", strings.NewReader(big)))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status %d", w.Code)
+	}
+}
+
+// A secret read is answered only once its entry is in the log, which a
+// resumed session reads the label back from.
+func TestTaintFailsWhenNotLogged(t *testing.T) {
+	s := deferServer(t, "")
+	_ = s.Log.Close()
+	w := httptest.NewRecorder()
+	s.taint(w, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/taint", strings.NewReader(`{"file":".env","exe":"/bin/cat"}`)))
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status %d", w.Code)
+	}
+}
+
+// Past MaxConns connections open, one more is closed at once.
+func TestControlSocketCapped(t *testing.T) {
+	s := deferServer(t, "")
+	sock := filepath.Join(t.TempDir(), "ctl.sock")
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = s.Serve(l); close(done) }()
+	defer func() { l.Close(); <-done }()
+	var conns []net.Conn
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	dial := func() net.Conn {
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+		return c
+	}
+	for range MaxConns {
+		dial()
+	}
+	// The server has accepted them once a request on the last is answered.
+	last := dial()
+	_ = last.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err = last.Read(make([]byte, 1))
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("connection past the cap: %v", err)
 	}
 }

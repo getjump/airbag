@@ -8,6 +8,7 @@ package policyfs
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -190,6 +191,10 @@ func (v *View) removed(rel string) {
 
 func (v *View) Close() error { return unix.Close(v.fd) }
 
+// closeFD closes a backing descriptor the server opened for one request;
+// nothing was written through it that a failed close could lose.
+func closeFD(fd int) { _ = unix.Close(fd) }
+
 func (v *View) Mount() (*fuse.Server, error) {
 	zero := time.Duration(0)
 	metadataTTL := v.options.MetadataTTL
@@ -270,13 +275,13 @@ func (n *node) stat(rel string, st *syscall.Stat_t) syscall.Errno {
 	if err != nil {
 		return fs.ToErrno(err)
 	}
-	defer unix.Close(fd)
+	defer closeFD(fd)
 	// syscall and unix Stat_t have the same Linux layout, but avoid unsafe casts.
 	f, err := unix.Openat(fd, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return fs.ToErrno(err)
 	}
-	defer unix.Close(f)
+	defer closeFD(f)
 	return fs.ToErrno(syscall.Fstat(f, st))
 }
 func (n *node) newChild(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -287,7 +292,7 @@ func (n *node) newChild(ctx context.Context, name string, out *fuse.EntryOut) (*
 	out.Attr.FromStat(&st)
 	// Give aliases distinct nodes: a path policy must not inherit the first
 	// hardlink's pathname through inode deduplication. See documented limits.
-	ch := n.NewInode(ctx, &node{view: n.view, backing: backingKey{uint64(st.Dev), st.Ino}}, fs.StableAttr{Mode: st.Mode, Ino: n.view.inode(n.child(name), uint64(st.Dev), st.Ino)})
+	ch := n.NewInode(ctx, &node{view: n.view, backing: backingKey{st.Dev, st.Ino}}, fs.StableAttr{Mode: st.Mode, Ino: n.view.inode(n.child(name), st.Dev, st.Ino)})
 	return ch, 0
 }
 func (n *node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (child *fs.Inode, errno syscall.Errno) {
@@ -323,10 +328,10 @@ func (n *node) Readdir(ctx context.Context) (stream fs.DirStream, errno syscall.
 	}
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
-		unix.Close(fd)
+		closeFD(fd)
 		return nil, fs.ToErrno(err)
 	}
-	return &dirStream{fd: fd, view: n.view, rel: rel, dev: uint64(st.Dev), buf: make([]byte, 8192)}, 0
+	return &dirStream{fd: fd, view: n.view, rel: rel, dev: st.Dev, buf: make([]byte, 8192)}, 0
 }
 
 // getdents supplies names, types and backing inode numbers without one stat per
@@ -378,7 +383,7 @@ func (d *dirStream) Next() (fuse.DirEntry, syscall.Errno) {
 }
 func (d *dirStream) Close() {
 	if d.fd >= 0 {
-		unix.Close(d.fd)
+		closeFD(d.fd)
 		d.fd = -1
 	}
 	d.eof = true
@@ -395,7 +400,7 @@ func (n *node) Readlink(ctx context.Context) (target []byte, errno syscall.Errno
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	defer unix.Close(fd)
+	defer closeFD(fd)
 	buf := make([]byte, 4096)
 	count, err := unix.Readlinkat(fd, name, buf)
 	if err != nil {
@@ -453,7 +458,7 @@ func (n *node) cacheOpenFlags(fd int, flags uint32) (uint32, string) {
 	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
 		return clear("not-regular")
 	}
-	if key := (backingKey{uint64(st.Dev), st.Ino}); key != n.backing {
+	if key := (backingKey{st.Dev, st.Ino}); key != n.backing {
 		return clear("identity-changed")
 	}
 	if !n.view.sealProbe(fd) {
@@ -464,7 +469,7 @@ func (n *node) cacheOpenFlags(fd int, flags uint32) (uint32, string) {
 	if err := syscall.Fstat(fd, &st); err != nil {
 		return clear("stat-error")
 	}
-	version := backingVersion{backingKey{uint64(st.Dev), st.Ino}, st.Size, st.Mtim, st.Ctim}
+	version := backingVersion{backingKey{st.Dev, st.Ino}, st.Size, st.Mtim, st.Ctim}
 	if n.hasCache && n.cache == version {
 		return fuse.FOPEN_KEEP_CACHE, "sealed-hit"
 	}
@@ -486,14 +491,14 @@ func (n *node) open(ctx context.Context, rel string, flags uint32, mode uint32) 
 	if err != nil {
 		return nil, 0, fs.ToErrno(err)
 	}
-	defer unix.Close(fd)
+	defer closeFD(fd)
 	backing, err := unix.Openat(fd, name, int(flags)|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 	if err != nil {
 		return nil, 0, fs.ToErrno(err)
 	}
 	if flags&syscall.O_ACCMODE != syscall.O_WRONLY && n.view.beforeRead != nil {
 		if err := n.view.beforeRead(n.absolute(rel), callerPID(ctx), backing); err != nil {
-			unix.Close(backing)
+			closeFD(backing)
 			cacheReason = "before-read-denied"
 			return nil, 0, syscall.EACCES
 		}
@@ -527,7 +532,7 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 	}
 	child, e := n.newChild(ctx, name, out)
 	if e != 0 {
-		f.(fs.FileReleaser).Release(ctx)
+		_ = f.(fs.FileReleaser).Release(ctx)
 		return nil, nil, 0, e
 	}
 	return child, f, 0, 0
@@ -545,7 +550,7 @@ func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	defer unix.Close(fd)
+	defer closeFD(fd)
 	if err := unix.Mkdirat(fd, name, mode); err != nil {
 		return nil, fs.ToErrno(err)
 	}
@@ -569,7 +574,7 @@ func (n *node) Mknod(ctx context.Context, name string, mode uint32, dev uint32, 
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	defer unix.Close(fd)
+	defer closeFD(fd)
 	if err := unix.Mknodat(fd, name, mode, int(dev)); err != nil {
 		return nil, fs.ToErrno(err)
 	}
@@ -590,7 +595,7 @@ func (n *node) remove(ctx context.Context, name string, flags int) syscall.Errno
 	if err != nil {
 		return fs.ToErrno(err)
 	}
-	defer unix.Close(fd)
+	defer closeFD(fd)
 	if err := unix.Unlinkat(fd, name, flags); err != nil {
 		return fs.ToErrno(err)
 	}
@@ -630,12 +635,12 @@ func (n *node) Rename(ctx context.Context, name string, newparent fs.InodeEmbedd
 	if err != nil {
 		return fs.ToErrno(err)
 	}
-	defer unix.Close(a)
+	defer closeFD(a)
 	b, err := n.view.dir(p.rel())
 	if err != nil {
 		return fs.ToErrno(err)
 	}
-	defer unix.Close(b)
+	defer closeFD(b)
 	if err := unix.Renameat2(a, name, b, newname, uint(flags)); err != nil {
 		return fs.ToErrno(err)
 	}
@@ -654,7 +659,7 @@ func (n *node) Symlink(ctx context.Context, target, name string, out *fuse.Entry
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	defer unix.Close(fd)
+	defer closeFD(fd)
 	if err := unix.Symlinkat(target, fd, name); err != nil {
 		return nil, fs.ToErrno(err)
 	}
@@ -680,12 +685,12 @@ func (n *node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	defer unix.Close(a)
+	defer closeFD(a)
 	b, err := n.view.dir(n.rel())
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	defer unix.Close(b)
+	defer closeFD(b)
 	if err := unix.Linkat(a, oldname, b, name, 0); err != nil {
 		return nil, fs.ToErrno(err)
 	}
@@ -711,12 +716,12 @@ func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 	if err != nil {
 		return fs.ToErrno(err)
 	}
-	defer unix.Close(parent)
+	defer closeFD(parent)
 	fd, err := unix.Openat(parent, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return fs.ToErrno(err)
 	}
-	defer unix.Close(fd)
+	defer closeFD(fd)
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
 		return fs.ToErrno(err)
@@ -762,13 +767,16 @@ func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 		if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
 			return syscall.EINVAL
 		}
+		if size > math.MaxInt64 {
+			return syscall.EFBIG
+		}
 		// The pinned descriptor resolves to this inode, even after an unlink.
 		writer, err := unix.Open(pinned, unix.O_WRONLY|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return fs.ToErrno(err)
 		}
 		err = unix.Ftruncate(writer, int64(size))
-		unix.Close(writer)
+		closeFD(writer)
 		if err != nil {
 			return fs.ToErrno(err)
 		}

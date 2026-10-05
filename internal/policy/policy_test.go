@@ -151,3 +151,31 @@ func TestRuntimeApprovalScopesArgvAndSource(t *testing.T) {
 		t.Fatal("observed-source rule matched prediction")
 	}
 }
+
+// An ask the gate cannot record denies instead, and the file of earlier
+// asks and approvals is left as it is, not replaced by the new ask.
+func TestUnreadableAsksAreKept(t *testing.T) {
+	p := &Policy{}
+	if err := p.add(Rule{Name: "ask-push", When: `effect.kind == "push"`, Verdict: Ask}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	g := NewGate(p, dir)
+	in := Input{Effect: models.Effect{Kind: "push"}}
+	if d, id := g.Check(in); d.Verdict != Ask || id != "a-1" {
+		t.Fatalf("first ask: %+v %q", d, id)
+	}
+	if err := os.WriteFile(asksPath(dir), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, id := g.Check(Input{Effect: models.Effect{Kind: "push", Target: "other"}})
+	if d.Verdict != Deny || id != "" || !strings.Contains(d.Message, "cannot read") {
+		t.Fatalf("unreadable asks: %+v %q", d, id)
+	}
+	if b, _ := os.ReadFile(asksPath(dir)); string(b) != "{not json" {
+		t.Fatalf("asks.json replaced: %q", b)
+	}
+	if _, err := ReadAsks(t.TempDir()); err != nil {
+		t.Fatalf("no asks file: %v", err)
+	}
+}

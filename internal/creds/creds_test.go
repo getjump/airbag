@@ -44,7 +44,7 @@ func TestResolve(t *testing.T) {
 	home := t.TempDir()
 	_ = os.WriteFile(filepath.Join(home, "tok"), []byte("  file-token-value\n"), 0o600)
 	t.Setenv("AIRBAG_TEST_TOKEN", "env-token-value")
-	for src, want := range map[string]string{
+	for src, want := range map[string]string{ //nolint:gosec // test values, not credentials
 		"env:AIRBAG_TEST_TOKEN":        "env-token-value",
 		"file:~/tok":                   "file-token-value",
 		"command:echo cmd-token-value": "cmd-token-value",
@@ -123,7 +123,7 @@ func TestMaskBodyStreams(t *testing.T) {
 	if err != nil || string(buf[:n]) != "data: one\n\n" {
 		t.Fatalf("event held back: %q %v", buf[:n], err)
 	}
-	pw.Close()
+	_ = pw.Close()
 }
 
 // A binding and a request match when they name the same host and port

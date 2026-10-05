@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/creds"
 	"github.com/getjump/airbag/internal/effects"
@@ -46,6 +48,13 @@ func echo(t *testing.T) (*httptest.Server, func() string) {
 
 func mitmProxy(t *testing.T, upstream *httptest.Server, rules string) (*http.Client, *creds.Live, string) {
 	t.Helper()
+	return mitmProxyWith(t, upstream, rules, nil)
+}
+
+// mitmProxyWith is mitmProxy with adjust run on the proxy before it
+// serves.
+func mitmProxyWith(t *testing.T, upstream *httptest.Server, rules string, adjust func(*Proxy)) (*http.Client, *creds.Live, string) {
+	t.Helper()
 	hostport := upstream.Listener.Addr().String()
 	live := &creds.Live{Name: "demo", Hosts: []string{hostport}, Value: "ghp_RealSecretValue0123456789abcdef"}
 	live.Placeholder = creds.Placeholder(live.Value)
@@ -69,7 +78,10 @@ func mitmProxy(t *testing.T, upstream *httptest.Server, rules string) (*http.Cli
 		}
 		p.Gate = policy.NewGate(pol, dir)
 	}
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if adjust != nil {
+		adjust(p)
+	}
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +91,8 @@ func mitmProxy(t *testing.T, upstream *httptest.Server, rules string) (*http.Cli
 	roots.AppendCertsFromPEM(ca.PEM)
 	pu, _ := url.Parse("http://" + l.Addr().String())
 	c := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(pu), TLSClientConfig: &tls.Config{RootCAs: roots}}}
+	// The intercepted connection lives as long as the client keeps it.
+	t.Cleanup(c.CloseIdleConnections)
 	return c, live, path
 }
 
@@ -86,7 +100,7 @@ func TestInterceptSubstitutesAndMasks(t *testing.T) {
 	up, got := echo(t)
 	c, live, logPath := mitmProxy(t, up, "")
 	for _, gz := range []bool{false, true} {
-		req, _ := http.NewRequest("GET", up.URL+"/repos/x?token="+live.Placeholder, nil)
+		req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/repos/x?token="+live.Placeholder, nil)
 		req.Header.Set("Authorization", "Bearer "+live.Placeholder)
 		if gz {
 			req.Header.Set("Accept-Encoding", "gzip") // the client then unpacks it itself
@@ -128,7 +142,7 @@ func TestInterceptSubstitutesAndMasks(t *testing.T) {
 func TestInterceptBasic(t *testing.T) {
 	up, got := echo(t)
 	c, live, _ := mitmProxy(t, up, "")
-	req, _ := http.NewRequest("GET", up.URL+"/", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/", nil)
 	req.SetBasicAuth("x-access-token", live.Placeholder)
 	resp, err := c.Do(req)
 	if err != nil {
@@ -152,7 +166,7 @@ rules:
     verdict: deny
     message: only reads
 `)
-	req, _ := http.NewRequest("POST", up.URL+"/repos/x/issues", strings.NewReader("{}"))
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, up.URL+"/repos/x/issues", strings.NewReader("{}"))
 	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
 	resp, err := c.Do(req)
 	if err != nil {
@@ -191,7 +205,7 @@ func TestCANameConstraints(t *testing.T) {
 func TestInterceptRefusesOtherHost(t *testing.T) {
 	up, got := echo(t)
 	c, live, _ := mitmProxy(t, up, "")
-	req, _ := http.NewRequest("GET", up.URL+"/repos/x", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/repos/x", nil)
 	req.Host = "attacker.example"
 	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
 	resp, err := c.Do(req)
@@ -241,7 +255,7 @@ func TestInterceptSendsCanonicalHost(t *testing.T) {
 	c, live, _ := mitmProxy(t, up, "")
 	target := up.Listener.Addr().String()
 	h, port, _ := net.SplitHostPort(target)
-	req, _ := http.NewRequest("GET", up.URL+"/", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/", nil)
 	req.Host = strings.ToUpper(h) + ".:" + port
 	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
 	resp, err := c.Do(req)
@@ -267,5 +281,84 @@ func TestUpstreamHost(t *testing.T) {
 		if name, host := upstreamHost(c.target); name != c.name || host != c.host {
 			t.Errorf("upstreamHost(%q) = %q, %q; want %q, %q", c.target, name, host, c.name, c.host)
 		}
+	}
+}
+
+// A protocol upgrade to a host a credential is bound to is refused
+// before it reaches the host: the upgraded stream could not be checked
+// for the value. Nothing of the connection stays behind.
+func TestInterceptRefusesUpgrade(t *testing.T) {
+	var reached atomic.Bool
+	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Store(true)
+		c, brw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: " + r.Header.Get("Upgrade") + "\r\n\r\n")
+		_ = brw.Flush()
+		_, _ = io.Copy(c, brw)
+	}))
+	t.Cleanup(up.Close)
+	c, live, path := mitmProxyWith(t, up, "", func(p *Proxy) { p.Limits = testLimits })
+	g0, fd0 := usage()
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/socket", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Authorization", "Bearer "+live.Placeholder)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "protocol upgrade") || reached.Load() {
+		t.Fatalf("upgrade: %d %q, reached the host: %v", resp.StatusCode, body, reached.Load())
+	}
+	effs, _ := effects.Read(path)
+	var logged bool
+	for _, e := range effs {
+		logged = logged || (e.Kind == "http.request" && e.Verdict == "deny" && strings.HasPrefix(e.Reason, "protocol upgrade"))
+	}
+	if !logged {
+		t.Fatalf("refusal not logged: %+v", effs)
+	}
+	settle(t, g0, fd0, 2, 2, 3*time.Second) // the client's pool keeps nothing either once KeepAlive closes it
+	c.CloseIdleConnections()
+}
+
+// A cut closes each flow's connections in turn while a secret read
+// waits: no flow holds a TLS connection, whose Close sends an alert and
+// can wait seconds on a peer that does not read.
+func TestInterceptedFlowHoldsNoTLSConn(t *testing.T) {
+	up, _ := echo(t)
+	var p *Proxy
+	c, _, _ := mitmProxyWith(t, up, "", func(px *Proxy) { p = px })
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/", nil)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	held := 0
+	p.mu.Lock()
+	for f := range p.flows {
+		f.mu.Lock()
+		for cn := range f.conns {
+			held++
+			if w, ok := cn.(*watchedConn); ok {
+				cn = w.Conn
+			}
+			if _, ok := cn.(*tls.Conn); ok {
+				t.Errorf("a flow holds a %T", cn)
+			}
+		}
+		f.mu.Unlock()
+	}
+	p.mu.Unlock()
+	if held < 2 {
+		t.Fatalf("%d connections held, want the client's and the upstream's", held)
 	}
 }

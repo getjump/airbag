@@ -60,7 +60,7 @@ func execFilter(arch uint32, execve, execveat uint32) []unix.SockFilter {
 		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.ENOSYS)},
 		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: offNr},
 		// Native 64-bit pointer decoding cannot safely decode x32 or compat ABIs.
-		{Code: unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K, K: x32Bit, Jf: 1},
+		{Code: unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K, K: x32SyscallBit, Jf: 1},
 		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.ENOSYS)},
 		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: execve, Jt: 2},
 		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: execveat, Jt: 1},
@@ -82,8 +82,9 @@ func ExecInit(path string, argv []string) {
 		fatal("exec no_new_privs", err)
 	}
 	filters := execFilter(execArch(), unix.SYS_EXECVE, unix.SYS_EXECVEAT)
-	prog := unix.SockFprog{Len: uint16(len(filters)), Filter: &filters[0]}
-	fd, _, e := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_NEW_LISTENER, uintptr(unsafe.Pointer(&prog)))
+	prog := unix.SockFprog{Len: uint16(len(filters)), Filter: &filters[0]} //nolint:gosec // a fixed program of ten instructions
+	fd, _, e := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER,
+		unix.SECCOMP_FILTER_FLAG_NEW_LISTENER, uintptr(unsafe.Pointer(&prog))) //nolint:gosec // seccomp(2) takes a pointer to the program; KeepAlive below
 	runtime.KeepAlive(filters)
 	if e != 0 {
 		fatal("exec seccomp-notify", e)
@@ -91,18 +92,18 @@ func ExecInit(path string, argv []string) {
 	if err := unix.Sendmsg(3, []byte{1}, unix.UnixRights(int(fd)), nil, 0); err != nil {
 		fatal("send exec listener", err)
 	}
-	unix.Close(int(fd))
-	unix.Close(3)
-	if err := syscall.Exec(path, argv, os.Environ()); err != nil {
+	_ = unix.Close(int(fd))
+	_ = unix.Close(3)
+	if err := syscall.Exec(path, argv, os.Environ()); err != nil { //nolint:gosec // the command the user asked to run, resolved by PID 1
 		fatal("exec agent", err)
 	}
 }
 
 func receiveListener(f *os.File) (int, error) {
-	p := []unix.PollFd{{Fd: int32(f.Fd()), Events: unix.POLLIN}}
+	p := []unix.PollFd{{Fd: int32(f.Fd()), Events: unix.POLLIN}} //nolint:gosec // an open descriptor fits an int
 	for {
 		n, err := unix.Poll(p, 10000)
-		if err == unix.EINTR {
+		if errors.Is(err, unix.EINTR) {
 			continue
 		}
 		if err != nil {
@@ -136,23 +137,25 @@ func receiveListener(f *os.File) (int, error) {
 	}
 	if len(rights) != 1 {
 		for _, fd := range rights {
-			unix.Close(fd)
+			_ = unix.Close(fd)
 		}
 		return -1, errors.New("expected one exec listener")
 	}
 	return rights[0], nil
 }
 
-func notifyIOCTL(fd int, request uint, ptr unsafe.Pointer) error {
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(request), uintptr(ptr))
-	runtime.KeepAlive(ptr)
+// notifyIOCTL runs one SECCOMP_IOCTL_NOTIF_* request, which takes a
+// pointer to its struct.
+func notifyIOCTL[T any](fd int, request uint, arg *T) error {
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(request), uintptr(unsafe.Pointer(arg))) //nolint:gosec // the ioctl takes a pointer to arg; KeepAlive below
+	runtime.KeepAlive(arg)
 	if errno != 0 {
 		return errno
 	}
 	return nil
 }
 func validNotification(fd int, id uint64) bool {
-	return notifyIOCTL(fd, unix.SECCOMP_IOCTL_NOTIF_ID_VALID, unsafe.Pointer(&id)) == nil
+	return notifyIOCTL(fd, unix.SECCOMP_IOCTL_NOTIF_ID_VALID, &id) == nil
 }
 
 // serveExec records attempted invocations, not successful execs. CONTINUE
@@ -161,8 +164,8 @@ func validNotification(fd int, id uint64) bool {
 func serveExec(fd int, check func(runtimepolicy.Request) error) error {
 	for {
 		var n execNotification
-		err := notifyIOCTL(fd, unix.SECCOMP_IOCTL_NOTIF_RECV, unsafe.Pointer(&n))
-		if err == unix.EINTR || err == unix.ENOENT {
+		err := notifyIOCTL(fd, unix.SECCOMP_IOCTL_NOTIF_RECV, &n)
+		if errors.Is(err, unix.EINTR) || errors.Is(err, unix.ENOENT) {
 			continue
 		}
 		if err != nil {
@@ -191,11 +194,11 @@ func serveExec(fd int, check func(runtimepolicy.Request) error) error {
 			response.Flags = seccompContinue
 		}
 		for {
-			err = notifyIOCTL(fd, unix.SECCOMP_IOCTL_NOTIF_SEND, unsafe.Pointer(&response))
-			if err == unix.EINTR && validNotification(fd, n.ID) {
+			err = notifyIOCTL(fd, unix.SECCOMP_IOCTL_NOTIF_SEND, &response)
+			if errors.Is(err, unix.EINTR) && validNotification(fd, n.ID) {
 				continue
 			}
-			if err != nil && err != unix.ENOENT && err != unix.EINTR {
+			if err != nil && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.EINTR) {
 				return err
 			}
 			break
@@ -213,7 +216,7 @@ func readString(pid uint32, addr uint64) (string, error) {
 	var out []byte
 	for len(out) < execMaxString {
 		// Never read across a page boundary just to look for a trailing NUL.
-		size := min(64, execMaxString-len(out), os.Getpagesize()-int(addr%uint64(os.Getpagesize())))
+		size := min(64, execMaxString-len(out), os.Getpagesize()-int(addr%uint64(os.Getpagesize()))) //nolint:gosec // the page size is positive, the remainder below it
 		buf := make([]byte, size)
 		n, err := readMemory(pid, addr, buf)
 		if err != nil {
@@ -228,7 +231,7 @@ func readString(pid uint32, addr uint64) (string, error) {
 			}
 		}
 		out = append(out, buf[:n]...)
-		addr += uint64(n)
+		addr += uint64(n) //nolint:gosec // a byte count, never negative
 	}
 	return "", errors.New("exec string exceeds audit limit")
 }
@@ -277,7 +280,7 @@ func readExec(n execNotification) (runtimepolicy.Request, error) {
 	flags := uint64(0)
 	if n.Data.Nr == int32(unix.SYS_EXECVEAT) {
 		r.Detail = "execveat"
-		dirfd = int(int32(n.Data.Args[0]))
+		dirfd = int(int32(n.Data.Args[0])) //nolint:gosec // the kernel reads dirfd as an int: its low 32 bits
 		pathPtr, argvPtr = n.Data.Args[1], n.Data.Args[2]
 		flags = n.Data.Args[4]
 	} else if n.Data.Nr != int32(unix.SYS_EXECVE) {

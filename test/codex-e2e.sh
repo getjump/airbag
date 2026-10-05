@@ -38,13 +38,14 @@ JSON
 
 [ ! -e codex.txt ] || fail "codex.txt reached the real workspace"
 rev=$("$AIRBAG" review)
-for want in "3 tool calls" "Bash   echo from-codex > codex.txt" "~/.codex/… (agent state)" "+codex.txt" "git push origin main"; do
+# shellcheck disable=SC2088 # "~/" as the review prints it
+for want in "3 tool calls" "Bash   echo from-codex > codex.txt" "~/.codex/… (agent state, not applied)" "+codex.txt" "git push origin main"; do
 	echo "$rev" | grep -qF -- "$want" || fail "review lacks '$want':
 $rev"
 done
 "$AIRBAG" diff ro.txt | grep -q "^+RO" || fail "requirements.toml was writable for the agent"
 id=$(echo "$rev" | head -1 | awk '{print $2}')
-log="${AIRBAG_HOME:-/var/tmp/airbag-$(id -u)}/$id/home/upper/${T#$HOME/}/model.log"
+log="${AIRBAG_HOME:-/var/tmp/airbag-$(id -u)}/$id/home/upper/${T#"$HOME"/}/model.log"
 [ -s "$log" ] || fail "no model log at $log"
 grep -q 'blocked by policy' "$log" || fail "the PreToolUse deny did not reach the model"
 echo "$rev" | grep -q "^  + marker.txt" && fail "a command denied by policy ran"

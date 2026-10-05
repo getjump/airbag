@@ -1,14 +1,17 @@
 // Package effects is the append-only effect log of a session, a SQLite
-// database. Triggers refuse updates and deletes, so the
-// log is the source of truth for review and audit:
+// database: the events table, and the runtime context of observed
+// attempts. Triggers refuse updates and deletes, so the log is the
+// source of truth for review and audit:
 //
 //	sqlite3 /var/tmp/airbag-$UID/s-…/effects.db 'select kind, count(*) from events group by 1'
 package effects
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -57,9 +60,50 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 `
 
 type Log struct {
-	mu             sync.Mutex
-	db             *sql.DB
-	event, context *sql.Stmt
+	mu     sync.Mutex
+	db     *sql.DB
+	closed bool
+	// refusals meter the refused entries (deny, ask) of each kind (Add).
+	refusals map[string]*meter
+	now      func() time.Time
+}
+
+// The agent decides how many refusals it provokes (a deny, or an ask
+// it retries), and each is a row on the host's disk. Past a burst of
+// refuseBurst, the refused entries of one kind are written at most
+// refuseRate a second; those not written are counted, and the count
+// goes in as a log.dropped entry before that kind's next written one,
+// with any later write a second or more after its last count (so a
+// review of a running session sees it), and when the log closes. Every
+// other entry is written: allowed ones are what the agent did.
+const (
+	refuseBurst = 1000
+	refuseRate  = 50
+	// maxMetered kinds have a meter each; the rest share one.
+	maxMetered = 64
+)
+
+// Dropped is the kind of the entry that counts the refused entries a
+// meter kept out of the log; its target is their kind.
+const Dropped = "log.dropped"
+
+type meter struct {
+	tokens  float64
+	last    time.Time
+	dropped int
+	counted time.Time // when the count last went in
+}
+
+// take reports whether one more entry may be written at t.
+func (m *meter) take(t time.Time) bool {
+	m.tokens = min(refuseBurst, m.tokens+t.Sub(m.last).Seconds()*refuseRate)
+	m.last = t
+	if m.tokens < 1 {
+		m.dropped++
+		return false
+	}
+	m.tokens--
+	return true
 }
 
 func Open(path string) (*Log, error) {
@@ -68,77 +112,77 @@ func Open(path string) (*Log, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
-		db.Close()
+	if _, err := db.ExecContext(context.Background(), schema); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
-	event, err := db.Prepare(`INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-	context, err := db.Prepare(`INSERT INTO event_context (id, data) VALUES (?, ?)`)
-	if err != nil {
-		event.Close()
-		db.Close()
-		return nil, err
-	}
-	return &Log{db: db, event: event, context: context}, nil
+	return &Log{db: db, refusals: map[string]*meter{}, now: time.Now}, nil
 }
 
-func (l *Log) Add(e Effect) { _ = l.AddChecked(e) }
+// Add writes e, unless it is a refusal past its kind's rate. A failure
+// to write is not reported; AddAll reports it.
+func (l *Log) Add(e Effect) { _ = l.AddAll([]Effect{e}) }
 
-// AddChecked commits the event and runtime context before an intercepted
-// operation is released. Logging failures must not turn into unaudited allows.
-func (l *Log) AddChecked(e Effect) error {
-	return l.AddBatchChecked([]Effect{e})
-}
+var errClosed = errors.New("effect log closed")
 
-// AddBatchChecked commits all events atomically, with WAL synchronous=FULL.
-// Callers must withhold every corresponding allow until this returns nil.
-func (l *Log) AddBatchChecked(batch []Effect) error {
-	if len(batch) == 0 {
+// AddChecked commits e, with its runtime context, before an intercepted
+// operation is released: a failure to log must not become an unaudited
+// allow.
+func (l *Log) AddChecked(e Effect) error { return l.AddAll([]Effect{e}) }
+
+// AddBatchChecked commits batch atomically (WAL, synchronous=FULL).
+// Callers withhold every allow in it until this returns nil. A refusal
+// past its rate is counted as in AddAll: it was refused, not allowed.
+func (l *Log) AddBatchChecked(batch []Effect) error { return l.AddAll(batch) }
+
+// AddAll writes es in one transaction: a batch costs one sync to disk,
+// not one each. It reports whether they were written; a refusal past
+// its rate is counted, not an error.
+func (l *Log) AddAll(es []Effect) error {
+	if len(es) == 0 {
 		return nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	tx, err := l.db.Begin()
+	if l.closed {
+		return errClosed
+	}
+	// The meters change as the entries go in; if the transaction does
+	// not commit, none of it happened.
+	saved := make(map[string]meter, len(l.refusals))
+	for k, m := range l.refusals {
+		saved[k] = *m
+	}
+	err := l.addAll(es)
+	if err != nil {
+		for k, m := range l.refusals {
+			if v, ok := saved[k]; ok {
+				*m = v
+			} else {
+				delete(l.refusals, k)
+			}
+		}
+	}
+	return err
+}
+
+// addAll is AddAll's transaction. l.mu is held.
+func (l *Log) addAll(es []Effect) error {
+	tx, err := l.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	events, contexts := tx.Stmt(l.event), tx.Stmt(l.context)
-	defer events.Close()
-	defer contexts.Close()
-	for _, e := range batch {
-		if e.Time.IsZero() {
-			e.Time = time.Now()
-		}
-		pred, _ := json.Marshal(e.Predict)
-		if e.Predict == nil {
-			pred = []byte("[]")
-		}
-		result, err := events.Exec(
-			e.Time.UTC().Format(time.RFC3339Nano), e.Kind, e.Target, e.Verdict, e.Reason, string(pred))
-		if err != nil {
+	for _, e := range es {
+		if err := l.add(tx, e); err != nil {
+			_ = tx.Rollback()
 			return err
 		}
-		if e.Source != "" {
-			id, err := result.LastInsertId()
-			if err != nil {
-				return err
-			}
-			// Store only extra fields; the event row already holds the rest.
-			ctx, err := json.Marshal(struct {
-				Source string   `json:"source"`
-				PID    uint32   `json:"pid,omitempty"`
-				Detail string   `json:"detail,omitempty"`
-				Argv   []string `json:"argv,omitempty"`
-			}{e.Source, e.PID, e.Detail, e.Argv})
-			if err != nil {
-				return err
-			}
-			if _, err := contexts.Exec(id, string(ctx)); err != nil {
+	}
+	now := l.now()
+	for kind, m := range l.refusals {
+		if m.dropped > 0 && now.Sub(m.counted) >= time.Second {
+			if err := l.count(tx, kind, m, now); err != nil {
+				_ = tx.Rollback()
 				return err
 			}
 		}
@@ -146,7 +190,139 @@ func (l *Log) AddBatchChecked(batch []Effect) error {
 	return tx.Commit()
 }
 
-func (l *Log) Close() error { return l.db.Close() }
+// count writes the count of m's entries not written. l.mu is held.
+func (l *Log) count(tx *sql.Tx, kind string, m *meter, now time.Time) error {
+	if err := insert(tx, dropped(kind, m.dropped, now)); err != nil {
+		return err
+	}
+	m.dropped, m.counted = 0, now
+	return nil
+}
+
+// add writes e through tx, with the count of the entries of its kind
+// that were not, if any. l.mu is held.
+func (l *Log) add(tx *sql.Tx, e Effect) error {
+	now := l.now()
+	if e.Time.IsZero() {
+		e.Time = now
+	}
+	if e.Verdict == "deny" || e.Verdict == "ask" {
+		key := e.Kind
+		if _, ok := l.refusals[key]; !ok && len(l.refusals) >= maxMetered {
+			key = ""
+		}
+		m := l.refusals[key]
+		if m == nil {
+			m = &meter{tokens: refuseBurst, last: now, counted: now}
+			l.refusals[key] = m
+		}
+		if !m.take(now) {
+			return nil
+		}
+		if m.dropped > 0 {
+			if err := l.count(tx, key, m, now); err != nil {
+				return err
+			}
+		}
+	}
+	return insert(tx, e)
+}
+
+func dropped(kind string, n int, t time.Time) Effect {
+	what := kind
+	if what == "" {
+		what = "other kinds'"
+	}
+	return Effect{Time: t, Kind: Dropped, Target: kind,
+		Reason: fmt.Sprintf("%d %s refusals not logged: more than %d a second", n, what, refuseRate)}
+}
+
+// DroppedCount is how many refused entries a Dropped entry counts.
+func DroppedCount(e Effect) int {
+	var n int
+	if e.Kind == Dropped {
+		_, _ = fmt.Sscanf(e.Reason, "%d ", &n)
+	}
+	return n
+}
+
+// RefuseRate is how many refused entries of a kind a second the log
+// keeps past its burst.
+const RefuseRate = refuseRate
+
+// runtimeContext is what an observed attempt adds to its events row.
+type runtimeContext struct {
+	Source string   `json:"source"`
+	PID    uint32   `json:"pid,omitempty"`
+	Detail string   `json:"detail,omitempty"`
+	Argv   []string `json:"argv,omitempty"`
+}
+
+func insert(tx *sql.Tx, e Effect) error {
+	pred := []byte("[]")
+	if e.Predict != nil {
+		if b, err := json.Marshal(e.Predict); err == nil {
+			pred = b
+		}
+	}
+	result, err := tx.ExecContext(context.Background(), `INSERT INTO events (t, kind, target, verdict, reason, predict) VALUES (?, ?, ?, ?, ?, ?)`,
+		e.Time.UTC().Format(time.RFC3339Nano), e.Kind, e.Target, e.Verdict, e.Reason, string(pred))
+	if err != nil || e.Source == "" {
+		return err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	// Only the extra fields; the events row holds the rest.
+	ctx, err := json.Marshal(runtimeContext{e.Source, e.PID, e.Detail, e.Argv})
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(context.Background(), `INSERT INTO event_context (id, data) VALUES (?, ?)`, id, string(ctx))
+	return err
+}
+
+// Close writes the counts of the refused entries still held back, then
+// closes the database; later writes fail. It reports a count it could
+// not write.
+func (l *Log) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	var es []Effect
+	for kind, m := range l.refusals {
+		if m.dropped > 0 {
+			es = append(es, dropped(kind, m.dropped, l.now()))
+		}
+	}
+	var err error
+	if len(es) > 0 {
+		if err = writeAll(l.db, es); err == nil {
+			for _, m := range l.refusals {
+				m.dropped = 0
+			}
+		}
+	}
+	return errors.Join(err, l.db.Close())
+}
+
+func writeAll(db *sql.DB, es []Effect) error {
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	for _, e := range es {
+		if err := insert(tx, e); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
 
 // Read returns all effects in order. It opens the database read-only,
 // so it works while the session is still running.
@@ -158,20 +334,21 @@ func Read(path string) ([]Effect, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
+	// A log made before runtime context existed has no event_context.
 	var hasContext int
-	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='event_context'").Scan(&hasContext); err != nil {
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='event_context'`).Scan(&hasContext); err != nil {
 		return nil, err
 	}
 	query := `SELECT t, kind, target, verdict, reason, predict, '' FROM events ORDER BY id`
 	if hasContext != 0 {
 		query = `SELECT e.t, e.kind, e.target, e.verdict, e.reason, e.predict, coalesce(c.data, '') FROM events e LEFT JOIN event_context c ON c.id=e.id ORDER BY e.id`
 	}
-	rows, err := db.Query(query)
+	rows, err := db.QueryContext(context.Background(), query)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Effect
 	for rows.Next() {
 		var e Effect
@@ -180,9 +357,12 @@ func Read(path string) ([]Effect, error) {
 			return out, err
 		}
 		if ctx != "" {
-			if err := json.Unmarshal([]byte(ctx), &e); err != nil {
+			// Into its own type: a context row cannot change the verdict.
+			var rc runtimeContext
+			if err := json.Unmarshal([]byte(ctx), &rc); err != nil {
 				return out, err
 			}
+			e.Source, e.PID, e.Detail, e.Argv = rc.Source, rc.PID, rc.Detail, rc.Argv
 		}
 		e.Time, _ = time.Parse(time.RFC3339Nano, t)
 		_ = json.Unmarshal([]byte(pred), &e.Predict)

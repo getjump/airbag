@@ -7,7 +7,7 @@ import (
 )
 
 func TestSafe(t *testing.T) {
-	for in, want := range map[string]string{
+	for in, want := range map[string]string{ //nolint:gosec // terminal text, not credentials
 		"plain\ttext\n":         "plain\ttext\n",
 		"привет, мир":           "привет, мир",
 		"a\x1b[2Jb":             `a\x1b[2Jb`,

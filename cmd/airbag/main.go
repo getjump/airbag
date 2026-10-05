@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 
@@ -29,8 +31,24 @@ import (
 	"github.com/getjump/airbag/internal/term"
 )
 
-// version is set at release: -ldflags "-X main.version=v0.1.0".
+// version is set at release: -ldflags "-X main.version=v0.1.0". A
+// build without it reports the module version Go stamps (see
+// buildVersion).
 var version = "dev"
+
+// buildVersion returns v, or, while v is still "dev", the main module's
+// version from the build info: go install ...@v0.1.0 stamps v0.1.0, and
+// a build in a git checkout the tag or a pseudo-version. A build that
+// stamps no version ("(devel)") stays "dev".
+func buildVersion(v string, info func() (*debug.BuildInfo, bool)) string {
+	if v != "dev" {
+		return v
+	}
+	if bi, ok := info(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return v
+}
 
 const usage = `airbag — approve outcomes, not commands
 
@@ -44,6 +62,10 @@ const usage = `airbag — approve outcomes, not commands
                               what the agent changed, sent and queued; --json for
                               tools, --attention for only what needs a decision
   airbag diff [ID] [PATH...]  unified diff of changed files
+  airbag outbox [ID] [--json] exact frozen external requests; no execution
+  airbag outbox resolve INTENT done|failed [ID]
+                              record what an intent with an unknown outcome did,
+                              after checking; nothing runs
   airbag apply [ID] [-i] [--only PATH]... [--yes] [--force] [--trust-git]
                               write the branch (or part of it) to the real files,
                               then run the outbox
@@ -100,6 +122,8 @@ func main() {
 		err = cmdReviewArgs(args)
 	case "diff":
 		err = cmdDiff(args)
+	case "outbox":
+		err = cmdOutbox(args)
 	case "apply":
 		err = cmdApply(args)
 	case "discard":
@@ -115,7 +139,7 @@ func main() {
 	case "approve":
 		err = cmdApprove(args)
 	case "version", "--version":
-		fmt.Println("airbag", version)
+		fmt.Println("airbag", buildVersion(version, debug.ReadBuildInfo))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -230,6 +254,11 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 		s.Argv, s.Cwd = argv, cwd
+		// A session from an older airbag may have stored a wider
+		// passthrough; keep only today's. This run's directory may have
+		// its own transcript directory.
+		sandbox.NarrowPassthrough(s)
+		sandbox.AddClaudeProjectState(s, cwd)
 		for _, h := range allow {
 			if !slices.Contains(s.Allow, h) {
 				s.Allow = append(s.Allow, h)
@@ -260,13 +289,25 @@ func cmdRun(args []string) (int, error) {
 		}
 		fmt.Fprintf(os.Stderr, "airbag: resuming session %s (run %d) on its branch\n", s.ID, s.Runs)
 	} else {
+		// The current workspace's transcript directory passes through so
+		// resume works across a discard; its memory/ stays in the branch.
+		pass := append([]string{}, sandbox.DefaultPassthrough...)
+		projPass, holes := sandbox.ClaudeProjectState(cwd, ws)
+		pass = append(pass, projPass...)
 		meta := session.Meta{
 			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
-			Passthrough: sandbox.DefaultPassthrough, Hidden: hidden, HiddenHost: hiddenHost,
-			PassEnv: passEnv, Strict: *strict, Forwards: forwards, FilePolicy: *filePolicy, ExecPolicy: *execPolicy,
-			RuntimeAudit: *runtimeAudit, FileCache: *fileCache, RuntimeProfile: *runtimeProfile,
+			Passthrough: pass, BranchHoles: holes, Hidden: hidden, HiddenHost: hiddenHost,
+			PassEnv: passEnv, Strict: *strict, Forwards: forwards,
+			FilePolicy: *filePolicy, ExecPolicy: *execPolicy, RuntimeProfile: *runtimeProfile,
+		}
+		// Kept only when given, as on resume: empty is durable and off.
+		if auditExplicit {
+			meta.RuntimeAudit = *runtimeAudit
+		}
+		if cacheExplicit {
+			meta.FileCache = *fileCache
 		}
 		if runtime.GOOS == "darwin" {
 			// The macOS prototype: the workspace branch is a clone, $HOME
@@ -308,6 +349,9 @@ func cmdRun(args []string) (int, error) {
 			return 1, err
 		}
 	}
+	// Which agent configs the real $HOME has now, so apply can tell a
+	// host removal from a new file (sandbox.Run saves the session).
+	review.NoteHostConfigs(s)
 	code, err := sandbox.Run(s, proxy.Allowlist(s.Allow), pol)
 	if err != nil {
 		return code, err
@@ -340,7 +384,7 @@ func cmdHook(agent, event string) {
 
 // workspace is the git toplevel, or the current directory.
 func workspace(cwd string) string {
-	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	out, err := exec.CommandContext(context.Background(), "git", "-C", cwd, "rev-parse", "--show-toplevel").Output() //nolint:gosec // git in the user's own working directory
 	if err == nil {
 		if p := strings.TrimSpace(string(out)); p != "" {
 			return p
@@ -397,34 +441,25 @@ func cmdReviewArgs(args []string) error {
 	})
 }
 
+// cmdLogArgs: log [ID] [--json].
 func cmdLogArgs(args []string) error {
-	id := ""
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		id, args = args[0], args[1:]
-	}
-	flags := flag.NewFlagSet("log", flag.ContinueOnError)
-	asJSON := flags.Bool("json", false, "emit events with runtime context as JSON")
-	if err := flags.Parse(args); err != nil {
+	fs := flag.NewFlagSet("log", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "print the effects, with the runtime context of observed attempts, as JSON")
+	if err := fs.Parse(reorder(args)); err != nil {
 		return err
 	}
-	if len(flags.Args()) > 0 {
-		if id != "" || len(flags.Args()) != 1 {
-			return errors.New("usage: airbag log [ID] [--json]")
+	return withSession(fs.Args(), func(s *session.Session) error {
+		if !*asJSON {
+			return cmdLog(s)
 		}
-		id = flags.Args()[0]
-	}
-	return withSession([]string{id}, func(s *session.Session) error {
 		effs, err := effects.Read(s.EffectsPath())
 		if err != nil {
 			return err
 		}
-		if *asJSON {
-			if effs == nil {
-				effs = []effects.Effect{}
-			}
-			return json.NewEncoder(os.Stdout).Encode(effs)
+		if effs == nil {
+			effs = []effects.Effect{}
 		}
-		return cmdLog(s)
+		return json.NewEncoder(os.Stdout).Encode(effs)
 	})
 }
 
@@ -506,7 +541,7 @@ func cmdApply(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	out := term.Safe(os.Stdout)
 	defer out.Flush()
 	return apply.Apply(s, cs, box, apply.Options{
@@ -529,7 +564,7 @@ func cmdRollback(args []string) error {
 	var done []string
 	for _, it := range listIntents(s) {
 		if it.Status == outbox.Done || it.Status == outbox.Unknown {
-			done = append(done, fmt.Sprintf("intent %s `%s` (%s)", it.ID, strings.Join(it.Argv, " "), it.Status))
+			done = append(done, fmt.Sprintf("intent %s `%s` (%s)", it.ID, strings.Join(it.Argv, " "), it.Status)) //nolint:gocritic // backquotes for display, as in apply's messages; %#q would switch to Go quoting
 		}
 	}
 	out := term.Safe(os.Stdout)
@@ -561,7 +596,7 @@ func listIntents(s *session.Session) []outbox.Intent {
 	if err != nil {
 		return nil
 	}
-	defer box.Close()
+	defer func() { _ = box.Close() }()
 	intents, _ := box.List()
 	return intents
 }
@@ -627,7 +662,10 @@ func cmdApprove(args []string) error {
 		return err
 	}
 	if id == "" {
-		asks, _ := policy.ReadAsks(s.Dir)
+		asks, err := policy.ReadAsks(s.Dir)
+		if err != nil {
+			return err
+		}
 		n := 0
 		for _, a := range asks {
 			if !a.Approved {

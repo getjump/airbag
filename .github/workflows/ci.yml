@@ -3,18 +3,41 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # New advisories and a longer fuzz run, with no change to the code.
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
+# A new push to a pull request cancels the run before it; runs on main
+# all finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+# The static checks run through test/check.sh, which pins the tools'
+# versions; `sh test/check.sh` runs the same checks locally.
 jobs:
+  # Linux on both architectures, and an older Ubuntu: another kernel,
+  # and no AppArmor restriction on user namespaces.
   test:
-    runs-on: ubuntu-24.04
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache-dependency-path: go.sum
       - name: vet
         run: |
           go vet ./...
@@ -26,11 +49,17 @@ jobs:
           CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag" ./cmd/airbag
           sudo install -m 755 "$RUNNER_TEMP/airbag" /usr/local/bin/airbag
           GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/airbag
+      - name: agent CLIs
+        # The e2e tests drive the real Claude Code and Codex CLIs against
+        # test/mockapi; without them claude-e2e and codex-e2e skip.
+        run: npm install -g @anthropic-ai/claude-code@2.1.289 @openai/codex@0.160.0
       - name: end-to-end tests
         # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor;
         # airbag doctor prints the profile a user would install, CI lifts it.
         run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
           sudo chmod 666 /dev/fuse || true
           sudo mkdir -m 1777 -p /var/lib/airbag-e2e
           airbag doctor
@@ -39,10 +68,16 @@ jobs:
       - name: runtime policy build cost (diagnostic)
         run: sh test/runtime-policy-bench.sh
 
+  # Diagnostic cost of the opt-in runtime policies (docs/runtime-performance.md):
+  # paired builds of a fixed source snapshot with the binary before and after
+  # them, and the audit storage benchmarks on the same runner.
   runtime-build-bench:
+    if: github.event_name != 'schedule'
     needs: test
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -50,13 +85,16 @@ jobs:
     env:
       BENCH_BEFORE_SHA: 182ddaf0c4f8849aa7d314674a5a473c795396a4
       BENCH_SOURCE_SHA: 543fe189b85a0e85870ee9d92244eb2d89385280
+      PARALLELISM: ${{ matrix.parallelism }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache-dependency-path: go.sum
       - name: build paired binaries and fixed source snapshot
         run: |
           mkdir "$RUNNER_TEMP/airbag-bench-source"
@@ -73,24 +111,165 @@ jobs:
       - name: cold, unchanged, and incremental builds (paired)
         run: |
           diagnostic=()
-          if [ '${{ matrix.parallelism }}' = 2 ]; then
+          if [ "$PARALLELISM" = 2 ]; then
             diagnostic=(--diagnostic "$RUNNER_TEMP/airbag-diagnostic")
           fi
           python3 test/runtime-build-bench.py "${diagnostic[@]}" \
             --before "$RUNNER_TEMP/airbag-before" --after "$RUNNER_TEMP/airbag-after" \
             --source "$RUNNER_TEMP/airbag-bench-source" \
-            --parallelism ${{ matrix.parallelism }} --trials 2 \
-            --output "$RUNNER_TEMP/build-bench-p${{ matrix.parallelism }}.jsonl"
+            --parallelism "$PARALLELISM" --trials 2 \
+            --output "$RUNNER_TEMP/build-bench-p$PARALLELISM.jsonl"
       - name: audit storage benchmarks (same runner)
         if: matrix.parallelism == 2
         run: |
           CGO_ENABLED=0 go test ./internal/effects -run '^$' -bench '^BenchmarkAuditStorage$' \
             -benchtime=8192x -count=3 -timeout=10m \
             | tee "$RUNNER_TEMP/audit-storage-bench.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: runtime-build-p${{ matrix.parallelism }}
           path: |
             ${{ runner.temp }}/build-bench-p${{ matrix.parallelism }}.jsonl
             ${{ runner.temp }}/audit-storage-bench.txt
+          if-no-files-found: ignore
+
+  # The macOS prototype on macOS 15 and 26 on Apple silicon, on the newest
+  # macOS (macos-latest: 26 now, the next one when GitHub moves the label),
+  # and on Intel (macOS 26 is Apple's last for it): the unit tests run
+  # natively, and airbag-macprobe checks what it relies on (sandbox-exec,
+  # APFS clones, a user NFS mount) on a real macOS. The probe's report is
+  # kept, and test/e2e.sh checks what the prototype promises there.
+  macos:
+    if: github.event_name != 'schedule'
+    timeout-minutes: 30 # a stale NFS mount in the probe can hang
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26, macos-latest, macos-26-intel]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: unit tests
+        run: go test ./...
+      - name: build
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/airbag" ./cmd/airbag
+          sudo install -m 755 "$RUNNER_TEMP/airbag" /usr/local/bin/airbag
+          go build -o "$RUNNER_TEMP/airbag-macprobe" ./cmd/airbag-macprobe
+      - name: airbag-macprobe
+        env:
+          OS: ${{ matrix.os }}
+        run: |
+          "$RUNNER_TEMP/airbag-macprobe" -json > "$RUNNER_TEMP/macprobe-$OS.json" || echo "::warning::airbag-macprobe reported failures"
+          { echo '```'; "$RUNNER_TEMP/airbag-macprobe" -v || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: keep the probe's report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macprobe-${{ matrix.os }}
+          path: ${{ runner.temp }}/macprobe-${{ matrix.os }}.json
+          if-no-files-found: ignore
+      - name: end-to-end tests
+        run: |
+          airbag doctor
+          for t in test/e2e.sh test/agent-state-e2e.sh; do echo "== $t"; sh "$t"; done
+
+  lint:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: gofmt, go mod tidy and verify, go vet
+        run: sh test/check.sh hygiene
+      - name: golangci-lint
+        run: sh test/check.sh lint
+
+  vuln:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: govulncheck
+        run: sh test/check.sh vuln
+
+  race:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: go test -race
+        run: sh test/check.sh race
+
+  fuzz:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: fuzz
+        env:
+          FUZZTIME: ${{ github.event_name == 'schedule' && '5m' || '15s' }}
+        run: sh test/check.sh fuzz "$FUZZTIME"
+      - name: keep the failing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-failures
+          path: "**/testdata/fuzz/"
+          if-no-files-found: ignore
+
+  scripts:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: shellcheck
+        run: sh test/check.sh shell
+      - name: actionlint
+        run: sh test/check.sh actions

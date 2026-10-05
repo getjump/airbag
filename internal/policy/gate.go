@@ -2,7 +2,9 @@ package policy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -63,15 +65,23 @@ func (g *Gate) Check(in Input) (Decision, string) {
 	key := d.Rule + "|" + in.Effect.String()
 	// An approval for one intercepted argv must not approve a different command.
 	if in.Source != "" {
-		context, _ := json.Marshal(struct {
+		ctx, err := json.Marshal(struct {
 			Source string
 			Argv   []string
 		}{in.Source, in.Argv})
-		key += "|" + string(context)
+		if err != nil {
+			return Decision{Verdict: Deny, Rule: d.Rule, Message: "airbag cannot key this approval: " + err.Error()}, ""
+		}
+		key += "|" + string(ctx)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	asks, _ := ReadAsks(g.dir)
+	asks, err := ReadAsks(g.dir)
+	if err != nil {
+		// Written back, what could not be read would be lost, and with it
+		// the approvals and the IDs the user was given.
+		return Decision{Verdict: Deny, Rule: d.Rule, Message: "airbag cannot read this session's approvals: " + err.Error()}, ""
+	}
 	for _, a := range asks {
 		if a.Key == key {
 			if a.Approved {
@@ -99,8 +109,11 @@ func Explain(d Decision, askID string) string {
 
 func ReadAsks(dir string) ([]Request, error) {
 	b, err := os.ReadFile(asksPath(dir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil // nothing asked yet
+	}
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 	var out []Request
 	err = json.Unmarshal(b, &out)

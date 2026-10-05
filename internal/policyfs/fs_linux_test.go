@@ -4,6 +4,7 @@ package policyfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,7 +31,7 @@ func testRoot(t *testing.T, dir string, check func(runtimepolicy.Request) error)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { v.Close() })
+	t.Cleanup(func() { _ = v.Close() })
 	root := &node{view: v}
 	fs.NewNodeFS(root, &fs.Options{})
 	return root
@@ -73,15 +74,15 @@ func TestPolicyOnExistingFilesAndMutations(t *testing.T) {
 	if errno != 0 {
 		t.Fatal(errno)
 	}
-	f.(fs.FileReleaser).Release(ctx)
+	_ = f.(fs.FileReleaser).Release(ctx)
 	if len(observed) != 4 || observed[0].Target != filepath.Join(dir, "upper") {
 		t.Fatalf("wrong observed attempts: %+v", observed)
 	}
 }
 func TestBackingSymlinkSubstitutionCannotEscape(t *testing.T) {
 	dir, outside := t.TempDir(), t.TempDir()
-	os.Mkdir(filepath.Join(dir, "parent"), 0700)
-	os.WriteFile(filepath.Join(outside, "sentinel"), []byte("safe"), 0600)
+	must(t, os.Mkdir(filepath.Join(dir, "parent"), 0700))
+	must(t, os.WriteFile(filepath.Join(outside, "sentinel"), []byte("safe"), 0600))
 	root := testRoot(t, dir, func(runtimepolicy.Request) error { return nil })
 	ctx := context.Background()
 	var entry fuse.EntryOut
@@ -90,11 +91,11 @@ func TestBackingSymlinkSubstitutionCannotEscape(t *testing.T) {
 		t.Fatal(e)
 	}
 	root.AddChild("parent", inode, true)
-	os.Remove(filepath.Join(dir, "parent"))
-	os.Symlink(outside, filepath.Join(dir, "parent"))
+	must(t, os.Remove(filepath.Join(dir, "parent")))
+	must(t, os.Symlink(outside, filepath.Join(dir, "parent")))
 	_, f, _, errno := inode.Operations().(*node).Create(ctx, "sentinel", syscall.O_WRONLY|syscall.O_TRUNC, 0600, &entry)
 	if errno == 0 {
-		f.(fs.FileReleaser).Release(ctx)
+		_ = f.(fs.FileReleaser).Release(ctx)
 		t.Fatal("server followed replaced parent symlink")
 	}
 	bytes, _ := os.ReadFile(filepath.Join(outside, "sentinel"))
@@ -102,22 +103,22 @@ func TestBackingSymlinkSubstitutionCannotEscape(t *testing.T) {
 		t.Fatal("changed outside captured view")
 	}
 	// Leaf substitution is also blocked, even when the FUSE inode is cached.
-	os.Symlink(filepath.Join(outside, "sentinel"), filepath.Join(dir, "leaf"))
+	must(t, os.Symlink(filepath.Join(outside, "sentinel"), filepath.Join(dir, "leaf")))
 	leaf, e := root.Lookup(ctx, "leaf", &entry)
 	if e != 0 {
 		t.Fatal(e)
 	}
 	root.AddChild("leaf", leaf, true)
 	if f, _, e := leaf.Operations().(*node).Open(ctx, syscall.O_WRONLY|syscall.O_TRUNC); e == 0 {
-		f.(fs.FileReleaser).Release(ctx)
+		_ = f.(fs.FileReleaser).Release(ctx)
 		t.Fatal("server followed leaf symlink")
 	}
 }
 
 func TestLookupIdentityStableAndRenameKeepsIdentity(t *testing.T) {
 	dir := t.TempDir()
-	os.Mkdir(filepath.Join(dir, "workspace"), 0700)
-	os.WriteFile(filepath.Join(dir, "workspace", "file"), []byte("data"), 0600)
+	must(t, os.Mkdir(filepath.Join(dir, "workspace"), 0700))
+	must(t, os.WriteFile(filepath.Join(dir, "workspace", "file"), []byte("data"), 0600))
 	root := testRoot(t, dir, func(runtimepolicy.Request) error { return nil })
 	ctx := context.Background()
 	var entry fuse.EntryOut
@@ -213,7 +214,7 @@ func cacheTestRoot(t *testing.T, dir string, options Options, check Check, befor
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { v.Close() })
+	t.Cleanup(func() { _ = v.Close() })
 	root := &node{view: v}
 	fs.NewNodeFS(root, &fs.Options{})
 	return root
@@ -275,7 +276,7 @@ func TestDataSealIsIrreversible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	if _, err := unix.Write(fd, []byte("data")); err != nil {
 		t.Fatal(err)
 	}
@@ -298,17 +299,17 @@ func TestDataSealIsIrreversible(t *testing.T) {
 	if err := syscall.Fstat(fd, &st); err != nil {
 		t.Fatal(err)
 	}
-	n := &node{view: &View{options: Options{DataCache: CacheSealed}, sealProbe: dataSealed}, backing: backingKey{uint64(st.Dev), st.Ino}}
+	n := &node{view: &View{options: Options{DataCache: CacheSealed}, sealProbe: dataSealed}, backing: backingKey{st.Dev, st.Ino}}
 	if flags, reason := n.cacheOpenFlags(fd, syscall.O_RDONLY); flags != 0 || reason != "first" {
 		t.Fatalf("first open preserved an unknown cache: %v %q", flags, reason)
 	}
 	if flags, reason := n.cacheOpenFlags(fd, syscall.O_RDONLY); flags != fuse.FOPEN_KEEP_CACHE || reason != "sealed-hit" {
 		t.Fatalf("repeated sealed open missed cache: %v %q", flags, reason)
 	}
-	if _, err := unix.Pwrite(fd, []byte("evil"), 0); err != syscall.EPERM {
+	if _, err := unix.Pwrite(fd, []byte("evil"), 0); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("sealed data was writable: %v", err)
 	}
-	if err := unix.Ftruncate(fd, 0); err != syscall.EPERM {
+	if err := unix.Ftruncate(fd, 0); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("sealed data was truncatable: %v", err)
 	}
 }
@@ -450,7 +451,7 @@ func TestCaptureOptionsAndIOObservations(t *testing.T) {
 	dir := t.TempDir()
 	for _, options := range []Options{{DataCache: "unsafe"}, {MetadataTTL: -time.Second}} {
 		if v, err := CaptureWithOptions(dir, nil, nil, options); err == nil {
-			v.Close()
+			_ = v.Close()
 			t.Fatal("invalid options were accepted", options)
 		}
 	}
@@ -461,7 +462,7 @@ func TestCaptureOptionsAndIOObservations(t *testing.T) {
 	if v.options.DataCache != CacheDisabled || v.options.MetadataTTL != 100*time.Millisecond || !v.observedStart().IsZero() {
 		t.Fatal("default settings changed or nil observer read the clock")
 	}
-	v.Close()
+	_ = v.Close()
 	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("data"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +479,7 @@ func TestCaptureOptionsAndIOObservations(t *testing.T) {
 	if errno != 0 || flags != 0 {
 		t.Fatal(errno, flags)
 	}
-	defer f.(fs.FileReleaser).Release(context.Background())
+	defer func() { _ = f.(fs.FileReleaser).Release(context.Background()) }()
 	result, errno := f.(fs.FileReader).Read(context.Background(), make([]byte, 4), 0)
 	if errno != 0 {
 		t.Fatal(errno)
@@ -541,7 +542,7 @@ func TestMetadataCallbackObservationsIncludeErrors(t *testing.T) {
 	if errno := child.Operations().(*node).Setattr(ctx, handle, &fuse.SetAttrIn{SetAttrInCommon: fuse.SetAttrInCommon{Valid: fuse.FATTR_MODE, Mode: 0400}}, &attrs); errno != 0 {
 		t.Fatal(errno)
 	}
-	handle.(fs.FileReleaser).Release(ctx)
+	_ = handle.(fs.FileReleaser).Release(ctx)
 	if errno := root.Rename(ctx, "created", root, "renamed", 0); errno != 0 {
 		t.Fatal(errno)
 	}
@@ -563,5 +564,12 @@ func TestMetadataCallbackObservationsIncludeErrors(t *testing.T) {
 	}
 	if !lookupError {
 		t.Fatal("failed metadata callback was reported as success")
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }

@@ -3,8 +3,9 @@
 airbag is built on Linux namespaces, overlayfs and FUSE; macOS has none of
 them. This page records how the agents and agent sandboxes that run natively
 on macOS do it (as of October 2026), the native design that follows for
-airbag, the prototype of it, and the Linux VM setup, which stays the tested way
-until the prototype has run on a real Mac.
+airbag, the prototype of it, and the Linux VM setup, which stays the way to use
+airbag on a Mac for real work until the prototype has been used on one. The release binaries need macOS 13
+or later (the minimum of the Go release they are built with).
 
 ## How others sandbox agents on macOS
 
@@ -94,7 +95,30 @@ your user name; read it before pasting.
 | N2 | How much slower creating and walking a `node_modules`-sized tree is through the mount |
 | N3 | git works in a repository at the mount path (without your git config or `GIT_*` variables); the agents' versions there, if installed |
 | C1 | An APFS clone (`clonefile`, which fails where cloning is not supported, unlike `cp -c`, which falls back to a copy) of the same tree: if it is independent, a first prototype can branch the workspace by cloning it, with no NFS server, and review and apply by comparing the clone with the original. The speed is reported for `cp -c -R`, which the prototype runs and which clones file by file, and for one `clonefile` of the tree, each against `cp -R` |
-| T1 | A Go program inside the profile verifies TLS through the proxy without `com.apple.trustd.agent` (and with it, to compare); skipped when the same request outside the profile does not get through |
+| T1 | A Go program inside the profile verifies TLS through the proxy without `com.apple.trustd.agent` (and with it, to compare), with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset: with either set, a program whose `go.mod` says `go 1.27` or later checks the files and skips the platform verifier, which a program with an earlier go line always uses; skipped when the same request outside the profile does not get through |
+
+### Results from CI
+
+CI runs the probe on GitHub's hosted runners for macOS 15 and 26 on Apple
+silicon and macOS 26 on Intel, and keeps its JSON report as an artifact. The
+first runs (October 2026) gave the same answer on all three:
+
+| Check | Result |
+|---|---|
+| S1 | pass |
+| S2 | pass, as the runner's user, who is an admin; not yet shown for a user who is not |
+| N1 | pass, as that admin user |
+| N2 | fail: the walk saw 1375 of 5000 files, then a stale NFS file handle |
+| N3 | fail: `git commit` could not close a loose object file (permission denied) |
+| C1 | pass: `cp -c -R` 1.6 to 2.9 times and one `clonefile` 26 to 38 times faster than `cp -R`, varying between runs |
+| T1 | fail without `trustd`, pass with it, as sandbox-runtime reports |
+
+So the clone stays the branch: an NFS overlay needs a server that keeps file
+handles valid for a tree that size and that git can write to, which the probe's
+does not. The prototype's profile leaves `trustd` out, so a Go program in the
+sandbox that uses the platform verifier (any with a go line before 1.27, or
+with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset) cannot verify TLS; whether to
+allow it, as sandbox-runtime does, is open.
 
 ### Order
 
@@ -108,7 +132,10 @@ your user name; read it before pasting.
 ## The prototype
 
 `airbag` builds for macOS and runs the agent natively, without a VM. It is a
-prototype: built and unit-tested on Linux, not yet run on a Mac.
+prototype: CI runs its unit tests and `test/e2e.sh` on hosted macOS 15, 26
+and 26 Intel runners (the agent's workspace edits, the read-only `~`, unreadable
+secret files, the denied `memory/`, the outbox, review, apply and rollback),
+but it has not yet been used on real work or with Claude Code or Codex.
 
 ```console
 $ go build ./cmd/airbag        # on the Mac, or GOOS=darwin GOARCH=arm64 elsewhere
@@ -121,13 +148,50 @@ $ ./airbag review              # then apply, apply --branch NAME, or discard
 | | Linux | macOS prototype |
 |---|---|---|
 | Workspace branch | overlayfs, at the workspace's own path | an APFS clone (`cp -c`) in the session directory; the agent works at that path |
-| `$HOME` | a branch, reviewed | read-only, except the agent's state (`~/.claude`, `~/.codex`, without their settings, hooks and instructions); caches (`TMPDIR`, Go, npm, pip, uv, cargo) point into the session |
+| `$HOME` | a branch, reviewed: agent state goes through the branch, only the login and this workspace's transcripts pass through | read-only, except the agent's state (`~/.claude`, `~/.codex`), within which settings, hooks, rules, output styles, workflows, agent memory and instructions stay read-only; caches (`TMPDIR`, Go, npm, pip, uv, cargo) point into the session |
+| Agent state in `$HOME` | through the branch (one `agent state` line in review), dropped on discard | writable in place, persists, not reviewed (no branch of `$HOME`) |
+| `~/.claude.json` | through the branch, reviewed by key name: counters listed as benign, MCP servers, permissions and trust flagged `persist`; nothing reaches the real file before apply | writable in place, persists in full, not reviewed |
+| A project's `memory/` | in the branch, flagged `agent instructions`, dropped on discard | every project's `memory/` denied by the profile: an edit fails rather than being reviewed |
 | Network | network namespace, only the proxy | Seatbelt allows outbound traffic only to the proxy's localhost port and airbag's control socket |
 | Secret files | served through FUSE, a read taints the session | not readable at all, in the clone or the real workspace (no FUSE, so a read could not be tracked) |
 | Credentials | hidden by bind mounts | denied by the profile |
 | Shims, outbox, mirror, policies, review, apply, rollback, `--branch`, `--session` | yes | the same code |
 | Agent hooks (steps per tool call) | managed settings in a private `/etc` | not installed: managed settings need root on macOS |
 | Terminal | a pseudo-terminal of its own, TIOCSTI filtered | the agent shares your terminal |
+
+Because the prototype has no branch of `$HOME`, the narrowing that keeps agent
+state out of the real files on Linux cannot be expressed in full by the Seatbelt
+profile. What it does express: writing any project's `memory/` is denied, as are
+the instruction and settings files listed above, so Claude Code's auto-memory
+cannot persist unreviewed (the cost is that a memory edit fails instead of being
+dropped on discard). Because a deny on a path does not cover renaming one of its
+ancestors, `~/.claude`, `~/.codex`, `~/.claude/projects` and each project
+directory cannot be created, removed or renamed either; airbag makes this
+workspace's project directory before the run. Seatbelt checks the path a write
+resolves to, so a `memory/` that is a link, or lies under a linked project
+directory or a linked `~/.claude/projects`, is denied where it really is too,
+with the directories above that place. Seatbelt rules match paths, not files: a
+file in a passed-through path that has another hard-linked name is denied (the
+whole path, when it cannot be checked in full), and when a memory file or other
+protected file has another name, or the protected files cannot all be checked,
+both `~/.claude` and `~/.codex` stay read-only for the session, since a write
+through that name would not be a write to the denied path. A protected path that
+is a link (a `hooks/` kept in a dotfiles repository) is checked where it leads.
+This is checked when the session starts, and counts every other name, even one
+outside any place the agent may write: a dotfiles setup that hard-links
+`~/.claude/CLAUDE.md` makes the state read-only, and airbag says which file to
+turn into a copy or a symlink. What it cannot:
+`~/.claude.json` stays writable, so a change to it — including MCP servers,
+permissions and per-project trust — persists in full without review, and the
+rest of `~/.claude` and `~/.codex` persists as before. Protection there is by
+path, and Seatbelt matches paths, not files: a protected file with another name in
+a place the agent may write (`~/.claude.json`, a temporary directory) can be
+written through that name. airbag does not add a rule for each such layout; the
+fix is to give the agent its state in the session instead (see the roadmap), or a
+branch of `$HOME` on macOS (the NFS overlay, step 2 above), after which the same
+code path applies. Independently of the platform, Codex keys its
+transcripts by date (`~/.codex/sessions/<year>/<month>/…`), not by project, so a
+discard keeps every project's Codex transcripts, not only this workspace's.
 
 What to report from a first run: whether Claude Code and Codex start and finish a
 task, which Seatbelt denials they hit (`log stream --predicate 'eventMessage
@@ -136,8 +200,8 @@ takes on a large repository.
 
 ## The tested way: a Linux VM
 
-Until the prototype has run on a real Mac, the way to use airbag there that the
-tests cover is a Linux VM.
+Until the prototype has been used on real work, the way to use airbag on a Mac
+that the tests cover in full is a Linux VM.
 
 **OrbStack.** Create an Ubuntu machine and install airbag inside it. Mac files
 are under `/mnt/mac`; a server on the Mac is reachable as `host.orb.internal`.

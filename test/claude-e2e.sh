@@ -52,7 +52,7 @@ done
 "$AIRBAG" diff ro.txt | grep -q "^+RO" || fail "managed settings were writable for the agent"
 # What the "model" received lives in the branch of ~ (the mock ran inside).
 id=$(echo "$rev" | head -1 | awk '{print $2}')
-log="${AIRBAG_HOME:-/var/tmp/airbag-$(id -u)}/$id/home/upper/${T#$HOME/}/model.log"
+log="${AIRBAG_HOME:-/var/tmp/airbag-$(id -u)}/$id/home/upper/${T#"$HOME"/}/model.log"
 [ -s "$log" ] || fail "no model log at $log"
 grep -q "sk-e2e-0123456789abcdef" "$log" && fail "the secret reached the model API"
 grep -q "masked API_TOKEN" "$log" || fail "masked output not seen by the model"

@@ -20,7 +20,8 @@ compat and x32 syscall ABIs receive ENOSYS. macOS rejects both flags.
 
 If an enabled backend cannot start, airbag refuses to start the agent. FUSE is
 not silently replaced by shell predictions. In particular `AIRBAG_NO_FUSE=1`
-cannot be combined with `--fs-policy`.
+cannot be combined with `--fs-policy`. Without these flags a session has no
+runtime channel and runs as it did before they existed.
 
 ## Filesystem boundary
 
@@ -91,7 +92,10 @@ A trusted helper installs a seccomp USER_NOTIF filter immediately before
 executing the agent. Its listener is transferred to PID 1 on a private startup
 socket. The filter is inherited by descendant threads and processes, so
 `execve` and `execveat` from make, Python and package scripts reach the same
-policy gate as direct executions. PID 1 itself is not filtered.
+policy gate as direct executions. It stacks on the baseline seccomp filter and
+`--strict`, which apply unchanged; the stricter result of the filters wins.
+PID 1 itself is not under the exec filter. While it is installed, the kernel
+refuses the agent a seccomp listener of its own (EBUSY).
 
 The controller snapshots the actual executable pathname and argv from tracee
 memory, resolves normal aliases in the caller's root, and checks `proc.exec`.
@@ -134,7 +138,9 @@ operations can share a commit without a fixed batching delay. The host commits
 every evaluated decision to the append-only SQLite log (WAL, synchronous=FULL)
 before releasing any operation in that commit group. This is the default
 `--runtime-audit=durable` mode. Transport timeout/loss and audit commit failures
-deny access.
+deny access. Refusals are metered as every refusal in the log is: past a burst
+of 1000, at most 50 denied or asked entries of one kind a second are written,
+and a `log.dropped` entry counts the rest. Allowed entries are all written.
 
 `--runtime-audit=buffered` keeps allow/deny/ask synchronous, but acknowledges
 ordinary runtime events after a trusted bounded queue owns them. It commits
@@ -168,7 +174,7 @@ These backends remain opt-in until measured on representative toolchains.
 `test/runtime-policy-e2e.sh` checks Python file mutations, overlay upper writes
 and resume, make children, execveat, mmap, SQLite, locks, git branch isolation,
 symlinks, hardlinks, sockets, protected HOME, supervisor descriptors and taint.
-CI runs it on Ubuntu 24.04 alongside all existing E2E tests.
+CI runs it on each Linux runner with the other end-to-end tests.
 
 `sh test/runtime-policy-bench.sh` reports median wall times for a small C build
 and a Python filesystem workload with the original sandbox, file policy, exec

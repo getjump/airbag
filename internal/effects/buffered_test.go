@@ -81,7 +81,9 @@ func TestBufferedCapacityIncludesInflightAndNeverDrops(t *testing.T) {
 func TestBufferedCommitFailureLatchesAndWakesWaiters(t *testing.T) {
 	sink := &blockingAuditSink{make(chan []Effect, 1), make(chan error, 1)}
 	b := NewBufferedAudit(sink, BufferOptions{Interval: time.Hour, BatchSize: 1, MaxEvents: 1})
-	b.AddBatchChecked([]Effect{{Target: "first"}})
+	if err := b.AddBatchChecked([]Effect{{Target: "first"}}); err != nil {
+		t.Fatal(err)
+	}
 	<-sink.started
 	added := make(chan error, 1)
 	go func() { added <- b.AddBatchChecked([]Effect{{Target: "second"}}) }()

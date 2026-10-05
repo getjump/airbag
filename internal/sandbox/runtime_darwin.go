@@ -7,9 +7,8 @@ import (
 	"os"
 )
 
-const ExecInitArg = "__airbag_exec_init"
-
-func ExecInit(_ string, _ []string) {
+// ExecInit exists on Linux only: cmdRun refuses --exec-policy elsewhere.
+func ExecInit(string, []string) {
 	fmt.Fprintln(os.Stderr, "airbag: exec policy requires Linux")
 	os.Exit(125)
 }

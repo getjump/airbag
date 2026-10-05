@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -90,7 +92,7 @@ func TestTree(t *testing.T) {
 }
 
 func TestProxy(t *testing.T) {
-	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	echo, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,8 +108,8 @@ func TestProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer px.Close()
-	c, err := net.Dial("tcp", px.l.Addr().String())
+	defer func() { _ = px.Close() }()
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", px.l.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,9 +118,10 @@ func TestProxy(t *testing.T) {
 	_, _ = io.WriteString(c, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n\r\n")
 	br := bufio.NewReader(c)
 	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("CONNECT %v %v", resp, err)
 	}
+	resp.Body.Close() // empty: the tunnel follows the header
 	_, _ = io.WriteString(c, "ping\n")
 	if l, _ := br.ReadString('\n'); l != "ping\n" {
 		t.Fatalf("echo %q", l)
@@ -139,7 +142,7 @@ func TestNFSServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	path, err := srv.Arm()
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +159,9 @@ func TestNFSServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = w.Write([]byte("new"))
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if got, _ := os.ReadFile(filepath.Join(dir, "new.txt")); string(got) != "new" {
 		t.Fatalf("export has %q", got)
 	}
@@ -236,22 +241,58 @@ func TestExportStaysInside(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
 		t.Fatal(err)
 	}
+	sub := filepath.Join(outside, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	fs := exportFS(dir)
-	for _, name := range []string{"../outside/secret", secret, "link/secret"} {
+	for _, name := range []string{"../outside", outside, "link"} {
+		ents, _ := fs.ReadDir(name)
+		for _, e := range ents {
+			if e.Name() == "secret" && e.Size() == int64(len("s3cret")) {
+				t.Errorf("ReadDir(%q) listed the file outside the export", name)
+			}
+		}
+	}
+	for i, name := range []string{"../outside/secret", secret, "link/secret"} {
+		if fi, err := fs.Stat(name); err == nil && fi.Size() == int64(len("s3cret")) {
+			t.Errorf("Stat(%q) saw the file outside the export", name)
+		}
 		if f, err := fs.Open(name); err == nil {
 			b, _ := io.ReadAll(f)
-			f.Close()
+			_ = f.Close()
 			if string(b) == "s3cret" {
 				t.Errorf("Open(%q) read the file outside the export", name)
 			}
 		}
 		if f, err := fs.Create(name); err == nil {
 			_, _ = f.Write([]byte("x"))
-			f.Close()
+			_ = f.Close()
 		}
 		ch := fs.(billy.Change)
 		_ = ch.Chmod(name, 0o666)
 		_ = ch.Chtimes(name, time.Unix(0, 0), time.Unix(0, 0))
+		// The changes BoundOS took over in v5.9: none may move, replace
+		// or remove anything outside.
+		mine := fmt.Sprintf("mine%d", i)
+		if err := os.WriteFile(filepath.Join(dir, mine), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_ = fs.Rename(name, fmt.Sprintf("moved%d", i))
+		_ = fs.Rename(mine, name)
+		_ = fs.Remove(name)
+	}
+	for i, name := range []string{"../outside/sub", sub, "link/sub", "../outside", "link"} {
+		_ = fs.Remove(name)
+		// go-nfs calls MkdirAll for MKDIR and Symlink for SYMLINK.
+		_ = fs.MkdirAll(filepath.Join(name, "made"), 0o755)
+		_ = fs.Symlink("/", filepath.Join(name, fmt.Sprintf("planted%d", i)))
+	}
+	if ents, _ := os.ReadDir(outside); len(ents) != 2 {
+		t.Errorf("entries outside the export: %v, want secret and sub", ents)
+	}
+	if ents, _ := os.ReadDir(sub); len(ents) != 0 {
+		t.Errorf("entries in the directory outside: %v, want none", ents)
 	}
 	st, err := os.Stat(secret)
 	if err != nil {
@@ -260,16 +301,39 @@ func TestExportStaysInside(t *testing.T) {
 	if b, _ := os.ReadFile(secret); string(b) != "s3cret" || st.Mode().Perm() != 0o600 || st.ModTime().Unix() == 0 {
 		t.Fatalf("the file outside changed: %q %v %v", b, st.Mode(), st.ModTime())
 	}
+	if _, err := os.Stat(sub); err != nil {
+		t.Fatalf("the directory outside is gone: %v", err)
+	}
+}
+
+func TestPlatformTrust(t *testing.T) {
+	env, removed := platformTrust([]string{"HOME=/h", "SSL_CERT_FILE=/etc/ssl/cert.pem", "SSL_CERT_DIR=/d", "SSL_CERT_FILES=x"})
+	if strings.Join(env, " ") != "HOME=/h SSL_CERT_FILES=x" || strings.Join(removed, " ") != "SSL_CERT_FILE SSL_CERT_DIR" {
+		t.Fatalf("env %q, removed %q", env, removed)
+	}
 }
 
 // nfsMount sends srv a MOUNT for path, on a connection of its own,
 // through an NFS client library.
+// dialNFS connects an NFS client to srv. The client binds a random
+// local port of its own and, unprivileged, does not try another when
+// that one is taken, which a run of many connections can hit.
+func dialNFS(t *testing.T, srv *nfsServer) *rpc.Client {
+	t.Helper()
+	for i := 0; ; i++ {
+		c, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
+		if err == nil {
+			return c
+		}
+		if i == 10 || !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatal(err)
+		}
+	}
+}
+
 func nfsMount(t *testing.T, srv *nfsServer, path string) (*nfsc.Target, error) {
 	t.Helper()
-	c, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := dialNFS(t, srv)
 	t.Cleanup(c.Close)
 	m := nfsc.Mount{Client: c}
 	return m.Mount(path, rpc.AuthNull)
@@ -281,7 +345,7 @@ func readNFS(t *testing.T, target *nfsc.Target, name string) string {
 	if err != nil {
 		t.Fatalf("open %s: %v", name, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	b, _ := io.ReadAll(f)
 	return string(b)
 }
@@ -308,13 +372,10 @@ func TestNFSGrantsOneMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	_, err = nfsMount(t, srv, "/")
 	refused(t, "Mount(/) before Arm", err)
-	early, err := rpc.DialTCP("tcp", srv.l.Addr().String(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	early := dialNFS(t, srv)
 	defer early.Close()
 	path, err := srv.Arm()
 	if err != nil {
@@ -358,7 +419,7 @@ func TestNFSSeal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	path, err := srv.Arm()
 	if err != nil {
 		t.Fatal(err)
@@ -371,7 +432,7 @@ func TestNFSSeal(t *testing.T) {
 	if b := readNFS(t, target, "/hello.txt"); b != "hi\n" {
 		t.Fatalf("the open client lost the export: read %q", b)
 	}
-	if c2, err := net.DialTimeout("tcp", srv.l.Addr().String(), 2*time.Second); err == nil {
+	if c2, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(t.Context(), "tcp", srv.l.Addr().String()); err == nil {
 		c2.Close()
 		t.Fatal("a new client connected after Seal")
 	}
@@ -389,9 +450,9 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	addr := srv.l.Addr().String()
-	idle, err := net.Dial("tcp", addr)
+	idle, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,13 +479,18 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 	// gives up, so a read that has not come back within 2 s counts as one
 	// that got nothing.
 	got := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		f, err := target.Open("/hello.txt")
 		if err == nil {
-			f.Close()
+			_ = f.Close()
 		}
 		got <- err
 	}()
+	// The test ends when the read has given up, so it leaves no
+	// goroutine behind.
+	defer func() { <-done }()
 	select {
 	case err := <-got:
 		if err == nil {
@@ -432,7 +498,7 @@ func TestNFSCloseDropsConnections(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 	}
-	if c, err := net.DialTimeout("tcp", addr, 2*time.Second); err == nil {
+	if c, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(t.Context(), "tcp", addr); err == nil {
 		c.Close()
 		t.Error("a new client connected after Close")
 	}

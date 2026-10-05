@@ -44,3 +44,11 @@ func TestUnits(t *testing.T) {
 		t.Error("matches")
 	}
 }
+
+// A name with a line break is one quoted line in apply -i's titles.
+func TestUnitTitleQuotesNewlines(t *testing.T) {
+	got := Units([]review.Change{{Layer: "home", Rel: "x\n~ ~/.bashrc", Kind: review.Added, Flags: []string{"outside workspace", "persist"}}})
+	if len(got) != 1 || got[0].Title != `+ "~/x\n~ ~/.bashrc"` {
+		t.Fatalf("units = %+v", got)
+	}
+}

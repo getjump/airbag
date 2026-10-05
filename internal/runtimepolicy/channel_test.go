@@ -48,7 +48,7 @@ func TestBufferedSecretStillCommitsBeforeAllow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	gate := policy.NewGate(p, dir)
 	sink := &testBufferedSink{log: log, gate: gate}
 	profile := &Profile{}
@@ -88,7 +88,7 @@ func TestBufferedAuditFailureRemainsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	server, peer := net.Pipe()
 	defer peer.Close()
 	diskError := errors.New("disk error")
@@ -120,7 +120,7 @@ func TestProfileFrameOnlyAcceptedWhenEnabled(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer log.Close()
+			defer func() { _ = log.Close() }()
 			server, peer := net.Pipe()
 			defer peer.Close()
 			var profile *Profile
@@ -154,7 +154,7 @@ func TestRuntimeChannelCommitsAndFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	server, peer := net.Pipe()
 	defer peer.Close()
 	go func() { _ = Serve(server, policy.NewGate(p, dir), log) }()
@@ -172,7 +172,9 @@ func TestRuntimeChannelCommitsAndFailsClosed(t *testing.T) {
 	if err := client.Check(Request{Source: "seccomp", Kind: "proc.exec.invalid", Detail: "bad pointer", PID: 43}); err == nil {
 		t.Fatal("unreadable exec was allowed")
 	}
-	log.Close()
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := client.Check(Request{Source: "fuse", Kind: "fs.read", Target: "/work/file", PID: 42}); err == nil {
 		t.Fatal("allow after audit failure")
 	}
@@ -193,7 +195,7 @@ func TestConcurrentChecksCommitBeforeReturning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	server, peer := net.Pipe()
 	defer peer.Close()
 	go func() { _ = Serve(server, policy.NewGate(p, dir), log) }()
@@ -201,11 +203,11 @@ func TestConcurrentChecksCommitBeforeReturning(t *testing.T) {
 	const workers = 96 // exceeds the bounded in-flight window
 	start := make(chan struct{})
 	errors := make(chan error, workers)
-	for i := 0; i < workers; i++ {
-		go func(i int) {
+	for i := range uint32(workers) {
+		go func() {
 			<-start
-			errors <- client.CheckBatch([]Request{{Source: "fuse", Kind: "fs.read", Target: fmt.Sprint(i), PID: uint32(i + 1)}, {Source: "fuse", Kind: "fs.write", Target: fmt.Sprint(i), PID: uint32(i + 1)}})
-		}(i)
+			errors <- client.CheckBatch([]Request{{Source: "fuse", Kind: "fs.read", Target: fmt.Sprint(i), PID: i + 1}, {Source: "fuse", Kind: "fs.write", Target: fmt.Sprint(i), PID: i + 1}})
+		}()
 	}
 	close(start)
 	for i := 0; i < workers; i++ {
@@ -244,7 +246,9 @@ func TestClientMatchesOutOfOrderReplies(t *testing.T) {
 	go func() { done <- client.Check(Request{Source: "fuse", Kind: "fs.read", Target: "allowed"}) }()
 	go func() { done <- client.Check(Request{Source: "fuse", Kind: "fs.read", Target: "denied"}) }()
 	// Read both before replying: a client-wide request mutex would deadlock here.
-	server.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := server.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	dec, enc := json.NewDecoder(server), json.NewEncoder(server)
 	var a, b frame
 	if err := dec.Decode(&a); err != nil {
@@ -289,7 +293,7 @@ func TestSecretTaintVisibleToLaterCheckInCommitGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer log.Close()
+	defer func() { _ = log.Close() }()
 	server, peer := net.Pipe()
 	defer peer.Close()
 	gate := policy.NewGate(p, dir)

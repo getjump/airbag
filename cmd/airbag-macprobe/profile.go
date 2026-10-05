@@ -17,7 +17,7 @@ type Profile struct {
 	Write  []string // directories the sandbox may write
 	NoRead []string // directories it may not read, such as credentials
 	Ports  []int    // localhost TCP ports it may connect to (airbag's proxy)
-	Trustd bool     // allow com.apple.trustd.agent, which Go's TLS verification uses
+	Trustd bool     // allow com.apple.trustd.agent, which Go's platform TLS verifier uses
 }
 
 // baseMach are the mach services the profile allows, after Claude Code's

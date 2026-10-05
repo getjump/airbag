@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -45,7 +46,7 @@ func (p *probe) cleanup() error {
 			// diskutil acts on the volume holding a path, so it gets
 			// only a path confirmed to be this mount point.
 			if out, err := run(20*time.Second, "", "/usr/sbin/diskutil", "unmount", "force", p.mnt); err != nil {
-				return fmt.Errorf("cannot unmount %s: %v: %s", p.mnt, err, firstLine(out))
+				return fmt.Errorf("cannot unmount %s: %w: %s", p.mnt, err, firstLine(out))
 			}
 		}
 		p.mounted = false
@@ -99,11 +100,11 @@ func checkSeatbelt(p *probe) Result {
 	if err != nil {
 		return fail(r, err)
 	}
-	defer px.Close()
+	defer func() { _ = px.Close() }()
 	// A second local listener on a port the profile does not allow. It is
 	// reachable from here, so a refusal inside the profile is Seatbelt's
 	// and not a network that happens to be down.
-	other, err := net.Listen("tcp", "127.0.0.1:0")
+	other, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		return fail(r, err)
 	}
@@ -117,7 +118,7 @@ func checkSeatbelt(p *probe) Result {
 			c.Close()
 		}
 	}()
-	if c, err := net.DialTimeout("tcp", other.Addr().String(), 3*time.Second); err != nil {
+	if c, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(context.Background(), "tcp", other.Addr().String()); err != nil {
 		return fail(r, fmt.Errorf("the control listener is not reachable outside the profile: %w", err))
 	} else {
 		c.Close()
@@ -127,7 +128,7 @@ func checkSeatbelt(p *probe) Result {
 	// or behind a proxy, "no" inside the profile would prove nothing.
 	internet := false
 	if !p.opts.noNet {
-		if c, err := net.DialTimeout("tcp", "1.1.1.1:443", 3*time.Second); err == nil {
+		if c, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(context.Background(), "tcp", "1.1.1.1:443"); err == nil {
 			c.Close()
 			internet = true
 		}
@@ -467,7 +468,9 @@ func checkTLS(p *probe) Result {
 	if err != nil {
 		return fail(r, err)
 	}
-	defer px.Close()
+	defer func() { _ = px.Close() }()
+	env, removed := platformTrust(viaProxy(os.Environ(), px.Port()))
+	env = append(env, "TMPDIR="+p.dir)
 	// attempt runs the TLS client through the proxy, inside prof, or
 	// outside any profile when prof is nil.
 	attempt := func(prof *Profile) tlsTry {
@@ -475,13 +478,16 @@ func checkTLS(p *probe) Result {
 		if prof != nil {
 			args = append([]string{"/usr/bin/sandbox-exec", "-p", prof.String()}, args...)
 		}
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Env = append(viaProxy(os.Environ(), px.Port()), "TMPDIR="+p.dir)
+		cmd := exec.CommandContext(context.Background(), args[0], args[1:]...) //nolint:gosec // the probe's own commands
+		cmd.Env = env
 		out, _ := cmd.CombinedOutput()
 		return tlsTry{ok: strings.Contains(string(out), "tls=ok"), out: strings.TrimSpace(string(out))}
 	}
 	control := attempt(nil)
-	r.Detail = "control, outside the profile: " + control.out
+	if len(removed) > 0 {
+		r.Detail = "the client ran without " + strings.Join(removed, " and ") + ", so that it uses the platform verifier\n"
+	}
+	r.Detail += "control, outside the profile: " + control.out
 	var without, with tlsTry
 	if control.ok {
 		without = attempt(&Profile{Write: []string{p.dir}, Ports: []int{px.Port()}})
