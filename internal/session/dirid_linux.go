@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -61,14 +62,18 @@ func gen(p string) uint64 {
 func settle(p string) error {
 	var fs unix.Statfs_t
 	if err := unix.Statfs(p, &fs); err != nil {
-		return nil //nolint:nilerr // not known to be an overlay: DirIDOf, which reads the root next, reports one it cannot
+		return fmt.Errorf("cannot tell whether it is on an overlay: %w", err)
 	}
 	if fs.Type != unix.OVERLAYFS_SUPER_MAGIC {
 		return nil
 	}
 	var st unix.Stat_t
-	if err := unix.Lstat(p, &st); err != nil {
-		return err
+	err := unix.Lstat(p, &st)
+	if err == nil {
+		err = unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{st.Atim, st.Mtim}, unix.AT_SYMLINK_NOFOLLOW)
 	}
-	return unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{st.Atim, st.Mtim}, unix.AT_SYMLINK_NOFOLLOW)
+	if err != nil {
+		return fmt.Errorf("on an overlay, and cannot be copied up to its top layer (%w), so a directory made again in its place could not be told from it; run airbag in a directory you own", err)
+	}
+	return nil
 }

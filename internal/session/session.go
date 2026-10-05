@@ -138,18 +138,19 @@ type DirID struct {
 }
 
 // RecordDirID is DirIDOf for a root a session begins with: a directory
-// on an overlay is copied up first (settle). One that cannot be, a root
-// the user may write below but does not own, say, is refused: the first
-// write below would change its creation time, an overlay records no
-// generation, and without either a directory made again in its place,
-// with the same inode number, would pass for it.
+// on an overlay is copied up first (settle). A root that cannot be (one
+// the user may write below but does not own, say), or that settle cannot
+// tell is on an overlay or not, is refused: the first write below would
+// change its creation time, an overlay records no generation, and
+// without either a directory made again in its place, with the same
+// inode number, would pass for it.
 func RecordDirID(p string) (DirID, error) {
 	real, err := filepath.EvalSymlinks(p)
 	if err != nil {
 		return DirID{}, err
 	}
 	if err := settle(real); err != nil {
-		return DirID{}, fmt.Errorf("%s is on an overlay and cannot be copied up to its top layer (%w), so a directory made again in its place could not be told from it; run airbag in a directory you own", p, err)
+		return DirID{}, fmt.Errorf("%s: %w", p, err)
 	}
 	return DirIDOf(p)
 }

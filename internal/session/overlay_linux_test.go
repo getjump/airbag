@@ -116,3 +116,14 @@ func overlayCopyUp(t *testing.T) {
 		t.Fatalf("a root that cannot be copied up is recorded: %+v", id)
 	}
 }
+
+// settle fails closed: a root it cannot tell is on an overlay or not is
+// refused rather than taken for one that is not.
+func TestSettleRefusesWhatItCannotTell(t *testing.T) {
+	if err := settle(filepath.Join(t.TempDir(), "gone")); err == nil {
+		t.Fatal("settle passed a root it could not statfs")
+	}
+	if err := settle(t.TempDir()); err != nil {
+		t.Fatalf("a root on an ordinary filesystem: %v", err)
+	}
+}
