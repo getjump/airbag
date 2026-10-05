@@ -107,7 +107,7 @@ not implied by selecting microvm.
 ## Validation
 
 `.github/workflows/runtime-options.yml` runs the real CLI with pinned runsc,
-Firecracker and kernel versions. Benign fixtures check inaccessible host files,
+Firecracker and kernel versions, each backend with and without `--strict`. Benign fixtures check inaccessible host files,
 denied direct egress, a permitted credential-bearing HTTPS request with masking,
 a host policy denial on an allowlisted host, deferred outbox commands, offline Go
 compilation, review, resume without isolation downgrade, and explicit file apply.

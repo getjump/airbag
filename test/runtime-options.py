@@ -70,8 +70,10 @@ def main():
         'uncontained_user_namespace_available': True}) + '\n')
     rows = []
     try:
-        for backend in ['gvisor', 'microvm']:
-            case = lab / backend
+        # Each backend with and without --strict: the guest's limits must hold
+        # either way, and --strict must not be what makes them hold.
+        for backend, strict in [('gvisor', True), ('gvisor', False), ('microvm', True), ('microvm', False)]:
+            case = lab / (backend + ('-strict' if strict else ''))
             work, home, sessions = case / 'workspace', case / 'home', case / 'sessions'
             work.mkdir(parents=True)
             (home / '.config/airbag').mkdir(parents=True)
@@ -98,9 +100,11 @@ rules:
                    'BOUND_SOURCE_TOKEN': 'benign-runtime-bound-token', 'SSL_CERT_FILE': str(cert)}
             flags = ['--backend=' + backend, '--require-isolation=' +
                      ('application-kernel' if backend == 'gvisor' else 'virtual-machine'),
-                     '--no-home', '--strict', '--runtime-rootfs=' + str(root),
+                     '--no-home', '--runtime-rootfs=' + str(root),
                      '--runtime-bin=' + str((a.runsc if backend == 'gvisor' else a.firecracker).resolve()),
                      '--allow=127.0.0.1:' + str(port), '--allow=localhost:' + str(port)]
+            if strict:
+                flags += ['--strict']
             if backend == 'microvm':
                 flags += ['--runtime-kernel=' + str(a.kernel.resolve())]
 
@@ -108,7 +112,7 @@ rules:
                 return subprocess.run([str(a.airbag.resolve()), *args], cwd=work, env=env,
                                       capture_output=True, text=True, timeout=timeout)
 
-            row = {'backend': backend, 'status': 'failed'}
+            row = {'backend': backend, 'strict': strict, 'status': 'failed'}
             rows.append(row)
             try:
                 before = len(seen)
@@ -166,7 +170,7 @@ rules:
         server.shutdown()
         server.server_close()
         (lab / 'results.json').write_text(json.dumps(rows, indent=2) + '\n')
-    return 0 if len(rows) == 2 and all(r['status'] == 'passed' for r in rows) else 1
+    return 0 if len(rows) == 4 and all(r['status'] == 'passed' for r in rows) else 1
 
 
 if __name__ == '__main__':
