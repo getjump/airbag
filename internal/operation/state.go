@@ -42,4 +42,8 @@ type Result struct {
 	RequestDigest string  `json:"request_digest"`
 	Ticket        string  `json:"ticket,omitempty"`
 	Value         string  `json:"value,omitempty"`
+	// RecordedBy "user": the user recorded the outcome of an unknown
+	// request (airbag outbox resolve); no answer from the service attests
+	// it, and Value is their note, not a URL.
+	RecordedBy string `json:"recorded_by,omitempty"`
 }

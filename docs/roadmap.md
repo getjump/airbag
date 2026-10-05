@@ -5,12 +5,15 @@ What is next, and what is deliberately not, with the reason. Two reviews on
 an external review that argued for narrowing the first release to "the agent
 works apart, I see the consequences, I take the result onto a branch" and
 testing the niche with users before the backlog ([evaluation.md](evaluation.md)).
+Two experiments on stronger execution backends and on AgentFS as the branch's
+storage are summed up in [experiments.md](experiments.md).
 
 ## Next
 
-1. **Run the macOS prototype on a real Mac** (docs/macos.md) and the probe in
-   `cmd/airbag-macprobe`; decide on an NFS branch instead of the clone from the
-   probe's N1 and N2 results.
+1. **Use the macOS prototype on real work** (docs/macos.md) with Claude Code
+   and Codex. CI runs its unit tests, `test/e2e.sh` and `cmd/airbag-macprobe` on
+   hosted macOS; the probe's N2 and N3 failed there, so the clone stays the
+   branch.
 2. **The evaluation** in [evaluation.md](evaluation.md): the comparison runs,
    then a narrow release to about ten developers.
 3. **A first tagged release** once CI is green: `git tag v0.1.0` builds the

@@ -57,6 +57,9 @@ type Intent struct {
 	Output        string             `json:"output,omitempty"`
 	Request       *operation.Request `json:"request,omitempty"`
 	RequestDigest string             `json:"request_digest,omitempty"`
+	// CaptureError is transport-only: a deferred typed call cannot fall back
+	// to an arbitrary host command when its capture failed.
+	CaptureError string `json:"capture_error,omitempty"`
 }
 
 const schema = `
@@ -96,7 +99,8 @@ CREATE TRIGGER IF NOT EXISTS intent_requests_no_delete BEFORE DELETE ON intent_r
 `
 
 type Box struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 // Open opens the outbox in the session database at path.
@@ -114,7 +118,7 @@ func Open(path string) (*Box, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Box{db: db}, nil
+	return &Box{db: db, path: path}, nil
 }
 
 // addFiles brings a database from before deferred commands up to date.

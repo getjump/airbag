@@ -28,7 +28,7 @@ apply it, take it onto a git branch, or throw it away.
 > [threat model](#threat-model).
 
 ```console
-$ curl -fsSL https://raw.githubusercontent.com/getjump/airbag/main/install.sh | sh
+$ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/getjump/airbag/releases/latest/download/install.sh | sh
 $ airbag doctor       # can this machine run airbag?
 $ cd your-project
 $ airbag run -- claude --dangerously-skip-permissions
@@ -198,7 +198,8 @@ Aider, OpenCode and others run in the sandbox without that attribution.
 
 Linux first. On macOS there is a native prototype (Seatbelt around the agent, an
 APFS clone as the branch) and a Linux VM setup that works today; see
-[docs/macos.md](docs/macos.md). There is no Windows build, and WSL has not been tested.
+[docs/macos.md](docs/macos.md). There is no Windows build; under WSL2 the Linux build
+runs, and an informational CI job runs the end-to-end tests there.
 </details>
 
 <details><summary>What does it cost in speed and disk?</summary>
@@ -218,13 +219,17 @@ apply is left as it is. A push that already ran is not undone.
 ## Install
 
 ```console
-$ curl -fsSL https://raw.githubusercontent.com/getjump/airbag/main/install.sh | sh
+$ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/getjump/airbag/releases/latest/download/install.sh | sh
 $ airbag doctor
 ```
 
 The script installs the latest release for Linux or macOS 13 and later (amd64,
-arm64) into `~/.local/bin` after checking its SHA-256 against the release. Or
-from source, with Go 1.27.1 or newer:
+arm64) into `~/.local/bin`, without sudo. It checks the archive's SHA-256 against
+the release's `checksums.txt`, and when cosign or a logged-in `gh` is installed,
+that the release workflow built it. `| AIRBAG_VERSION=v0.1.0 sh` picks a release,
+and `| AIRBAG_VERIFY=require sh` refuses to install without the second check.
+[docs/verify.md](docs/verify.md) shows how to verify a release by hand or rebuild
+it. Or from source, with Go 1.27.1 or newer:
 `go install github.com/getjump/airbag/cmd/airbag@latest`.
 
 With Nix: `nix run github:getjump/airbag -- doctor`, or add the flake's
@@ -234,8 +239,9 @@ tests, `nix develop` gives a shell with Go and the test tools.
 One static binary, no daemon, no Docker. Needs Linux 5.12+ with unprivileged user
 namespaces. On Ubuntu 23.10+ AppArmor restricts them; `airbag doctor` prints the
 one-time profile to install. On macOS there is a native prototype (Seatbelt
-around the agent, an APFS clone as the branch), not yet tried on a real Mac, and the
-Linux VM setup that works today; see [docs/macos.md](docs/macos.md).
+around the agent, an APFS clone as the branch), tested in CI on macOS 15 and 26 but
+not yet used on real work, and the Linux VM setup that works today; see
+[docs/macos.md](docs/macos.md).
 
 ## Status
 

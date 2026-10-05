@@ -3,10 +3,12 @@ package apply
 import (
 	"bufio"
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/session"
@@ -173,6 +175,31 @@ func TestCmdProgramInWorkspace(t *testing.T) {
 	}
 }
 
+// The same through a workspace whose path has a link in it (~/code ->
+// /mnt/data/code; /tmp -> /private/tmp on macOS): the program's resolved
+// path is still inside the workspace.
+func TestCmdProgramInLinkedWorkspace(t *testing.T) {
+	s, box := testBox(t)
+	link := filepath.Join(t.TempDir(), "code")
+	if err := os.Symlink(s.Workspace, link); err != nil {
+		t.Fatal(err)
+	}
+	s.Workspace = link
+	_ = os.WriteFile(filepath.Join(link, "pubtool"), []byte("#!/bin/sh\ntouch "+filepath.Join(link, "pwned")+"\n"), 0o755)
+	t.Setenv("PATH", link+":"+os.Getenv("PATH"))
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: link})
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if status(t, box, it.ID) != outbox.Rejected {
+		t.Fatalf("status %s: %q", status(t, box, it.ID), out.String())
+	}
+	if _, err := os.Stat(filepath.Join(link, "pwned")); err == nil {
+		t.Fatal("a program from the workspace ran")
+	}
+}
+
 // After a failure the intents behind it wait; the next apply runs them.
 func TestFailureStopsTheRest(t *testing.T) {
 	s, box := testBox(t)
@@ -239,5 +266,303 @@ func TestCmdProgramLinkedIntoWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(s.Workspace, "pwned")); err == nil || status(t, box, it.ID) != outbox.Rejected {
 		t.Fatalf("ran a program from the workspace: %q", out.String())
+	}
+}
+
+// After an outcome that is not known, the intents queued later wait
+// until the user records what happened; then they run.
+func TestUnknownHoldsLaterIntentsUntilResolved(t *testing.T) {
+	s, box := testBox(t)
+	log := tool(t, "pubtool", "0")
+	push, _ := box.Push(outbox.Intent{Kind: outbox.KindPush, Argv: []string{"git", "push", "origin", "main"}, Cwd: s.Workspace})
+	push.Status, push.Output = outbox.Unknown, "airbag stopped while this ran"
+	if err := box.Update(push); err != nil {
+		t.Fatal(err)
+	}
+	cmd, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: s.Workspace})
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if ran(log) != "" || !strings.Contains(out.String(), "airbag outbox resolve "+push.ID) {
+		t.Fatalf("ran after an unknown outcome: %q", out.String())
+	}
+	if err := box.Resolve(cmd.ID, true); err == nil {
+		t.Fatal("recorded an outcome for a pending intent")
+	}
+	if err := box.Resolve(push.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if ran(log) == "" || status(t, box, cmd.ID) != outbox.Done || status(t, box, push.ID) != outbox.Done {
+		t.Fatalf("did not run after the outcome was recorded: %q", out.String())
+	}
+}
+
+// A command left pending by --yes holds nothing back.
+func TestPendingCmdDoesNotHoldLaterIntents(t *testing.T) {
+	s, box := testBox(t)
+	log := tool(t, "pubtool", "0")
+	first, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "one"}, Cwd: s.Workspace})
+	second, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "two"}, Cwd: s.Workspace})
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("n\ny\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if status(t, box, first.ID) != outbox.Rejected || status(t, box, second.ID) != outbox.Done || !strings.Contains(ran(log), "two") {
+		t.Fatalf("first %s, second %s: %q", status(t, box, first.ID), status(t, box, second.ID), out.String())
+	}
+}
+
+// A deferred command waits while the session's links in the real files
+// lead into $HOME outside the workspace, to a secret file or nowhere: an
+// argument that is or runs through one reads or writes there without
+// showing it, however it is spelled.
+func TestCmdWaitsForLinksOut(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		make func(ws, home string) (string, error) // the link; its path is recorded as applied
+		runs bool
+	}{
+		{"to a secret file", func(ws, _ string) (string, error) {
+			_ = os.WriteFile(filepath.Join(ws, ".env"), []byte("TOKEN=x\n"), 0o600)
+			return filepath.Join(ws, "notes.md"), os.Symlink(".env", filepath.Join(ws, "notes.md"))
+		}, false},
+		{"to a secret file in another case", func(ws, _ string) (string, error) {
+			_ = os.WriteFile(filepath.Join(ws, ".ENV"), []byte("TOKEN=x\n"), 0o600)
+			return filepath.Join(ws, "notes.md"), os.Symlink(".ENV", filepath.Join(ws, "notes.md"))
+		}, false},
+		{"into home", func(ws, home string) (string, error) {
+			_ = os.WriteFile(filepath.Join(home, "hosts.yml"), []byte("token\n"), 0o600)
+			return filepath.Join(ws, "docs"), os.Symlink(home, filepath.Join(ws, "docs"))
+		}, false},
+		{"nowhere, into home", func(ws, home string) (string, error) {
+			return filepath.Join(ws, "out.txt"), os.Symlink(filepath.Join(home, ".bashrc"), filepath.Join(ws, "out.txt"))
+		}, false},
+		{"nowhere, where the user cannot create anything", func(ws, _ string) (string, error) {
+			// What appears there later, a process's files among them,
+			// is not known now.
+			return filepath.Join(ws, "notes.md"), os.Symlink("/proc/999999999/environ", filepath.Join(ws, "notes.md"))
+		}, false},
+		{"in a loop of links", func(ws, _ string) (string, error) {
+			_ = os.Symlink("b", filepath.Join(ws, "a"))
+			return filepath.Join(ws, "notes.md"), os.Symlink("a/x", filepath.Join(ws, "notes.md"))
+		}, false},
+		{"from home into home", func(_, home string) (string, error) {
+			return filepath.Join(home, "notes.md"), os.Symlink(filepath.Join(home, ".netrc-like"), filepath.Join(home, "notes.md"))
+		}, false},
+		{"to the user's data outside home", func(ws, _ string) (string, error) {
+			// Another disk, or the session's own storage under /var/tmp.
+			elsewhere := t.TempDir()
+			_ = os.WriteFile(filepath.Join(elsewhere, "data.txt"), []byte("mine\n"), 0o600)
+			return filepath.Join(ws, "notes.md"), os.Symlink(filepath.Join(elsewhere, "data.txt"), filepath.Join(ws, "notes.md"))
+		}, false},
+		{"to a system directory above user data", func(ws, home string) (string, error) {
+			return filepath.Join(ws, "all"), os.Symlink(filepath.Dir(home), filepath.Join(ws, "all"))
+		}, false},
+		{"to a system directory", func(ws, _ string) (string, error) {
+			// What lies below a directory is not known, whatever its name.
+			return filepath.Join(ws, "share"), os.Symlink("/usr", filepath.Join(ws, "share"))
+		}, false},
+		{"to a file of the user's that anyone may read", func(ws, _ string) (string, error) {
+			// Read-only, in a directory the user cannot write, so only
+			// the owner tells it from a system file.
+			dir := filepath.Join(t.TempDir(), "ro")
+			_ = os.Mkdir(dir, 0o755)
+			_ = os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("mine\n"), 0o444)
+			_ = os.Chmod(dir, 0o555)
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			return filepath.Join(ws, "notes.md"), os.Symlink(filepath.Join(dir, "notes.txt"), filepath.Join(ws, "notes.md"))
+		}, false},
+		{"to a process's own file", func(ws, _ string) (string, error) {
+			// The user's own process: not a file of someone else's.
+			return filepath.Join(ws, "notes.md"), os.Symlink("/proc/self/status", filepath.Join(ws, "notes.md"))
+		}, false},
+		{"inside the workspace", func(ws, _ string) (string, error) {
+			_ = os.WriteFile(filepath.Join(ws, "body.md"), []byte("ok\n"), 0o644)
+			return filepath.Join(ws, "notes.md"), os.Symlink("body.md", filepath.Join(ws, "notes.md"))
+		}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if strings.Contains(c.name, "process") {
+				if _, err := os.Stat("/proc/self/status"); err != nil {
+					t.Skip("no /proc here")
+				}
+			}
+			s, box := testBox(t)
+			s.Home = filepath.Dir(s.Workspace) // the workspace is in $HOME
+			log := tool(t, "pubtool", "0")
+			link, err := c.make(s.Workspace, s.Home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Applied = map[string]time.Time{link: time.Now()}
+			it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "--body-file", "notes.md"}, Cwd: s.Workspace})
+			var out bytes.Buffer
+			if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+				t.Fatal(err)
+			}
+			if got := ran(log) != ""; got != c.runs {
+				t.Fatalf("ran = %v, want %v: %q", got, c.runs, out.String())
+			}
+			if c.runs {
+				return
+			}
+			if status(t, box, it.ID) != outbox.Pending || !strings.Contains(out.String(), link) {
+				t.Fatalf("not held, or the link not named: %q", out.String())
+			}
+			// Once the user removes the link, the command runs.
+			if err := os.Remove(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+				t.Fatal(err)
+			}
+			if ran(log) == "" {
+				t.Fatalf("held after the link was removed: %q", out.String())
+			}
+		})
+	}
+}
+
+// A link to a system file (a venv's interpreter in /usr/bin) holds
+// nothing: anyone may read it and the user cannot replace it. Root may
+// write anywhere, so for root nothing outside the workspace is public.
+func TestCmdLinkToSystemFileRuns(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("as root every place is writable")
+	}
+	s, box := testBox(t)
+	s.Home = filepath.Dir(s.Workspace)
+	log := tool(t, "pubtool", "0")
+	link := filepath.Join(s.Workspace, "python")
+	if err := os.Symlink("/bin/sh", link); err != nil {
+		t.Fatal(err)
+	}
+	s.Applied = map[string]time.Time{link: time.Now()}
+	_, _ = box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: s.Workspace})
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if ran(log) == "" {
+		t.Fatalf("held by a link to a system file: %q", out.String())
+	}
+}
+
+// A machine's configuration anyone may read can carry credentials, so a
+// link to it holds commands, as one to a directory of root's does.
+func TestCmdLinkToSystemConfigWaits(t *testing.T) {
+	for _, target := range []string{"/etc/passwd", "/usr/bin"} {
+		if _, err := os.Stat(target); err != nil {
+			continue
+		}
+		s, box := testBox(t)
+		s.Home = filepath.Dir(s.Workspace)
+		log := tool(t, "pubtool", "0")
+		link := filepath.Join(s.Workspace, "notes.md")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		s.Applied = map[string]time.Time{link: time.Now()}
+		_, _ = box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: s.Workspace})
+		var out bytes.Buffer
+		if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+			t.Fatal(err)
+		}
+		if ran(log) != "" {
+			t.Fatalf("ran with a link to %s: %q", target, out.String())
+		}
+	}
+}
+
+// Each condition of an installed program, one at a time.
+func TestProgram(t *testing.T) {
+	bin := place{mode: 0o755}
+	dir := place{mode: fs.ModeDir | 0o755}
+	dirs := []place{dir, dir}
+	if !program(bin, dirs) {
+		t.Fatal("an installed program is not public")
+	}
+	for name, c := range map[string]struct {
+		file place
+		dirs []place
+	}{
+		"not a regular file":        {place{mode: fs.ModeDir | 0o755}, dirs},
+		"no execute bit":            {place{mode: 0o644}, dirs},
+		"not root's":                {place{mode: 0o755, uid: 1000}, dirs},
+		"writable by the user":      {place{mode: 0o755, writable: true}, dirs},
+		"in a directory not root's": {bin, []place{{mode: fs.ModeDir | 0o755, uid: 1000}, dir}},
+		"in a writable directory":   {bin, []place{dir, {mode: fs.ModeDir | 0o755, writable: true}}},
+		"in a closed directory":     {bin, []place{{mode: fs.ModeDir | 0o750}, dir}},
+		"below a non-directory":     {bin, []place{{mode: 0o755}}},
+	} {
+		if program(c.file, c.dirs) {
+			t.Errorf("%s: public", name)
+		}
+	}
+}
+
+// Through the real apply: a link the agent made in a new directory is
+// recorded and holds the session's commands until the user trusts it.
+func TestApplyRecordsLinksThatHoldCommands(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	elsewhere := t.TempDir()
+	if err := os.WriteFile(filepath.Join(elsewhere, "python"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(s.CloneDir(), ".venv/bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(elsewhere, "python"), filepath.Join(s.CloneDir(), ".venv/bin/python")); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	log := tool(t, "pubtool", "0")
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: s.CloneDir()})
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if !strings.Contains(out.String(), ".venv/bin/python") || !strings.Contains(out.String(), "--trust-links") {
+		t.Fatalf("not held by the applied link: %q", out.String())
+	}
+	out.Reset()
+	if err := Apply(s, nil, box, Options{TrustLinks: true, In: strings.NewReader("y\n"), Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if ran(log) == "" || status(t, box, it.ID) != outbox.Done {
+		t.Fatalf("--trust-links did not run it: %q", out.String())
+	}
+}
+
+// An argument naming the session's own storage is refused, whatever the
+// spelling around its ID.
+func TestCmdNamesSessionStorage(t *testing.T) {
+	s, box := testBox(t)
+	log := tool(t, "pubtool", "0")
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "--body-file=//var/tmp/airbag-501/S-TEST/./ws/clone/notes.md"}, Cwd: s.Workspace})
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if ran(log) != "" || status(t, box, it.ID) != outbox.Rejected {
+		t.Fatalf("ran on the session's storage: %q", out.String())
 	}
 }

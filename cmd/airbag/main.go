@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 
@@ -29,8 +30,24 @@ import (
 	"github.com/getjump/airbag/internal/term"
 )
 
-// version is set at release: -ldflags "-X main.version=v0.1.0".
+// version is set at release: -ldflags "-X main.version=v0.1.0". A
+// build without it reports the module version Go stamps (see
+// buildVersion).
 var version = "dev"
+
+// buildVersion returns v, or, while v is still "dev", the main module's
+// version from the build info: go install ...@v0.1.0 stamps v0.1.0, and
+// a build in a git checkout the tag or a pseudo-version. A build that
+// stamps no version ("(devel)") stays "dev".
+func buildVersion(v string, info func() (*debug.BuildInfo, bool)) string {
+	if v != "dev" {
+		return v
+	}
+	if bi, ok := info(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return v
+}
 
 const usage = `airbag — approve outcomes, not commands
 
@@ -41,7 +58,11 @@ const usage = `airbag — approve outcomes, not commands
                               what the agent changed, sent and queued; --json for
                               tools, --attention for only what needs a decision
   airbag diff [ID] [PATH...]  unified diff of changed files
-  airbag apply [ID] [-i] [--only PATH]... [--yes] [--force] [--trust-git]
+  airbag outbox [ID] [--json] exact frozen external requests; no execution
+  airbag outbox resolve INTENT done|failed [ID]
+                              record what an intent with an unknown outcome did,
+                              after checking; nothing runs
+  airbag apply [ID] [-i] [--only PATH]... [--yes] [--force] [--trust-git] [--trust-links]
                               write the branch (or part of it) to the real files,
                               then run the outbox
   airbag apply [ID] --branch NAME
@@ -93,6 +114,8 @@ func main() {
 		err = cmdReviewArgs(args)
 	case "diff":
 		err = cmdDiff(args)
+	case "outbox":
+		err = cmdOutbox(args)
 	case "apply":
 		err = cmdApply(args)
 	case "discard":
@@ -108,7 +131,7 @@ func main() {
 	case "approve":
 		err = cmdApprove(args)
 	case "version", "--version":
-		fmt.Println("airbag", version)
+		fmt.Println("airbag", buildVersion(version, debug.ReadBuildInfo))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -427,6 +450,7 @@ func cmdApply(args []string) error {
 	inter := fs.Bool("i", false, "go through the changes one by one")
 	branch := fs.String("branch", "", "put the workspace result on this new git branch; the working tree is not touched")
 	trustGit := fs.Bool("trust-git", false, "run the session's pushes although it changed .git/config or git hooks (hooks stay off)")
+	trustLinks := fs.Bool("trust-links", false, "run the session's deferred commands although links it made lead out of the workspace")
 	var only stringList
 	fs.Var(&only, "only", "apply only changes under this path (repeatable)")
 	_ = fs.Parse(reorder(args))
@@ -449,7 +473,7 @@ func cmdApply(args []string) error {
 	out := term.Safe(os.Stdout)
 	defer out.Flush()
 	return apply.Apply(s, cs, box, apply.Options{
-		Yes: *yes, Force: *force, Interactive: *inter, Only: only, Branch: *branch, TrustGit: *trustGit, In: os.Stdin, Out: out})
+		Yes: *yes, Force: *force, Interactive: *inter, Only: only, Branch: *branch, TrustGit: *trustGit, TrustLinks: *trustLinks, In: os.Stdin, Out: out})
 }
 
 // cmdRollback undoes the last apply: of session ID, or of the newest

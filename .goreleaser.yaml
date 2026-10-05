@@ -1,0 +1,78 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# The release: .github/workflows/release.yml runs this on a v* tag, and
+# `goreleaser release --snapshot --clean` builds the same into dist/
+# locally. How a user checks what it publishes: docs/verify.md.
+version: 2
+project_name: airbag
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  # Only airbag: airbag-macprobe is a probe to run from source on a Mac.
+  - id: airbag
+    main: ./cmd/airbag
+    binary: airbag
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    # The binary's mtime is the commit's, not the build's.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}
+
+archives:
+  - id: airbag
+    formats: [tar.gz]
+    # No version in the name, so .../releases/latest/download/airbag_linux_amd64.tar.gz
+    # needs no API call; the version is in the tag and in `airbag version`.
+    name_template: "airbag_{{ .Os }}_{{ .Arch }}"
+    # Every file in the archive has the commit's mtime, so the archive's
+    # bytes depend on the commit only, not on when or where it was built.
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info:
+          mtime: "{{ .CommitDate }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+  # The installer is a release asset, so the signature and the attestation
+  # over checksums.txt cover it too.
+  extra_files:
+    - glob: install.sh
+
+# syft, one SPDX JSON document per archive, listed in checksums.txt.
+sboms:
+  - id: archives
+    artifacts: archive
+
+# A Sigstore bundle over checksums.txt: cosign signs it keyless, with the
+# workflow's OIDC identity, so the signature names the workflow and the tag.
+signs:
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: [sign-blob, "--bundle=${signature}", "${artifact}", "--yes"]
+
+release:
+  # A draft: the workflow attests the checksums, then publishes it, and
+  # from then on the release is immutable.
+  draft: true
+  # A re-run after a failure replaces the draft it left.
+  replace_existing_draft: true
+  # v0.1.0-rc.1 is a pre-release, never the latest release.
+  prerelease: auto
+  extra_files:
+    - glob: install.sh
+
+# The release notes come from CHANGELOG.md (--release-notes in the
+# workflow); without that flag GoReleaser lists the commits.

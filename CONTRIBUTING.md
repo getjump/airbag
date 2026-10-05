@@ -22,7 +22,7 @@ The end-to-end tests run real sessions with the `airbag` in your `PATH` (or
 `AIRBAG=/path/to/airbag`), and must run as a regular user, not root:
 
 ```console
-$ for t in test/*-e2e.sh; do sh "$t"; done
+$ for t in test/e2e.sh test/*-e2e.sh; do sh "$t"; done
 $ python3 test/ctrlc.py
 ```
 
@@ -31,8 +31,12 @@ user can write, to place a host socket there: `sudo mkdir -m 1777
 /var/lib/airbag-e2e` (or set `AIRBAG_E2E_HOSTDIR`); without it the check is
 skipped.
 
+WSL2 is checked by an informational CI job (`.github/workflows/wsl.yml`).
+
 On macOS, `go build ./cmd/airbag` builds the prototype and `go test ./...` runs
-the unit tests; the end-to-end tests are Linux-only.
+the unit tests. Of the end-to-end tests, `test/e2e.sh` and
+`test/agent-state-e2e.sh` check what the prototype promises there, and CI runs
+them on every macOS runner; the others are Linux-only.
 
 `sh test/check.sh` runs the static checks CI runs, with the same tool versions:
 gofmt, `go mod tidy`, `go vet`, golangci-lint and govulncheck for Linux and
@@ -54,10 +58,9 @@ would bring it back; please read it before starting on one of those.
 
 **Run it on a Mac.** The macOS prototype ([docs/macos.md](docs/macos.md)) puts
 one Seatbelt profile around the agent, uses an APFS clone as the branch and the
-proxy on a localhost port. It is built and unit-tested on Linux and has not run
-on a Mac yet. Run it with Claude Code or Codex and report what the page asks
-for. The probe in `cmd/airbag-macprobe` decides whether the workspace branch
-moves to NFS on localhost, as AgentFS does.
+proxy on a localhost port. CI runs its unit tests, `test/e2e.sh` and the probe
+in `cmd/airbag-macprobe` on hosted macOS runners, but nobody has used it on real
+work yet. Run it with Claude Code or Codex and report what the page asks for.
 
 **Use it on real work.** [docs/evaluation.md](docs/evaluation.md) is the plan
 for telling whether airbag is worth using against a worktree with the agent's
@@ -95,5 +98,26 @@ Smaller, self-contained tasks are labeled
 - Commit messages: an imperative summary line, then what changed and why.
 - Update the README, or the page in `docs/` that covers it, when something
   user-visible changes.
-- Security problems: please report them privately through a GitHub security
-  advisory, not a public issue.
+- The maintainer's agent workflows, their labels and gates: [docs/agents.md](docs/agents.md).
+- Security problems: please report them privately, as [SECURITY.md](SECURITY.md)
+  says, not in a public issue.
+
+## AI-assisted contributions
+
+You are the author of what you submit, whatever tool helped: read every line,
+run it, and be able to explain it without the tool. If a tool wrote a
+substantial part, say so in the pull request (the template has a box for it)
+or in an `Assisted-by: <tool>` commit trailer.
+
+Issues and security reports are written and checked by a person. A bug report
+needs steps you ran yourself. A security report needs a proof of concept that
+works, and goes to a private advisory ([SECURITY.md](SECURITY.md)).
+
+Agents that open issues, pull requests or comments on their own are not
+accepted. Please work on `good first issue` items yourself, without an agent:
+they are there for people new to the code. We may close what looks like
+unreviewed tool output without review, and block those who keep sending it.
+
+The maintainer's own agents are the exception: they label what they open
+`agent-created` and follow [AGENTS.md](AGENTS.md); [docs/agents.md](docs/agents.md)
+says how they are started and gated.

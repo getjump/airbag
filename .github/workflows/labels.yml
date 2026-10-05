@@ -1,0 +1,48 @@
+name: labels
+on:
+  push:
+    branches: [main]
+    paths: [.github/labels.yml]
+  workflow_dispatch:
+
+permissions: {}
+
+# Two runs at once would race on the same labels; the later one wins
+# anyway, so it waits instead of cancelling.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write # gh label create
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Creates each label in .github/labels.yml, or updates its color and
+      # description; labels the file does not list are left alone. yq is
+      # the one on the runner image, so no third-party action holds the
+      # token.
+      - name: sync
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          yq '.[] | [.name, .color, .description // ""] | @tsv' .github/labels.yml |
+            while IFS=$'\t' read -r name color description; do
+              case $color in
+              [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+              *)
+                echo "::error file=.github/labels.yml::label '$name': color '$color' is not six lowercase hex digits"
+                exit 1
+                ;;
+              esac
+              echo "== $name"
+              gh label create "$name" --color "$color" --description "$description" --force
+            done

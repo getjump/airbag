@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -16,12 +17,15 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/getjump/airbag/internal/operation"
 	"github.com/getjump/airbag/internal/outbox"
 	"github.com/getjump/airbag/internal/review"
+	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 )
 
@@ -34,8 +38,11 @@ type Options struct {
 	// TrustGit runs the session's pushes although the session changed
 	// .git/config or git hooks; hooks stay disabled.
 	TrustGit bool
-	In       io.Reader
-	Out      io.Writer
+	// TrustLinks runs the session's deferred commands although links it
+	// put in the files lead out of the workspace (linksOut).
+	TrustLinks bool
+	In         io.Reader
+	Out        io.Writer
 }
 
 type Conflict struct {
@@ -187,6 +194,20 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 			fmt.Fprintf(o.Out, "  %s: %s\n", review.OneLine(c.Path), c.Reason)
 		}
 		return fmt.Errorf("nothing applied; leave these out with apply -i or --only, rerun with --force to overwrite them, or discard the session")
+	}
+	// Before the undo journal moves anything: the journal would follow
+	// such a link too. --force does not cover it, since the change would
+	// land somewhere else, not overwrite a host edit.
+	var replacing []string
+	for _, c := range picked {
+		if c.Kind == review.Replaced {
+			replacing = append(replacing, c.Path)
+		}
+	}
+	for _, c := range picked {
+		if err := parentsUnlinked(c, replacing); err != nil {
+			return fmt.Errorf("nothing applied: %w", err)
+		}
 	}
 	if len(picked) > 0 {
 		gen, err := beginGeneration(s)
@@ -351,12 +372,27 @@ func gitTouched(cs []review.Change) bool {
 }
 
 func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reader, o Options) error {
+	lock, err := box.LockExecution()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }()
 	intents, err := box.List()
 	if err != nil {
 		return err
 	}
-	failed := "" // after a failure the rest wait: a PR without its push means nothing
+	// After a failure the rest wait (a PR without its push means
+	// nothing), in this run; after an unknown outcome they wait until the
+	// user records what happened with `airbag outbox resolve`. An intent
+	// left pending (--yes, --branch, --trust-git) holds nothing back.
+	failed, unknown := "", ""
+	var links []string // the session's links out, looked for once
+	looked := o.TrustLinks
 	for _, it := range intents {
+		if it.Status == outbox.Unknown {
+			unknown = it.ID
+			continue
+		}
 		if it.Status == outbox.Running {
 			// A run was recorded but not its end: airbag stopped mid-push.
 			it.Status = outbox.Unknown
@@ -369,9 +405,16 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 				return fmt.Errorf("intent %s: %w", it.ID, err)
 			}
 			fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
+			unknown = it.ID
 			continue
 		}
-		if it.Status != outbox.Pending {
+		if it.Status != outbox.Pending && !(it.Request != nil && it.Status == string(operation.Approved)) {
+			continue
+		}
+		if unknown != "" {
+			fmt.Fprintf(o.Out, "intent %s left pending: the outcome of %s is unknown; check what it did, then record it with "+
+				"`airbag outbox resolve %s done|failed %s`, and `airbag apply %s` runs the rest\n",
+				it.ID, unknown, unknown, s.ID, s.ID)
 			continue
 		}
 		if failed != "" {
@@ -384,15 +427,23 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 		case outbox.KindPush:
 			status, err = runPush(s, box, it, risky, in, o)
 		case outbox.KindCmd:
-			status, err = runCmd(s, box, it, risky, in, o)
+			if !looked {
+				links, looked = linksOut(s), true
+			}
+			status, err = runCmd(s, box, it, risky, links, in, o)
+		case outbox.KindPullRequest:
+			status, err = runPullRequest(s, box, it, in, o)
 		default:
 			status, err = reject(box, it, "unknown kind "+it.Kind, o)
 		}
 		if err != nil {
 			return err
 		}
-		if status == outbox.Failed {
+		switch status {
+		case outbox.Failed:
 			failed = it.ID
+		case outbox.Unknown:
+			unknown = it.ID
 		}
 	}
 	return nil
@@ -481,7 +532,7 @@ func runPush(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, 
 // machine's PATH and not from the workspace, the files it names must
 // hold what they held when it was queued, and the user confirms each
 // one; --yes does not.
-func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, in *bufio.Reader, o Options) (string, error) {
+func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, links []string, in *bufio.Reader, o Options) (string, error) {
 	line := outbox.Line(it.Argv)
 	if s.Branch != "" {
 		// The working tree is not the session's result, so there is
@@ -498,8 +549,26 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, i
 	if err != nil {
 		return reject(box, it, fmt.Sprintf("%s: not found on this machine", it.Argv[0]), o)
 	}
-	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, s.Workspace) {
+	// The program's path has its links resolved, so the workspace's is
+	// compared with its links resolved too (a workspace under ~/code ->
+	// /mnt/data/code, or /tmp -> /private/tmp on macOS).
+	ws := s.Workspace
+	if r, err := filepath.EvalSymlinks(ws); err == nil {
+		ws = r
+	}
+	if abs, err := filepath.EvalSymlinks(prog); err != nil || within(abs, ws) || within(abs, s.Workspace) {
 		return reject(box, it, fmt.Sprintf("%s resolves to %s, inside the workspace; deferred commands run only programs from outside it", it.Argv[0], prog), o)
+	}
+	if a := namesSession(s, it.Argv[1:]); a != "" {
+		return reject(box, it, fmt.Sprintf("%s names session %s's own storage, which holds what the agent wrote; "+
+			"name the file in the workspace instead, or run it yourself", a, s.ID), o)
+	}
+	if len(links) > 0 {
+		fmt.Fprintf(o.Out, "intent %s (`%s`) left pending: session %s put links in your files that lead out of the workspace "+
+			"or to a secret file: %s. The command could read or write through them, which its arguments do not show. "+
+			"Inspect them, then remove or replace them, or run `airbag apply --trust-links %s` if they are what you want\n",
+			it.ID, line, s.ID, listLinks(links), s.ID)
+		return outbox.Pending, nil
 	}
 	rels := make([]string, 0, len(it.Files))
 	for rel := range it.Files {
@@ -569,6 +638,198 @@ func hostDir(s *session.Session, dir string) string {
 	return dir
 }
 
+// linksOut lists the links this session put in the real files that a
+// deferred command could read or write private data through: link and
+// where it leads. A deferred command is confirmed by its arguments, and
+// an argument that is, or runs through, such a link reaches its target
+// without showing it (notes.md -> ~/.env, docs -> ~/.config). A link is
+// harmless only when it stays in the workspace, or leads to an installed
+// program (public); all else counts, any directory or configuration file
+// outside, the user's home, other disks and the session's own storage
+// included. Places are compared as files, not
+// as names, so case and firmlinks on macOS do not matter. Each link is
+// checked as it is now: one the user removed or replaced no longer counts.
+func linksOut(s *session.Session) []string {
+	ws, err := os.Stat(s.Workspace)
+	if err != nil {
+		return []string{"the workspace " + s.Workspace + " itself, which cannot be read"}
+	}
+	paths := make([]string, 0, len(s.Applied))
+	for p := range s.Applied {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	var out []string
+	for _, p := range paths {
+		fi, err := os.Lstat(p)
+		if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+			continue
+		}
+		t, ok := linkTarget(p)
+		switch {
+		case !ok:
+			out = append(out, p+" -> (nowhere)")
+		case secretfs.IsSecret(strings.ToLower(filepath.Base(t))):
+			out = append(out, p+" -> "+t)
+		case inside(t, ws):
+		case !public(t):
+			out = append(out, p+" -> "+t)
+		}
+	}
+	return out
+}
+
+// linkTarget is where link p leads, the part that does not exist yet
+// joined on as written; ok is false for a loop or a link on the way
+// that leads nowhere.
+func linkTarget(p string) (string, bool) {
+	if t, err := filepath.EvalSymlinks(p); err == nil {
+		return t, true
+	}
+	text, err := os.Readlink(p)
+	if err != nil {
+		return "", false
+	}
+	dir := "/"
+	if !filepath.IsAbs(text) {
+		if dir, err = filepath.EvalSymlinks(filepath.Dir(p)); err != nil {
+			return "", false
+		}
+	}
+	return follow(dir, text)
+}
+
+// inside reports whether p, or the nearest part of it that exists, is
+// below the directory root, comparing files rather than names.
+func inside(p string, root os.FileInfo) bool {
+	for d := p; ; d = filepath.Dir(d) {
+		if fi, err := os.Stat(d); err == nil && os.SameFile(fi, root) {
+			return true
+		}
+		if filepath.Dir(d) == d {
+			return false
+		}
+	}
+}
+
+// public reports whether p is an installed program, which is what a
+// venv's interpreter links to: a regular file with an execute bit, owned
+// by root, in directories owned by root that anyone may search, none of
+// them writable by the user. Other files anyone may read are not public:
+// a machine's configuration can carry credentials, and a file root wrote
+// into a user's folder can be the user's data. A directory never is: what
+// lies below it is not known, and on macOS firmlinks join user data into
+// /usr and /System. Something that does not exist is not public either:
+// what appears there later, a process's files under /proc among them, is
+// not known now.
+func public(p string) bool {
+	file, ok := placeOf(p)
+	if !ok {
+		return false
+	}
+	var dirs []place
+	for d := filepath.Dir(p); ; d = filepath.Dir(d) {
+		dir, ok := placeOf(d)
+		if !ok {
+			return false
+		}
+		dirs = append(dirs, dir)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	return program(file, dirs)
+}
+
+// place is what public looks at in a file or directory: its mode, owner,
+// and whether the user may write it.
+type place struct {
+	mode     fs.FileMode
+	uid      int64
+	writable bool
+}
+
+func placeOf(p string) (place, bool) {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return place{}, false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return place{}, false
+	}
+	return place{mode: fi.Mode(), uid: int64(st.Uid), writable: unix.Access(p, unix.W_OK) == nil}, true
+}
+
+// program reports whether file, below dirs, is an installed program: see
+// public.
+func program(file place, dirs []place) bool {
+	if !file.mode.IsRegular() || file.mode&0o111 == 0 || file.uid != 0 || file.writable {
+		return false
+	}
+	for _, d := range dirs {
+		if !d.mode.IsDir() || d.mode&0o001 == 0 || d.uid != 0 || d.writable {
+			return false
+		}
+	}
+	return true
+}
+
+// listLinks names up to three links, and how many more.
+func listLinks(links []string) string {
+	shown := links[:min(3, len(links))]
+	out := strings.Join(shown, ", ")
+	if n := len(links) - len(shown); n > 0 {
+		out += fmt.Sprintf(" and %d more", n)
+	}
+	return out
+}
+
+// namesSession returns the first argument that names this session's own
+// storage (the clone or upper layer, which hold what the agent wrote and,
+// on macOS, copies of your files, links included), in any spelling that
+// carries the session's ID.
+func namesSession(s *session.Session, args []string) string {
+	id := strings.ToLower(s.ID)
+	for _, a := range args {
+		if id != "" && strings.Contains(strings.ToLower(a), id) {
+			return a
+		}
+	}
+	return ""
+}
+
+// follow resolves name from the real directory dir one component at a
+// time, as the kernel does: a link is replaced by where it leads before
+// a later ".." applies. The part that does not exist yet is joined on as
+// written. ok is false for a link on the way that leads nowhere or a
+// loop of links.
+func follow(dir, name string) (string, bool) {
+	cur := dir
+	parts := strings.Split(name, "/")
+	for i, part := range parts {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, part)
+		fi, err := os.Lstat(next)
+		if err != nil {
+			return filepath.Join(append([]string{next}, parts[i+1:]...)...), true
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			if next, err = filepath.EvalSymlinks(next); err != nil {
+				return "", false
+			}
+		}
+		cur = next
+	}
+	return cur, true
+}
+
 func hashFile(p string) (string, error) {
 	f, err := os.Open(p)
 	if err != nil {
@@ -614,6 +875,9 @@ func confirm(in *bufio.Reader, o Options, q string) bool {
 }
 
 func applyOne(c review.Change) error {
+	if err := parentsUnlinked(c, nil); err != nil {
+		return err
+	}
 	switch c.Kind {
 	case review.Deleted:
 		return os.RemoveAll(c.Path)
@@ -634,11 +898,52 @@ func applyOne(c review.Change) error {
 		if err != nil {
 			return err
 		}
+		// Its directory, when new, is not applied on its own (Units: it
+		// is made along with what is in it), as copyFile does for files.
+		if err := os.MkdirAll(filepath.Dir(c.Path), 0o755); err != nil { //nolint:gosec // a directory in the user's workspace, with the usual mode less the umask
+			return err
+		}
 		_ = os.Remove(c.Path)
 		return os.Symlink(target, c.Path)
 	default:
 		return copyFile(c.Upper, c.Path, c.Mode)
 	}
+}
+
+// parentsUnlinked refuses a change when a directory on its way down from
+// its layer's root is a link on the host now. In the session that place
+// was a directory (the branch holds an entry below it), so the link is
+// the host's, made while the session ran, and only the entry itself was
+// checked for a conflict: writing or removing through it would land
+// outside the workspace or $HOME. A directory in replacing is not looked
+// below: its own change, applied first, makes it a real directory.
+func parentsUnlinked(c review.Change, replacing []string) error {
+	rel := filepath.FromSlash(c.Rel)
+	root, ok := strings.CutSuffix(c.Path, string(filepath.Separator)+rel)
+	if !ok {
+		return fmt.Errorf("%s is not %s in its layer", c.Path, c.Rel)
+	}
+	d := root
+	for _, part := range strings.Split(filepath.Dir(rel), string(filepath.Separator)) {
+		if part == "." {
+			break
+		}
+		d = filepath.Join(d, part)
+		if slices.Contains(replacing, d) {
+			return nil
+		}
+		fi, err := os.Lstat(d)
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return nil // made below as a directory, or a file in the way that the apply stops at
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s became a link on the host, so %s would land where it leads; remove the link or leave the change out", d, c.Rel)
+		}
+	}
+	return nil
 }
 
 // copyFile replaces dst atomically: write a temp file next to it, then

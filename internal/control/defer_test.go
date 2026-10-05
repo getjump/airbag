@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -59,9 +60,9 @@ func ask(t *testing.T, s *Server, in outbox.Intent) DeferReply {
 }
 
 func TestDeferQueues(t *testing.T) {
-	s := deferServer(t, "defer: [gh pr create]\n")
+	s := deferServer(t, "defer: [pubtool release]\n")
 	notes := filepath.Join(s.Root, "docs", "notes.md")
-	d := ask(t, s, outbox.Intent{Argv: []string{"gh", "pr", "create", "--body-file", notes}, Cwd: s.Root,
+	d := ask(t, s, outbox.Intent{Argv: []string{"pubtool", "release", "--body-file", notes}, Cwd: s.Root,
 		Files: map[string]string{notes: "abc"}})
 	if d.Queued == nil || d.Queued.Kind != outbox.KindCmd || d.Queued.Files["docs/notes.md"] != "abc" {
 		t.Fatalf("not queued: %+v", d)
@@ -151,12 +152,20 @@ func TestControlSocketCapped(t *testing.T) {
 		}
 	}()
 	dial := func() net.Conn {
-		c, err := (&net.Dialer{}).DialContext(t.Context(), "unix", sock)
-		if err != nil {
-			t.Fatal(err)
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			c, err := (&net.Dialer{}).DialContext(t.Context(), "unix", sock)
+			if err == nil {
+				conns = append(conns, c)
+				return c
+			}
+			// macOS refuses a connect while the listen backlog is full,
+			// where Linux waits; the server drains it as it accepts.
+			if !errors.Is(err, syscall.ECONNREFUSED) && !errors.Is(err, syscall.EAGAIN) || time.Now().After(deadline) {
+				t.Fatal(err)
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		conns = append(conns, c)
-		return c
 	}
 	for range MaxConns {
 		dial()

@@ -219,6 +219,12 @@ func TestUnderMostSpecificRoot(t *testing.T) {
 	if !ok || got != filepath.Join(ws, "bashrc") {
 		t.Errorf("under = %q %v, want the workspace's spelling", got, ok)
 	}
+	// A target spelled through a link (a link's text naming /var for
+	// /private/var on macOS) is found under its root too.
+	got, ok = under(filepath.Join(home, "ws", "bashrc"), []string{home, ws})
+	if !ok || got != filepath.Join(ws, "bashrc") {
+		t.Errorf("under via a link = %q %v, want the workspace's spelling", got, ok)
+	}
 }
 
 // A relative dangling link below a linked directory is read from the
