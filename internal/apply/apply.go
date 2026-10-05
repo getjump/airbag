@@ -47,9 +47,20 @@ type Conflict struct {
 // Overlay reads the live workspace, so the agent's version was based
 // on the old file; applying it would silently drop the human's edit.
 func Conflicts(s *session.Session, cs []review.Change) []Conflict {
-	since := s.Created
+	base := s.Created
 	if !s.Baseline.IsZero() {
-		since = s.Baseline
+		base = s.Baseline
+	}
+	// since is when p last matched the branch's view: the session's
+	// start, or a later apply that wrote p or a directory above it.
+	since := func(p string) time.Time {
+		t := base
+		for q, at := range s.Applied {
+			if at.After(t) && (p == q || within(p, q)) {
+				t = at
+			}
+		}
+		return t
 	}
 	var replaced []string
 	for _, c := range cs {
@@ -85,7 +96,7 @@ func Conflicts(s *session.Session, cs []review.Change) []Conflict {
 				if p := changedInside(c.Path, since); p != "" {
 					out = append(out, Conflict{p, "changed on the host during the session, inside a directory the agent removed"})
 				}
-			} else if !st.IsDir() && changedAfter(c.Path, since) {
+			} else if !st.IsDir() && changedAfter(c.Path, since(c.Path)) {
 				out = append(out, Conflict{c.Path, "changed on the host during the session"})
 			}
 		}
@@ -101,13 +112,13 @@ func changedAfter(p string, t time.Time) bool {
 	return ctime(&st).After(t)
 }
 
-func changedInside(dir string, t time.Time) string {
+func changedInside(dir string, since func(string) time.Time) string {
 	found := ""
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || found != "" {
 			return filepath.SkipAll
 		}
-		if !d.IsDir() && changedAfter(p, t) {
+		if !d.IsDir() && changedAfter(p, since(p)) {
 			found = p
 		}
 		return nil
@@ -161,6 +172,22 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 		if err := gen.finish(); err != nil {
 			return err
+		}
+		// What apply wrote matches the branch from now on: a later run's
+		// change to it conflicts only with a host edit after this.
+		// A file is recorded with its own change time, which a host edit
+		// after it exceeds even on a coarse clock; the rest with now.
+		now := time.Now()
+		if s.Applied == nil {
+			s.Applied = map[string]time.Time{}
+		}
+		for _, c := range picked {
+			at := now
+			var st unix.Stat_t
+			if unix.Lstat(c.Path, &st) == nil && st.Mode&unix.S_IFMT != unix.S_IFDIR {
+				at = ctime(&st)
+			}
+			s.Applied[c.Path] = at
 		}
 	}
 	if !s.Clone {

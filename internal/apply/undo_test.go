@@ -1246,3 +1246,35 @@ func TestConflictConfigLinkedIntoWorkspace(t *testing.T) {
 		t.Fatal("no conflict for a config's workspace target the host removed")
 	}
 }
+
+// A file an earlier, partial apply wrote, which a later run changes
+// again in the branch, does not conflict: that write was airbag's, not
+// the host's. A host edit after it still does.
+func TestPartialApplyThenRunAgain(t *testing.T) {
+	s, box := undoSession(t)
+	time.Sleep(20 * time.Millisecond)
+	s.Baseline = time.Now() // the real files were there before the run
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Only: []string{"mod.txt"}, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	real := filepath.Join(s.Workspace, "mod.txt")
+	if got := read(t, real); got != "agent\n" {
+		t.Fatalf("mod.txt = %q", got)
+	}
+	// The next run changes it again.
+	if err := os.WriteFile(filepath.Join(s.WSUpper(), "mod.txt"), []byte("agent again\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cf := Conflicts(s, mustScan(t, s)); len(cf) != 0 {
+		t.Fatalf("conflicts after the apply's own write: %v", cf)
+	}
+	time.Sleep(20 * time.Millisecond) // past the clock's tick
+	if err := os.WriteFile(real, []byte("host edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cf := Conflicts(s, mustScan(t, s))
+	if len(cf) != 1 || cf[0].Path != real {
+		t.Fatalf("a host edit after the apply: conflicts %v", cf)
+	}
+}

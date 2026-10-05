@@ -85,6 +85,10 @@ type Meta struct {
 	// branch. The session's start, or the last rollback, which put the
 	// files back as they were.
 	Baseline time.Time `json:"baseline,omitempty"`
+	// Applied: when apply last wrote each real path (a directory stands
+	// for what is below it). A path changed after that, rather than after
+	// Baseline, conflicts: the apply's own write is not a host edit.
+	Applied map[string]time.Time `json:"applied,omitempty"`
 }
 
 type Credential struct {
