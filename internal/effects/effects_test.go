@@ -176,3 +176,58 @@ func TestAddAllAfterClose(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A batch that does not commit leaves the meters as they were: its
+// entries took no tokens and its counts are still held, for a retry and
+// for Close.
+func TestMeterRestoredOnFailedWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "effects.db")
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+	deny := Effect{Kind: "net.egress", Target: "x:443", Verdict: "deny"}
+	es := make([]Effect, refuseBurst+3)
+	for i := range es {
+		es[i] = deny
+	}
+	if err := l.AddAll(es); err != nil {
+		t.Fatal(err)
+	}
+	// Another writer holds the database past the busy timeout.
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.db.ExecContext(t.Context(), "PRAGMA busy_timeout = 0"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	before := *l.refusals["net.egress"]
+	if err := l.AddAll([]Effect{deny}); err == nil {
+		t.Fatal("a write under another writer's lock succeeded")
+	}
+	if got := *l.refusals["net.egress"]; got != before {
+		t.Errorf("meter changed by a failed write: %+v, was %+v", got, before)
+	}
+	if err := l.Close(); err == nil {
+		t.Error("Close reported no error for a count it could not write")
+	}
+	if l.refusals["net.egress"].dropped != 3 {
+		t.Errorf("held-back count cleared: %d", l.refusals["net.egress"].dropped)
+	}
+	if _, err := conn.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+}

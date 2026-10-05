@@ -124,6 +124,27 @@ func (l *Log) AddAll(es []Effect) error {
 	if l.closed {
 		return errClosed
 	}
+	// The meters change as the entries go in; if the transaction does
+	// not commit, none of it happened.
+	saved := make(map[string]meter, len(l.refusals))
+	for k, m := range l.refusals {
+		saved[k] = *m
+	}
+	err := l.addAll(es)
+	if err != nil {
+		for k, m := range l.refusals {
+			if v, ok := saved[k]; ok {
+				*m = v
+			} else {
+				delete(l.refusals, k)
+			}
+		}
+	}
+	return err
+}
+
+// addAll is AddAll's transaction. l.mu is held.
+func (l *Log) addAll(es []Effect) error {
 	tx, err := l.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err
@@ -219,7 +240,8 @@ func insert(tx *sql.Tx, e Effect) error {
 }
 
 // Close writes the counts of the refused entries still held back, then
-// closes the database; later writes fail.
+// closes the database; later writes fail. It reports a count it could
+// not write.
 func (l *Log) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -231,18 +253,31 @@ func (l *Log) Close() error {
 	for kind, m := range l.refusals {
 		if m.dropped > 0 {
 			es = append(es, dropped(kind, m.dropped, l.now()))
-			m.dropped = 0
 		}
 	}
+	var err error
 	if len(es) > 0 {
-		if tx, err := l.db.BeginTx(context.Background(), nil); err == nil {
-			for _, e := range es {
-				_ = insert(tx, e)
+		if err = writeAll(l.db, es); err == nil {
+			for _, m := range l.refusals {
+				m.dropped = 0
 			}
-			_ = tx.Commit()
 		}
 	}
-	return l.db.Close()
+	return errors.Join(err, l.db.Close())
+}
+
+func writeAll(db *sql.DB, es []Effect) error {
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	for _, e := range es {
+		if err := insert(tx, e); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // Read returns all effects in order. It opens the database read-only,
