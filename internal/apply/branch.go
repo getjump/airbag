@@ -35,8 +35,17 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 	if s.Status == session.StatusRunning {
 		return fmt.Errorf("session %s is still running", s.ID)
 	}
-	if err := rootsOf(s).check("ws"); err != nil {
-		return fmt.Errorf("nothing applied: %w; put the directory back or discard the session", err) // the branch would go to that repository
+	// Each git call names the workspace by its path, so the root is
+	// checked again before each step that writes to the repository: the
+	// branch would go to whatever is at that path.
+	held := func() error {
+		if err := rootsOf(s).check("ws"); err != nil {
+			return fmt.Errorf("no branch made: %w; put the directory back or discard the session", err)
+		}
+		return nil
+	}
+	if err := held(); err != nil {
+		return err
 	}
 	if out, err := git(ws, nil, "rev-parse", "--git-dir"); err != nil || strings.TrimSpace(out) != ".git" {
 		return fmt.Errorf("--branch needs the workspace to be the top of a git repository")
@@ -54,6 +63,9 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 	}
 	commits := 0
 	if head != "" {
+		if err := held(); err != nil {
+			return err
+		}
 		if err := fetchAgent(s, head); err != nil {
 			return err
 		}
@@ -66,8 +78,14 @@ func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options)
 		return fmt.Errorf("the repository has no commit to branch from")
 	}
 
+	if err := held(); err != nil {
+		return err
+	}
 	tip, files, err := commitLeftovers(s, cs, head)
 	if err != nil {
+		return err
+	}
+	if err := held(); err != nil {
 		return err
 	}
 	if _, err := git(ws, nil, "update-ref", "-m", "airbag: session "+s.ID, "refs/heads/"+name, tip, strings.Repeat("0", len(tip))); err != nil {
