@@ -1657,8 +1657,13 @@ func TestApplyRefusesMovedRoot(t *testing.T) {
 	}
 	defer func() { _ = box.Close() }()
 	var out bytes.Buffer
-	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+	// Refused before conflicts are read from the other tree, and before
+	// an undo journal is started.
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Out: &out}); err == nil || !strings.HasPrefix(err.Error(), "nothing applied: ") || !strings.Contains(err.Error(), "leads to") {
 		t.Fatalf("applied through a moved root: %v", err)
+	}
+	if strings.Contains(out.String(), "Conflicts") {
+		t.Fatalf("conflicts read through a moved root: %s", out.String())
 	}
 	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Branch: "agent", Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
 		t.Fatalf("--branch went to a moved root: %v", err)
@@ -1815,7 +1820,7 @@ func TestApplyRefusesMovedHomeSpelledWithSlash(t *testing.T) {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home + "/"})
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home + "/", OverHome: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -217,7 +217,11 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 // installed program; a link review cannot read counts.
 func linksOut(s *session.Session, cs []Change) int {
 	in := func(p, dir string) bool {
-		return dir != "" && (p == dir || strings.HasPrefix(p, dir+string(filepath.Separator)))
+		if dir == "" {
+			return false
+		}
+		dir = filepath.Clean(dir)
+		return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
 	}
 	n := 0
 	for _, c := range cs {

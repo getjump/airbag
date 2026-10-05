@@ -99,11 +99,12 @@ type Meta struct {
 }
 
 // DirID is a directory as a session found it: its path with links
-// resolved, and its device and inode, which tell it from another
-// directory made at the same path.
+// resolved, and its inode, which tells it from another directory made at
+// the same path. The device number is left out: it changes for the same
+// directory when the filesystem is mounted again (an overlay or FUSE
+// mount, a WSL disk, a btrfs subvolume).
 type DirID struct {
 	Real string `json:"real"`
-	Dev  uint64 `json:"dev"`
 	Ino  uint64 `json:"ino"`
 }
 
@@ -121,7 +122,7 @@ func DirIDOf(p string) (DirID, error) {
 	if !ok {
 		return DirID{}, fmt.Errorf("%s: no device and inode", p)
 	}
-	return DirID{Real: real, Dev: u64(st.Dev), Ino: u64(st.Ino)}, nil
+	return DirID{Real: real, Ino: u64(st.Ino)}, nil
 }
 
 // Check refuses p when it is not the directory id was taken of: it
@@ -133,8 +134,8 @@ func (id DirID) Check(p string) error {
 		return fmt.Errorf("%s, a root of the session: %w", p, err)
 	case got.Real != id.Real:
 		return fmt.Errorf("%s leads to %s now, not to %s as when the session began", p, got.Real, id.Real)
-	case got.Dev != id.Dev || got.Ino != id.Ino:
-		return fmt.Errorf("%s is another directory than when the session began (that one was moved or removed)", p)
+	case got.Ino != id.Ino:
+		return fmt.Errorf("%s is another directory than when the session began: that one was moved or removed, or the filesystem gives new inode numbers on each mount (FAT, sshfs without use_ino)", p)
 	}
 	return nil
 }
@@ -200,11 +201,13 @@ func Create(m Meta) (*Session, error) {
 	// Where the workspace and $HOME lead now; apply and resume refuse
 	// them once they are other directories. A path that does not exist
 	// (a test's made-up workspace) records nothing.
+	// $HOME only when it is branched: with it read-only nothing is
+	// applied there.
 	for _, r := range []struct {
 		path string
 		id   *DirID
 	}{{m.Workspace, &m.WorkspaceID}, {m.Home, &m.HomeID}} {
-		if r.path == "" || r.id.Real != "" {
+		if r.path == "" || r.id.Real != "" || r.id == &m.HomeID && !m.OverHome {
 			continue
 		}
 		id, err := DirIDOf(r.path)

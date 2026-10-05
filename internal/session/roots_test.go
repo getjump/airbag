@@ -15,7 +15,7 @@ func TestCreateRecordsRootsAndResumeChecksThem(t *testing.T) {
 	if err := os.Mkdir(ws, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Create(Meta{Workspace: ws, Home: t.TempDir()})
+	s, err := Create(Meta{Workspace: ws, Home: t.TempDir(), OverHome: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,14 +46,23 @@ func TestCreateRecordsRootsAndResumeChecksThem(t *testing.T) {
 	}
 }
 
-// A made-up workspace that does not exist records nothing.
+// A made-up workspace that does not exist records nothing, and a $HOME
+// that is not branched (--no-home, macOS) is not recorded: nothing is
+// applied there.
 func TestCreateSkipsMissingRoot(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
-	s, err := Create(Meta{Workspace: "/nonexistent/airbag-ws", Home: t.TempDir()})
+	s, err := Create(Meta{Workspace: "/nonexistent/airbag-ws", Home: t.TempDir(), OverHome: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s.WorkspaceID.Real != "" || s.HomeID.Real == "" {
 		t.Fatalf("%+v %+v", s.WorkspaceID, s.HomeID)
+	}
+	s, err = Create(Meta{Workspace: t.TempDir(), Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.WorkspaceID.Real == "" || s.HomeID.Real != "" {
+		t.Fatalf("without a $HOME branch: %+v %+v", s.WorkspaceID, s.HomeID)
 	}
 }
