@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 func IsSplitLaunch(id string) bool { return id == "codex-yolo-split" }
@@ -179,8 +180,36 @@ func SplitCommands(in SplitCommandsIn) (SplitCommandsOut, error) {
 }
 
 func quoteTOML(value string) (string, error) {
-	encoded, err := json.Marshal(value)
-	return string(encoded), err
+	if !utf8.ValidString(value) {
+		return "", errors.New("split config requires valid UTF-8")
+	}
+	var encoded strings.Builder
+	encoded.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '"', '\\':
+			encoded.WriteByte('\\')
+			encoded.WriteRune(r)
+		case '\b':
+			encoded.WriteString(`\b`)
+		case '\t':
+			encoded.WriteString(`\t`)
+		case '\n':
+			encoded.WriteString(`\n`)
+		case '\f':
+			encoded.WriteString(`\f`)
+		case '\r':
+			encoded.WriteString(`\r`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&encoded, `\u%04x`, r)
+			} else {
+				encoded.WriteRune(r)
+			}
+		}
+	}
+	encoded.WriteByte('"')
+	return encoded.String(), nil
 }
 
 func splitConfigKey(key string) bool {

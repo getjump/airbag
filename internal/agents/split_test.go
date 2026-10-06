@@ -114,3 +114,20 @@ func TestSplitCommandsRefuseUnboundModes(t *testing.T) {
 		t.Fatalf("registry = %q, want %q", got.Registry, want)
 	}
 }
+
+func TestQuoteTOML(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"quote\" and \\ slash", `"quote\" and \\ slash"`},
+		{"line\n\tend", `"line\n\tend"`},
+		{"delete\x7f", `"delete\u007f"`},
+		{"control\x00\x1b", `"control\u0000\u001b"`},
+	} {
+		got, err := quoteTOML(tc.input)
+		if err != nil || got != tc.want {
+			t.Errorf("quoteTOML(%q) = %q, %v; want %q", tc.input, got, err, tc.want)
+		}
+	}
+	if got, err := quoteTOML("invalid\xff"); err == nil {
+		t.Fatalf("quoteTOML(invalid UTF-8) = %q, want refusal", got)
+	}
+}
