@@ -84,3 +84,40 @@ func TestRunLockHelper(t *testing.T) {
 	_, _ = os.Stdout.WriteString("LOCKED\n")
 	time.Sleep(time.Minute)
 }
+
+// On macOS the agent outlives an airbag killed under it, and so does no
+// lock or socket of the run: its recorded pid holds a resume back while
+// it lives.
+func TestResumeWaitsForTheLastRunsAgent(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := t.TempDir()
+	s, err := Create(Meta{Workspace: ws, Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = StatusStopped
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	agent := exec.CommandContext(t.Context(), "sleep", "30")
+	if err := agent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.NoteAgent(agent.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	if pid, alive := s.AgentAlive(); !alive || pid != agent.Process.Pid {
+		t.Fatalf("the running agent reads as gone: %d %t", pid, alive)
+	}
+	if _, err := Resume(s.ID, ws); err == nil || !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("resumed beside the last run's agent: %v", err)
+	}
+	_ = agent.Process.Kill()
+	_ = agent.Wait()
+	if _, alive := s.AgentAlive(); alive {
+		t.Fatal("an agent that exited reads as alive")
+	}
+	if _, err := Resume(s.ID, ws); err != nil {
+		t.Fatalf("the resume once the agent is gone: %v", err)
+	}
+}

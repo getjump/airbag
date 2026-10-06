@@ -127,7 +127,17 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	// Ctrl-C belongs to the agent, which shares the terminal here.
 	swallow(os.Interrupt, syscall.SIGQUIT)
 	defer signal.Reset(os.Interrupt, syscall.SIGQUIT)
-	err = cmd.Run()
+	// No parent-death signal here: killed, airbag leaves the agent
+	// running, so its pid is recorded for rollback and resume to wait on.
+	if err = cmd.Start(); err == nil {
+		forget, noteErr := s.NoteAgent(cmd.Process.Pid)
+		err = cmd.Wait()
+		if noteErr == nil {
+			forget()
+		} else {
+			fmt.Fprintf(os.Stderr, "airbag: warning: the agent's pid is not recorded: %v\n", noteErr)
+		}
+	}
 	code := 0
 	var ee *exec.ExitError
 	switch {

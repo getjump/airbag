@@ -695,10 +695,14 @@ func gone(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
-// runLive reports a run of s that is still going: its host services
-// answer on the control socket. Only a socket that refuses, or none, is a
-// run that ended; one that does not answer in time may be busy.
+// runLive reports a run of s that is still going: its agent is alive (on
+// macOS it can outlive airbag), or its host services answer on the
+// control socket. Only a socket that refuses, or none, is a run that
+// ended; one that does not answer in time may be busy.
 func runLive(s *session.Session) bool {
+	if _, alive := s.AgentAlive(); alive {
+		return true
+	}
 	c, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "unix", s.ControlSock())
 	switch {
 	case err == nil:
@@ -708,6 +712,11 @@ func runLive(s *session.Session) bool {
 		return false
 	}
 	return true
+}
+
+func agentAlive(s *session.Session) bool {
+	_, alive := s.AgentAlive()
+	return alive
 }
 
 // branchesOf is where each layer's changes live in s.
@@ -1028,7 +1037,7 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	// the way back to the user's versions. The lock held, no run starts
 	// under the rollback.
 	unlock, err := s.LockRun()
-	if errors.Is(err, session.ErrInUse) || err == nil && s.Status == session.StatusRunning && runLive(s) {
+	if errors.Is(err, session.ErrInUse) || err == nil && (s.Status == session.StatusRunning && runLive(s) || agentAlive(s)) {
 		if unlock != nil {
 			unlock()
 		}
