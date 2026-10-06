@@ -76,7 +76,7 @@ func optionalHostReady(backend, workspace string) error {
 	return nil
 }
 
-func prepareRuntimeWorkspace(s *session.Session) error {
+func prepareRuntimeWorkspace(ctx context.Context, s *session.Session) error {
 	if _, err := os.Lstat(s.CloneDir()); err == nil {
 		// A resumed session keeps its branch, if it is one: a copy that
 		// did not finish, or an older airbag's, is not resumed.
@@ -102,12 +102,22 @@ func prepareRuntimeWorkspace(s *session.Session) error {
 		_ = writer.CloseWithError(err)
 		done <- err
 	}()
+	// Interrupted, the copy stops where it is.
+	copied := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = reader.CloseWithError(context.Cause(ctx))
+		case <-copied:
+		}
+	}()
 	_, err := importWorkspace(s.CloneDir(), reader)
+	close(copied)
 	_ = reader.CloseWithError(err)
 	copyErr := <-done
-	if err != nil || copyErr != nil {
+	if err != nil || copyErr != nil || staged(ctx) != nil {
 		_ = os.RemoveAll(s.CloneDir())
-		return errors.Join(err, copyErr)
+		return stagedOr(ctx, errors.Join(err, copyErr))
 	}
 	s.RuntimeCopied = true
 	return s.Save()
@@ -123,7 +133,10 @@ func providerEnv() []string {
 	return []string{"PATH=" + path}
 }
 
-func runOptional(s *session.Session, ctl *control.Server) (int, error) {
+func runOptional(ctx context.Context, s *session.Session, ctl *control.Server) (int, error) {
+	if err := staged(ctx); err != nil {
+		return 1, err
+	}
 	dir := filepath.Join(s.Dir, "runtime")
 	// Nothing agent-writable is used as provider configuration or executable.
 	if err := os.RemoveAll(dir); err != nil {
@@ -149,11 +162,11 @@ func runOptional(s *session.Session, ctl *control.Server) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	cmd := exec.CommandContext(context.Background(), cp, "-a", "--reflink=auto", "--", s.Runtime.RootFS+"/.", root) //nolint:gosec // rootfsCopier's cp; operator-supplied trusted rootfs, separate from workspace
-	cmd.Args[0] = "cp"                                                                                              // a multi-call coreutils picks the program by name
+	cmd := exec.CommandContext(ctx, cp, "-a", "--reflink=auto", "--", s.Runtime.RootFS+"/.", root) //nolint:gosec // rootfsCopier's cp; operator-supplied trusted rootfs, separate from workspace
+	cmd.Args[0] = "cp"                                                                             // a multi-call coreutils picks the program by name
 	cmd.Env = providerEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return 1, fmt.Errorf("stage rootfs: %w: %s", err, out)
+		return 1, stagedOr(ctx, fmt.Errorf("stage rootfs: %w: %s", err, out))
 	}
 	r, err := os.OpenRoot(root)
 	if err != nil {
@@ -236,10 +249,13 @@ func runOptional(s *session.Session, ctl *control.Server) (int, error) {
 			return 1, err
 		}
 	}
-	if s.Backend == "gvisor" {
-		return runGVisor(s, dir, root)
+	if err := staged(ctx); err != nil {
+		return 1, err
 	}
-	return runMicroVM(s, dir, root)
+	if s.Backend == "gvisor" {
+		return runGVisor(ctx, s, dir, root)
+	}
+	return runMicroVM(ctx, s, dir, root)
 }
 
 func writeJSONFile(root *os.Root, path string, value any) error {
@@ -250,7 +266,7 @@ func writeJSONFile(root *os.Root, path string, value any) error {
 	return root.WriteFile(path, b, 0o600)
 }
 
-func runGVisor(s *session.Session, dir, root string) (int, error) {
+func runGVisor(ctx context.Context, s *session.Session, dir, root string) (int, error) {
 	mounts := []map[string]any{
 		{"destination": "/proc", "type": "proc", "source": "proc"},
 		{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
@@ -304,10 +320,10 @@ func runGVisor(s *session.Session, dir, root string) (int, error) {
 		_ = unix.Unmount(filepath.Join(dir, "state", "null-netns"), unix.MNT_DETACH|unix.UMOUNT_NOFOLLOW)
 	}()
 	args := append(append([]string{}, common...), "--platform=systrap", "--oci-seccomp", "--network=none", "--host-uds=open", "--file-access=shared", "--overlay2=none", "run", "--bundle="+dir, s.ID)
-	return executeProvider(s.Runtime.Binary, args)
+	return executeProvider(ctx, s.Runtime.Binary, args)
 }
 
-func executeProvider(binary string, args []string) (int, error) {
+func executeProvider(ctx context.Context, binary string, args []string) (int, error) {
 	cmd := exec.CommandContext(context.Background(), binary, args...) //nolint:gosec // explicitly selected trusted runtime, not a guest-supplied executable
 	cmd.Env = providerEnv()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -318,6 +334,12 @@ func executeProvider(binary string, args []string) (int, error) {
 	sigs := make(chan os.Signal, 8)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigs)
+	// The provider takes the signals over from the staging, with no gap
+	// between: one that came before is the staging's, and nothing starts.
+	endStaging(ctx)
+	if err := staged(ctx); err != nil {
+		return 1, err
+	}
 	if err := cmd.Start(); err != nil {
 		return 1, err
 	}
@@ -373,7 +395,7 @@ func rootfsCopier(workspace string) (string, error) {
 	return cp, nil
 }
 
-func ext4Image(mkfs, source, path string, size int64) error {
+func ext4Image(ctx context.Context, mkfs, source, path string, size int64) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
@@ -389,7 +411,7 @@ func ext4Image(mkfs, source, path string, size int64) error {
 	// hostTool resolved the link, and mke2fs picks the filesystem by the
 	// name it is run as: called by its own, it makes ext2. Name ext4
 	// both ways.
-	cmd := exec.CommandContext(context.Background(), mkfs, "-q", "-F", "-t", "ext4", "-d", source, path) //nolint:gosec // hostTool's mkfs.ext4, on host-owned session data; no untrusted image parsing
+	cmd := exec.CommandContext(ctx, mkfs, "-q", "-F", "-t", "ext4", "-d", source, path) //nolint:gosec // hostTool's mkfs.ext4, on host-owned session data; no untrusted image parsing
 	cmd.Args[0] = "mkfs.ext4"
 	cmd.Env = providerEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -398,7 +420,7 @@ func ext4Image(mkfs, source, path string, size int64) error {
 	return nil
 }
 
-func runMicroVM(s *session.Session, dir, root string) (int, error) {
+func runMicroVM(ctx context.Context, s *session.Session, dir, root string) (int, error) {
 	// An export a killed run left behind holds disk the images need.
 	if err := os.RemoveAll(exportStage(s)); err != nil {
 		return 1, err
@@ -408,10 +430,10 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 	if err != nil {
 		return 1, fmt.Errorf("microvm requires mkfs.ext4: %w", err)
 	}
-	if err := ext4Image(mkfs, root, rootImage, 2<<30); err != nil {
+	if err := ext4Image(ctx, mkfs, root, rootImage, 2<<30); err != nil {
 		return 1, err
 	}
-	if err := ext4Image(mkfs, s.CloneDir(), workImage, 10<<30); err != nil {
+	if err := ext4Image(ctx, mkfs, s.CloneDir(), workImage, 10<<30); err != nil {
 		return 1, err
 	}
 	sock := filepath.Join(s.Dir, "v.sock")
@@ -468,7 +490,7 @@ func runMicroVM(s *session.Session, dir, root string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	code, err := executeProvider(s.Runtime.Binary, []string{"--no-api", "--config-file", filepath.Join(dir, "firecracker.json")})
+	code, err := executeProvider(ctx, s.Runtime.Binary, []string{"--no-api", "--config-file", filepath.Join(dir, "firecracker.json")})
 	if err != nil || code != 0 {
 		return vmmFailed(im, code, err)
 	}

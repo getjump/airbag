@@ -69,9 +69,13 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if optional && UsesRuntimePolicies(s) {
 		return fail(fmt.Errorf("session %s asks for runtime policy options, which %s does not run", s.ID, s.Backend))
 	}
+	ctx := context.Background()
 	if optional {
-		if err := prepareRuntimeWorkspace(s); err != nil {
-			return stopFailed(s, 1, err)
+		var done func()
+		ctx, done = stage()
+		defer done()
+		if err := prepareRuntimeWorkspace(ctx, s); err != nil {
+			return stopFailed(s, exitCode(err), err)
 		}
 	}
 	// An optional runtime's agent works in the clone; control requests
@@ -90,8 +94,11 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	defer func() { _ = host.Close() }()
 
 	if optional {
-		code, err := runOptional(s, host.ctl)
+		code, err := runOptional(ctx, s, host.ctl)
 		if err != nil {
+			if e := staged(ctx); e != nil {
+				code = exitCode(e)
+			}
 			return stopFailed(s, code, err)
 		}
 		return code, stop(s, code)

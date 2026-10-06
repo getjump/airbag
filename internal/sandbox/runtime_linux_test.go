@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -44,7 +45,7 @@ func TestExt4ImageIsExt4(t *testing.T) {
 		t.Skip("no dumpe2fs")
 	}
 	img := filepath.Join(t.TempDir(), "work.ext4")
-	if err := ext4Image(mkfs, src, img, 16<<20); err != nil {
+	if err := ext4Image(context.Background(), mkfs, src, img, 16<<20); err != nil {
 		t.Fatal(err)
 	}
 	out, err := exec.CommandContext(t.Context(), dumpe2fs, "-h", img).CombinedOutput() //nolint:gosec // the test's own image
@@ -68,7 +69,7 @@ func TestRecopyClearsTheMark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareRuntimeWorkspace(s); err == nil {
+	if err := prepareRuntimeWorkspace(context.Background(), s); err == nil {
 		t.Fatal("copied a workspace with a FIFO")
 	}
 	saved, err := session.Load(s.Dir)
@@ -133,7 +134,7 @@ func TestProviderGetsTheSignals(t *testing.T) {
 	}
 	for _, sig := range []string{"INT", "QUIT", "TERM", "HUP"} {
 		script := "trap 'exit 7' " + sig + "; kill -" + sig + " $PPID; while :; do sleep 0.05; done"
-		code, err := executeProvider(sh, []string{"-c", script})
+		code, err := executeProvider(context.Background(), sh, []string{"-c", script})
 		if err != nil || code != 7 {
 			t.Errorf("SIG%s: code %d, %v", sig, code, err)
 		}
