@@ -54,7 +54,7 @@ func buildVersion(v string, info func() (*debug.BuildInfo, bool)) string {
 
 const usage = `airbag — approve outcomes, not commands
 
-  airbag codex yolo [airbag flags] -- [codex arguments]
+  airbag codex yolo [--execution=split] [airbag flags] -- [codex arguments]
       macOS: private agent state and server; no shared host daemon
   airbag run [--allow HOST]... [--no-home] [--session ID|last] -- AGENT [ARGS...]
       run the agent in a branch of the workspace and $HOME (--session: on the
@@ -128,6 +128,16 @@ func main() {
 	var err error
 	code := 0
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
+	case "__airbag_exec_connect":
+		if len(args) != 1 {
+			err = errors.New("private executor bridge requires one socket")
+			code = 2
+		} else {
+			err = agents.ExecConnect(context.Background(), args[0])
+			if err != nil {
+				code = 1
+			}
+		}
 	case "run":
 		code, err = cmdRun(args)
 	case "review", "status":
@@ -742,6 +752,9 @@ func cmdDiscard(args []string) error {
 	_ = fs.Parse(reorder(args))
 	s, err := findSession(fs.Arg(0))
 	if err != nil {
+		return err
+	}
+	if err := s.CheckExecutorStopped(); err != nil {
 		return err
 	}
 	if s.Status == session.StatusRunning {

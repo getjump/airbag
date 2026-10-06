@@ -168,7 +168,9 @@ c=socket.socket(socket.AF_UNIX)
 try: c.connect(sys.argv[1]); print("sock-reachable")
 except OSError: print("sock-blocked")'
 	out=$("$AIRBAG" run -- python3 -c "$probe" "$sock" 2>/dev/null)
-	printf '%s\n' "$out" | grep -q sock-reachable || fail "baseline: host socket not reachable without hide: $out"
+	baseline='sock-reachable'
+	[ -z "$mac" ] || baseline='sock-blocked'
+	printf '%s\n' "$out" | grep -q "$baseline" || fail "baseline: expected $baseline without hide: $out"
 	"$AIRBAG" discard --yes >/dev/null
 	printf 'hide: ["%s"]\n' "$sock" > airbag.yaml
 	out=$("$AIRBAG" run -- python3 -c "$probe" "$sock" 2>/dev/null)

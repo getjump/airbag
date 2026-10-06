@@ -26,6 +26,13 @@ through `CODEX_HOME`, with only the file-based login copied on the first
 run. Generic runs and Claude Code still use the prototype's original
 state rules. Reviewing and applying private agent settings remains deferred.
 
+The opt-in `--execution=split` launcher now binds new Codex 0.160.1 TUI
+conversations to a private executor. Resume/fork, more versions and crash
+recovery remain deferred: they need validated remote conversation binding
+and a way to prove all executor children have stopped, even when the
+executor dies before closing them. Today an unconfirmed shutdown quarantines
+the session instead of trusting a released file lock.
+
 | Item | Why not now | What would bring it back |
 |---|---|---|
 | `~/.claude.json` review on macOS | The macOS prototype has no branch of `$HOME`, so the file stays writable in place and persists in full; reviewing it by key needs a branch | A branch of `$HOME` on macOS (the NFS overlay in docs/macos.md) |

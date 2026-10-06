@@ -137,6 +137,9 @@ func changedInside(dir string, since func(string) time.Time) string {
 }
 
 func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) error {
+	if err := s.CheckExecutorStopped(); err != nil {
+		return err
+	}
 	last, err := lastGeneration(s)
 	if err != nil {
 		return fmt.Errorf("nothing applied: %w; until it can be read, it is not known whether the last apply or rollback finished: copy what you need from the saved/ directory beside it, then `airbag discard --force %s`", err, s.ID)

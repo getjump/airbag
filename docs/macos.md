@@ -196,6 +196,63 @@ verifier may then fail. Generic `airbag run` keeps trustd blocked unless
 explicitly enabled. The option only grants the trust service, not a Codex
 daemon socket or unrestricted TCP access.
 
+### Experimental split execution
+
+```console
+$ airbag codex yolo --execution=split
+$ airbag codex yolo --execution=split -- -m MODEL "Fix the failing test"
+```
+
+This opt-in mode requires exactly Codex 0.160.1. It supports new interactive
+conversations; Codex `exec`, `resume`, `fork` and airbag `--session` reuse are
+refused. Model, provider and reasoning settings may be passed after `--`;
+other config overrides and launch modes are refused. There is no fallback
+to local execution or to the shared host daemon.
+
+airbag starts a private `exec-server` under the workspace's Seatbelt profile.
+A private app-server and TUI use a second Seatbelt profile: they cannot read
+or write the clone, original workspace or executor's private state. They
+have their own login copy and state below the session's `control` directory,
+which the executor cannot access. Neither profile grants the shared host
+daemon socket. Both keep the session's network policy and trustd setting.
+
+The coordinator's environment registry excludes local execution. A private
+Unix WebSocket bridge binds each new thread and turn to the prestarted
+executor and canonical clone path. Unknown RPCs, local command APIs and
+conversation restore APIs are refused. Hooks, plugins, apps and home MCP
+settings are disabled; project config is not loaded by the coordinator.
+This mode is intended for the remote executor's file and command tools,
+not arbitrary host integrations.
+
+Shutdown is part of the boundary. Codex puts commands in separate process
+groups and closes the inherited airbag lock descriptor in them. Killing
+the executor can therefore leave a command writing to the clone after
+`agent.lock` becomes free. Before starting it, airbag writes
+`executor.active` outside both profiles' writable paths. Only a confirmed
+successful executor exit after normal stdin EOF removes it. A crash,
+forced termination or unconfirmed shutdown leaves the session quarantined:
+apply (including `--branch`), rollback, discard (including `--force`) and
+resume refuse. Review remains available. There is no automatic recovery or
+unlock command; the marker must stay until an operator has established
+that no executor command survives. This conservative failure mode is a
+limit of the experiment.
+
+`test/codex-split-e2e.sh` drives the real pinned TUI with a mock model and
+an already running, separate fixture daemon. It checks clone-only writes,
+normal EOF with an active command, executor SIGKILL with a surviving writer
+and free lock, and airbag SIGKILL. The crash cases check that all mutating
+operations refuse and that the fixture daemon stays alive. No real login
+or user daemon is used by these tests.
+
+On macOS 26.6.2 arm64, the full unit and race suites, static checks,
+supported session e2e tests, daemon and split regressions, and a live Codex
+API smoke test passed. `test/ctrlc.py` also checks the macOS shared terminal,
+resize and Ctrl-C exit status. The host socket test now runs on macOS CI;
+Seatbelt blocks that socket even before an explicit `hide` rule.
+The macprobe NFS checks N2/N3 still fail and T1 requires trustd; they do
+not gate the APFS clone backend. The prototype's remaining limits above
+still apply.
+
 Because the prototype has no branch of `$HOME`, the narrowing that keeps agent
 state out of the real files on Linux cannot be expressed in full by the Seatbelt
 profile. What it does express: writing any project's `memory/` is denied, as are

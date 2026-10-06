@@ -6,6 +6,7 @@ require (
 	cel.dev/cel-go v0.32.0
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/charmbracelet/x/vt v0.0.0-20261004011457-ad85c59fdf4e
+	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/cyphar/filepath-securejoin v0.7.0
 	github.com/go-git/go-billy/v5 v5.9.2
