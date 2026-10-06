@@ -165,35 +165,39 @@ func TestOptionalResumeRefusesASecretInTheCopy(t *testing.T) {
 	}
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := t.TempDir()
-	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Backend: "gvisor"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.Status = session.StatusStopped
-	if err := s.Save(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(s.CloneDir(), "app"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(s.CloneDir(), "app", "main.go"), []byte("package main"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	gvisor, err := sandbox.SelectBackend("gvisor", "any")
 	if err != nil {
 		t.Fatal(err)
 	}
-	resume := func() error {
+	// A stopped session whose copy holds a source file.
+	stopped := func() *session.Session {
+		s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Backend: "gvisor"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Status = session.StatusStopped
+		if err := s.Save(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(s.CloneDir(), "app"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(s.CloneDir(), "app", "main.go"), []byte("package main"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	resume := func(s *session.Session) error {
 		_, err := session.ResumeChecked(s.ID, ws, func(s *session.Session) error { return validateRuntimeResume(s, gvisor) })
 		return err
 	}
-	if err := resume(); err != nil {
+	// A resume that goes through holds the session's run lock until this
+	// process ends, so it gets a session of its own; a refused one lets
+	// the lock go.
+	if err := resume(stopped()); err != nil {
 		t.Fatalf("a copy without secret files is refused: %v", err)
 	}
-	s.Status = session.StatusStopped
-	if err := s.Save(); err != nil {
-		t.Fatal(err)
-	}
+	s := stopped()
 	if err := os.WriteFile(filepath.Join(s.CloneDir(), "app", ".env"), []byte("TOKEN=x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +205,7 @@ func TestOptionalResumeRefusesASecretInTheCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := resume(); err == nil || !strings.Contains(err.Error(), filepath.Join("app", ".env")) {
+	if err := resume(s); err == nil || !strings.Contains(err.Error(), filepath.Join("app", ".env")) {
 		t.Fatalf("a secret file in the copy is not refused: %v", err)
 	}
 	if after, err := os.ReadFile(filepath.Join(s.Dir, "meta.json")); err != nil || !bytes.Equal(before, after) {
@@ -232,7 +236,7 @@ func TestOptionalResumeRefusesASecretInTheCopy(t *testing.T) {
 	if os.Geteuid() == 0 {
 		want = "holds a secret file"
 	}
-	if err := resume(); err == nil || !strings.Contains(err.Error(), want) {
+	if err := resume(s); err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("a directory the check cannot read: %v, want %q", err, want)
 	}
 	// Without a copy, run makes one from the checked workspace.
@@ -242,7 +246,7 @@ func TestOptionalResumeRefusesASecretInTheCopy(t *testing.T) {
 	if err := os.RemoveAll(s.CloneDir()); err != nil {
 		t.Fatal(err)
 	}
-	if err := resume(); err != nil {
+	if err := resume(s); err != nil {
 		t.Fatalf("a session without a copy is refused: %v", err)
 	}
 }

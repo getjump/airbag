@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/getjump/airbag/internal/apply"
 	"github.com/getjump/airbag/internal/control"
@@ -372,6 +373,14 @@ func cmdRun(args []string) (int, error) {
 		s, err = session.Create(meta)
 		if err != nil {
 			return 1, err
+		}
+		// A new run holds its session's run lock as a resumed one does,
+		// until this process ends: on macOS the agent lock is taken under
+		// it, where a rollback's check of that lock cannot meet it.
+		if err := lockNewRun(s); err != nil {
+			s.Status, s.Ended = session.StatusStopped, time.Now()
+			_ = s.Save()
+			return 1, fmt.Errorf("session %s: take its run lock: %w", s.ID, err)
 		}
 	}
 	// The default boundary adds no line to run's output; one asked for, or
@@ -818,4 +827,17 @@ func cmdList() error {
 		fmt.Fprintf(out, "%s  %-9s %s  %-30s %s\n", s.ID, s.Status, s.Created.Format("2006-01-02 15:04"), s.Workspace, strings.Join(s.Argv, " "))
 	}
 	return nil
+}
+
+// lockNewRun takes a new session's run lock. Nothing else knows the
+// session yet, but a rollback picks the newest one by default and holds
+// the lock for the moment it takes to find nothing to roll back.
+func lockNewRun(s *session.Session) error {
+	for i := 0; ; i++ {
+		_, err := s.LockRun()
+		if err == nil || i == 50 || !errors.Is(err, session.ErrInUse) && !errors.Is(err, session.ErrAgentLives) {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

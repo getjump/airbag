@@ -1,6 +1,8 @@
 package apply
 
 import (
+	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -54,11 +57,12 @@ type genEntry struct {
 
 type generation struct {
 	dir      string
-	roots    roots     // checked before each change; not kept in the journal
-	Clone    bool      `json:"clone,omitempty"` // the branch is a full copy, not an upper layer
-	Session  string    `json:"session"`
-	Started  time.Time `json:"started"`
-	Complete bool      `json:"complete"`
+	roots    roots             // checked before each change; not kept in the journal
+	branches map[string]string // each layer's root in the session, all a rollback writes to; not kept either
+	Clone    bool              `json:"clone,omitempty"` // the branch is a full copy, not an upper layer
+	Session  string            `json:"session"`
+	Started  time.Time         `json:"started"`
+	Complete bool              `json:"complete"`
 	// Partial: rolled back except Entries, which were left as they were;
 	// their previous versions are kept under saved/.
 	Partial bool `json:"partial,omitempty"`
@@ -104,7 +108,7 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	// one, so a numbered directory without one is a journal lost, never a
 	// crash before the first write. A crash leaves only the .new.
 	final := filepath.Join(root, strconv.Itoa(n))
-	g := &generation{dir: fmt.Sprintf("%s.%d.new", final, time.Now().UnixNano()), roots: rootsOf(s), Session: s.ID, Started: time.Now(), Clone: s.Clone}
+	g := &generation{dir: fmt.Sprintf("%s.%d.new", final, time.Now().UnixNano()), roots: rootsOf(s), branches: branchesOf(s), Session: s.ID, Started: time.Now(), Clone: s.Clone}
 	if err := os.MkdirAll(filepath.Join(g.dir, "saved"), 0o700); err != nil {
 		return nil, err
 	}
@@ -408,7 +412,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			if err := held(); err != nil {
 				return stop(i, err)
 			}
-			if err := giveBack(e, g.Clone); err != nil {
+			if err := giveBack(e, g.Clone, g.branches[e.Layer]); err != nil {
 				return stop(i, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err))
 			}
 			// Journal first, as apply does: from the removal below to the
@@ -621,7 +625,7 @@ func applyTemp(p string, d fs.DirEntry, copying map[string]bool) bool {
 func removeTemps(dir string, copying map[string]bool) {
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && applyTemp(p, d, copying) {
-			_ = os.Remove(p) //nolint:gosec // the rollback runs after the session stopped: nothing from the sandbox can swap a path during the walk
+			_ = os.Remove(p) //nolint:gosec // in the user's tree, which the agent cannot write; Rollback refuses a live run
 		}
 		return nil
 	})
@@ -691,46 +695,148 @@ func gone(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
+// runLive reports a run of s that is still going: its host services
+// answer on the control socket. Only a socket that refuses, or none, is a
+// run that ended; one that does not answer in time may be busy.
+func runLive(s *session.Session) bool {
+	c, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "unix", s.ControlSock())
+	switch {
+	case err == nil:
+		_ = c.Close()
+		return true
+	case errors.Is(err, syscall.ECONNREFUSED), errors.Is(err, fs.ErrNotExist):
+		return false
+	}
+	return true
+}
+
+// branchesOf is where each layer's changes live in s.
+func branchesOf(s *session.Session) map[string]string {
+	return map[string]string{"ws": s.WSBranch(), "home": s.HomeUpper()}
+}
+
 // giveBack puts the agent's version of an applied path back into the
-// session's upper layer: the file itself, or a whiteout for a deletion.
-func giveBack(e genEntry, clone bool) error {
-	if _, err := os.Lstat(e.Upper); err == nil {
+// session's branch: the file itself, or a whiteout for a deletion. Since
+// the apply took that version out, the agent may have made any path in
+// its branch a link (in a run resumed after a partial apply, say), and
+// through one to a host directory the version would land there, never
+// reviewed. So every write goes through branch, the layer's root in the
+// session, opened as an os.Root: a link that leads out of it is refused.
+func giveBack(e genEntry, clone bool, branch string) error {
+	// The path comes from the layer's root and Rel, as the scan made
+	// Upper, not from the journal's copy of it.
+	rel := filepath.Clean(e.Rel)
+	if branch == "" || rel == "." || !filepath.IsLocal(rel) {
+		return fmt.Errorf("%s: no place in the session's branch %q", e.Rel, branch)
+	}
+	// The branch is checked even where nothing is written: a rollback of
+	// deletions only stops at a branch that is a link as well.
+	r, err := openBranch(branch)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Close() }()
+	if clone && e.Kind == review.Deleted {
+		// Absent from the clone is what a deletion is, and what is at
+		// the path now is the agent's: nothing to write. The path is
+		// still looked up through the root, so a directory on the way
+		// made a link out of the branch stops the rollback here too.
+		if _, err := r.Lstat(rel); err != nil && !gone(err) {
+			return err
+		}
+		return nil
+	}
+	switch _, err := r.Lstat(rel); {
+	case err == nil:
 		// Still there: the change was never forgotten, or, for a
 		// replaced directory, a path inside it given back first made
 		// it, without the mark.
 		if !clone && e.Type == fs.ModeDir && e.Kind == review.Replaced {
-			markOpaque(e.Upper)
+			return markOpaqueIn(r, rel)
 		}
 		return nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return err // a link out of the branch on the way, among others
 	}
-	if clone && e.Kind == review.Deleted {
-		return nil // absent from the clone is what a deletion is
-	}
-	if err := os.MkdirAll(filepath.Dir(e.Upper), 0o755); err != nil { //nolint:gosec // a directory of the session's upper layer, inside the 0700 session dir
+	if err := r.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
 		return err
 	}
 	switch {
 	case e.Kind == review.Deleted:
 		// overlayfs's whiteout: a 0:0 character device (unprivileged
-		// since Linux 5.8).
-		return unix.Mknod(e.Upper, syscall.S_IFCHR, 0)
+		// since Linux 5.8), made in the directory the root opened.
+		dir, err := r.Open(filepath.Dir(rel))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = dir.Close() }()
+		if err := whiteoutAt(dir, filepath.Base(rel)); !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		return nil // the agent's own, made since
 	case e.Type == fs.ModeDir:
-		if err := os.MkdirAll(e.Upper, 0o755); err != nil { //nolint:gosec // a directory of the session's upper layer, inside the 0700 session dir
+		if err := r.MkdirAll(rel, 0o755); err != nil {
 			return err
 		}
 		if e.Kind == review.Replaced {
-			markOpaque(e.Upper)
+			return markOpaqueIn(r, rel)
 		}
 		return nil
 	default:
-		return copyTree(e.Path, e.Upper)
+		return copyTreeIn(r, e.Path, rel)
 	}
 }
 
-// markOpaque makes dir opaque again: the directory replaces the real
-// one, and the session shows none of what the real one holds.
-func markOpaque(dir string) {
-	_ = unix.Setxattr(dir, "user.overlay.opaque", []byte("y"), 0)
+// openBranch opens branch as an os.Root, which follows links in the
+// name it is given: on macOS the agent may write the clone's own entry
+// in the session, so a link put there would lead every write elsewhere.
+// The branch must be a directory itself, and the one opened.
+func openBranch(branch string) (*os.Root, error) {
+	fi, err := os.Lstat(branch)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("%s, the session's branch, is not a directory", branch)
+	}
+	r, err := os.OpenRoot(branch)
+	if err != nil {
+		return nil, err
+	}
+	if got, err := r.Stat("."); err != nil || !os.SameFile(fi, got) {
+		_ = r.Close()
+		return nil, fmt.Errorf("%s, the session's branch, changed while it was opened", branch)
+	}
+	return r, nil
+}
+
+// markOpaqueIn makes rel in r opaque again: the directory replaces the
+// real one, and the session shows none of what the real one holds. It is
+// best effort: what the agent left at rel that is not a directory (a
+// file, a FIFO, a whiteout) gets no mark and stops nothing. Only a path
+// that leads out of r is refused.
+func markOpaqueIn(r *os.Root, rel string) error {
+	fi, err := r.Lstat(rel)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return nil
+	}
+	dir, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		// Best effort: unreadable, or no longer a directory. Nothing
+		// was written.
+		return nil
+	}
+	defer func() { _ = dir.Close() }()
+	// os.Root follows a link at rel, whatever the flags: one put there
+	// since the lstat would have the mark set on another directory.
+	if got, err := dir.Stat(); err != nil || !os.SameFile(fi, got) {
+		return nil
+	}
+	_ = unix.Fsetxattr(int(dir.Fd()), "user.overlay.opaque", []byte("y"), 0)
+	return nil
 }
 
 // clearOpaque makes dir an ordinary directory of the upper layer: what
@@ -800,12 +906,91 @@ func copyTree(from, to string) error {
 			if err != nil {
 				return err
 			}
-			return os.Symlink(t, dst) //nolint:gosec // copies run after the session stopped: nothing from the sandbox can swap a path during the walk
+			return os.Symlink(t, dst) //nolint:gosec // into the generation's saved/, which the agent cannot reach; apply refuses a running session
 		case info.Mode().IsRegular():
 			return copyFile(p, dst, info.Mode().Perm())
 		}
 		return nil // sockets, devices: nothing to keep
 	})
+}
+
+// copyTreeIn is copyTree into r: from is a path of the real tree, to is
+// relative to r, and nothing is written outside r.
+func copyTreeIn(r *os.Root, from, to string) error {
+	return filepath.WalkDir(from, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(from, p)
+		dst := filepath.Join(to, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir():
+			return r.MkdirAll(dst, info.Mode().Perm())
+		case info.Mode()&fs.ModeSymlink != 0:
+			t, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			if err := r.Symlink(t, dst); !errors.Is(err, fs.ErrExist) {
+				return err
+			}
+			return nil // the agent's own, made since
+		case info.Mode().IsRegular():
+			return copyFileIn(r, p, dst, info.Mode().Perm())
+		}
+		return nil // sockets, devices: nothing to keep
+	})
+}
+
+// copyFileIn is copyFile into r: a temp file next to dst, renamed over
+// it once whole, so a crash leaves no half a version at dst.
+func copyFileIn(r *os.Root, src, dst string, mode fs.FileMode) error {
+	if err := r.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }() // read only
+	tmp := filepath.Join(filepath.Dir(dst), ".airbag-"+rand.Text())
+	f, err := r.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Remove(tmp) }() // gone after the rename
+	if _, err := io.Copy(f, in); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// Whole on disk before its name says it is there: after a power
+	// loss, an empty file at dst would pass for the agent's version.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	dir, err := r.Open(filepath.Dir(dst))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	// Not over dst: an agent still running may have put a version of its
+	// own there since giveBack found the path empty, and that one stays.
+	if err := renameNoReplace(dir, filepath.Base(tmp), filepath.Base(dst)); !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	return nil
 }
 
 // Held is the user's version of Path from before an apply, which only
@@ -842,6 +1027,30 @@ func HeldVersions(s *session.Session) ([]Held, error) {
 // versions back, the agent's versions return to the session. A pushed
 // intent is not undone; Rollback lists those.
 func Rollback(s *session.Session, done []string, out io.Writer) error {
+	// During a live run the agent could change its branch under the
+	// rollback, read a version it puts back before the run's own guards
+	// cover it, and the run and the rollback would each save the session
+	// over the other. A resumed run holds the session's run lock from
+	// before it marks the session running, and on macOS its agent holds
+	// the agent lock, which can outlive airbag; the control socket
+	// answers for a run of an airbag that took neither. A running mark
+	// that a killed run left (the locks free, nothing answering) holds
+	// nothing up: rollback is the way back to the user's versions. The
+	// lock held, no run starts under the rollback.
+	unlock, err := s.LockRun()
+	switch {
+	case errors.Is(err, session.ErrInUse):
+		return fmt.Errorf("session %s is running, or another rollback is; roll back once it has ended", s.ID)
+	case errors.Is(err, session.ErrAgentLives):
+		return fmt.Errorf("session %s: %w (on macOS one can outlive airbag; lsof %s finds it); roll back once it has ended", s.ID, err, s.AgentLockPath())
+	case err != nil:
+		return err
+	}
+	if s.Status == session.StatusRunning && runLive(s) {
+		unlock()
+		return fmt.Errorf("session %s is running; roll back once its run has ended", s.ID)
+	}
+	defer unlock()
 	gs, err := listGenerations(s)
 	if err != nil {
 		return err
@@ -856,7 +1065,7 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	g.roots = rootsOf(s)
+	g.roots, g.branches = rootsOf(s), branchesOf(s)
 	n, partial := len(g.Entries), g.Partial
 	left, err := g.rollback(out)
 	if err != nil {
@@ -869,12 +1078,21 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	// partial one sets right a session that crash left applied.
 	// Setting it right resets the baseline too: the save that would
 	// have was lost with the crash.
-	save := !partial
-	if s.Status == session.StatusApplied {
+	// A running mark the checks above found dead (a run killed after a
+	// partial apply) goes as well: kept, it would hold run --session,
+	// apply and discard off for good. It moves no baseline: only a
+	// rollback that is not a partial one's retry does.
+	save, rebase := !partial, !partial
+	switch s.Status {
+	case session.StatusApplied:
+		s.Status, save, rebase = session.StatusStopped, true, true
+	case session.StatusRunning:
 		s.Status, save = session.StatusStopped, true
 	}
 	if save {
-		s.Baseline = time.Now()
+		if rebase {
+			s.Baseline = time.Now()
+		}
 		if err := s.Save(); err != nil {
 			return err
 		}
