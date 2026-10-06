@@ -61,6 +61,11 @@ func TestEgressIsReportedAsThePlatformOpensIt(t *testing.T) {
 			t.Fatalf("%s: the compiled report says %s", c.platform, b.Egress)
 		}
 	}
+	for _, l := range sharedLimitations {
+		if !slices.Contains(nativeBackend("linux").Limitations, l) {
+			t.Fatalf("native drops the shared limit %q", l)
+		}
+	}
 	mentions := func(b Backend, flag string) bool {
 		return slices.ContainsFunc(b.Limitations, func(l string) bool { return strings.Contains(l, flag) })
 	}

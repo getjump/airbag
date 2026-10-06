@@ -51,7 +51,7 @@ done <<'REFUSALS'
 --require-isolation=virtual-machine|but virtual-machine was required (no fallback)
 --require-isolation=application-kernel|but application-kernel was required (no fallback)
 --require-isolation=typo|unknown isolation requirement "typo"
---backend=microvm|execution backend "microvm" is unavailable
+--backend=microvm|microvm requires --no-home
 --backend=typo|execution backend "typo" is unavailable
 REFUSALS
 

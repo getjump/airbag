@@ -78,17 +78,34 @@ func Open(workspace string) []File {
 
 // Find lists the workspace's secret files, relative to it.
 func Find(workspace string) []string {
+	out, _ := find(workspace, false)
+	return out
+}
+
+// FindAll is Find for a tree the agent owns, an optional runtime's copy:
+// a part the walk cannot read is an error, not a part without secrets,
+// since the agent can make it readable again (chmod) and read below.
+func FindAll(tree string) ([]string, error) { return find(tree, true) }
+
+func find(workspace string, strict bool) ([]string, error) {
 	// A walk does not enter a root that is a link (a workspace named
 	// through one), so it starts where the link leads: otherwise every
 	// secret file there would be missed, and served to the agent as is.
 	root := workspace
 	if r, err := filepath.EvalSymlinks(workspace); err == nil {
 		root = r
+	} else if strict {
+		return nil, err
 	}
 	var out []string
-	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil //nolint:nilerr // the walk has at least the agent's rights: what it cannot read, the agent cannot either
+			if strict {
+				return err
+			}
+			// The walk has at least the agent's rights: what it cannot
+			// read, the agent cannot either.
+			return nil
 		}
 		if d.IsDir() {
 			if p != root && skipDir(d.Name()) {
@@ -100,6 +117,9 @@ func Find(workspace string) []string {
 			return nil
 		}
 		st, err := os.Lstat(p)
+		if err != nil && strict && !os.IsNotExist(err) {
+			return err
+		}
 		if err != nil || !st.Mode().IsRegular() {
 			return nil //nolint:nilerr // a file gone since the walk listed it has nothing to serve
 		}
@@ -108,7 +128,7 @@ func Find(workspace string) []string {
 		}
 		return nil
 	})
-	return out
+	return out, err
 }
 
 type root struct {

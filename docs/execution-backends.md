@@ -13,17 +13,22 @@ profile allows no Nix socket), and `+tcp-forward` for `--allow tcp://HOST:PORT`
 macOS the agent connects to a port on this machine directly). HiddenHost is
 fixed when the session is created; a resume can add forwards. `run` prints
 backend, isolation and egress when one of them is not the default: another
-backend, a requirement, or a path around the proxy.
+backend, a requirement, or a path around the proxy. The optional runtimes
+refuse `--nix-daemon` and forwards and mount no host socket, so their egress
+is the proxy.
 
-Only `--backend=native` is implemented. Linux uses namespaces, overlayfs and
+`--backend=native` is the default. Linux uses namespaces, overlayfs and
 seccomp; macOS uses Seatbelt and a workspace clone. Both share the host
 kernel. macOS has no HOME branch. Linux's HOME branch can be disabled with
 `--no-home`; the capability describes support, not an individual session.
+Linux also has experimental `--backend=gvisor` (application kernel) and
+`--backend=microvm` (Firecracker), with an isolated workspace profile and
+operator-supplied runtime artifacts: [runtime-options.md](runtime-options.md).
 
 ```sh
 airbag capabilities --json
 airbag run --backend=native --require-isolation=shared-kernel -- claude
-airbag run --require-isolation=virtual-machine -- claude # refused before session creation
+airbag run --require-isolation=virtual-machine -- claude # native: refused before session creation
 ```
 
 The named boundaries are `shared-kernel`, `application-kernel`, and
@@ -41,8 +46,8 @@ and `capabilities --json` through the installed CLI.
 The execution backend owns starting, isolating, stopping and exporting a
 workspace. The host owns policy decisions, real service credentials,
 approvals, durable effect requests/results and importing reviewed changes.
-These responsibilities are a design constraint for an implementation, not a
-claim that a microVM backend exists today.
+The optional runtimes follow this split ([runtime-options.md](runtime-options.md));
+it is a design constraint, not an attestation of either one.
 
 An application kernel or guest kernel does not enforce semantic API scope.
 For example, a token permitted to reach GitHub may still modify an unintended
