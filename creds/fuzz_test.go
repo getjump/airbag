@@ -152,3 +152,25 @@ func TestMaskBodyEmptyValue(t *testing.T) {
 		t.Fatal("reading a body masked for an empty value never returned")
 	}
 }
+
+// A credential on *.example.com goes only to a name ending in
+// .example.com, written without brackets: a bracket holds an IP
+// literal, which no such name is.
+func FuzzForHost(f *testing.F) {
+	for _, h := range []string{"a.example.com", "a.example.com:443", "A.Example.com.:0443", "a.example.com[", "[a.example.com]", "[a.example.com]:443", "a.example.com]", "example.com", "[::1]:443", "].eXAmple.Com"} {
+		f.Add(h)
+	}
+	s := Set{&Live{Name: "g", Hosts: []string{"*.example.com"}, Value: "realvalue-1234567890", Placeholder: "fakevalue-0987654321"}}
+	f.Fuzz(func(t *testing.T, h string) {
+		if s.For(h) == nil {
+			return
+		}
+		name := h
+		if i := strings.LastIndexByte(h, ':'); i >= 0 {
+			name = h[:i]
+		}
+		if strings.ContainsAny(h, "[]") || !strings.HasSuffix(strings.ToLower(strings.TrimSuffix(name, ".")), ".example.com") {
+			t.Fatalf("For(%q) gave the *.example.com credential", h)
+		}
+	})
+}

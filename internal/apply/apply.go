@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/getjump/airbag/internal/links"
 	"github.com/getjump/airbag/internal/review"
 	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
@@ -136,21 +137,37 @@ func changedInside(dir string, since func(string) time.Time) string {
 }
 
 func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) error {
+	last, err := lastGeneration(s)
+	if err != nil {
+		return fmt.Errorf("nothing applied: %w; until it can be read, it is not known whether the last apply or rollback finished: copy what you need from the saved/ directory beside it, then `airbag discard --force %s`", err, s.ID)
+	}
+	// Some real files rolled back and some not: no change, and no intent
+	// (a push, a command), runs on such a tree.
+	if last != nil && last.Stopped {
+		return fmt.Errorf("a rollback of session %s stopped part way; run `airbag rollback %s` to finish it (put back a directory that moved first), then apply again", s.ID, s.ID)
+	}
+	// An apply that did not finish left the real files half applied:
+	// nothing more goes on them, nor onto a branch from a session in that
+	// state.
+	if last != nil && !last.Complete {
+		return fmt.Errorf("an apply of session %s started %s did not finish; run `airbag rollback %s` to undo its part, then apply again",
+			s.ID, last.Started.Format("15:04:05"), s.ID)
+	}
 	if o.Branch != "" {
 		if err := ApplyBranch(s, cs, o.Branch, o); err != nil {
 			return err
 		}
 		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
 	}
-	if g := interrupted(s); g != nil {
-		return fmt.Errorf("an apply of session %s started %s did not finish; run `airbag rollback %s` to undo its part, then apply again",
-			s.ID, g.Started.Format("15:04:05"), s.ID)
-	}
 	if s.Status == session.StatusApplied {
 		return runIntents(s, box, s.GitTouched, bufio.NewReader(o.In), o)
 	}
 	if s.Status == session.StatusRunning {
 		return fmt.Errorf("session %s is still running", s.ID)
+	}
+	// Before conflicts are read from what may be another tree.
+	if err := rootsOf(s).all(); err != nil {
+		return fmt.Errorf("nothing applied: %w; put the directory back or discard the session", err)
 	}
 	in := bufio.NewReader(o.In)
 	// What review folds in $HOME (caches, agent state) is left out: the
@@ -160,17 +177,11 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 	// with it (~/.claude rebuilt): applying the replacement takes the
 	// host's directory away. A cache there is left out all the same; the
 	// host's copy goes to the undo journal with the rest.
-	var replaced []string
-	for _, c := range cs {
-		if c.Kind == review.Replaced && c.IsDir() && !review.Dropped(c) {
-			replaced = append(replaced, c.Path+string(filepath.Separator))
-		}
-	}
+	leftOut := review.LeftOut(cs)
 	var kept []review.Change
 	dropped := 0
 	for _, c := range cs {
-		under := review.DroppedState(c) && slices.ContainsFunc(replaced, func(r string) bool { return strings.HasPrefix(c.Path, r) })
-		if review.Dropped(c) && !under && !homeMatches(c, o.Only, s.Home) {
+		if leftOut(c) && !homeMatches(c, o.Only, s.Home) {
 			dropped++
 			continue
 		}
@@ -204,7 +215,11 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 			replacing = append(replacing, c.Path)
 		}
 	}
+	rs := rootsOf(s)
 	for _, c := range picked {
+		if err := rs.held(c.Layer, c.Path, c.Rel); err != nil {
+			return fmt.Errorf("nothing applied: %w; put the directory back or discard the session", err)
+		}
 		if err := parentsUnlinked(c, replacing); err != nil {
 			return fmt.Errorf("nothing applied: %w", err)
 		}
@@ -216,7 +231,12 @@ func Apply(s *session.Session, cs []review.Change, box *outbox.Box, o Options) e
 		}
 		for _, c := range picked {
 			if err := gen.apply(c); err != nil {
+				// The session is not applied yet: the rollback settles at
+				// once.
 				left, rerr := gen.rollback(o.Out)
+				if rerr == nil {
+					rerr = gen.settle(left, o.Out)
+				}
 				return applyFailed(c.Path, s.ID, err, left, rerr)
 			}
 		}
@@ -381,6 +401,33 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	if err != nil {
 		return err
 	}
+	// A run was recorded but not its end: airbag stopped mid-push. That
+	// is recorded whatever became of the workspace, so the user can say
+	// what happened (airbag outbox resolve).
+	for i, it := range intents {
+		if it.Status != outbox.Running {
+			continue
+		}
+		it.Status = outbox.Unknown
+		it.Output = "airbag stopped while this ran, so whether it took effect is not known; it is not run again"
+		if it.Kind == outbox.KindPush {
+			it.Output = "airbag stopped while this ran, so it may or may not have reached the remote " +
+				"(check with git ls-remote); it is not run again"
+		}
+		if err := box.Update(it); err != nil {
+			return fmt.Errorf("intent %s: %w", it.ID, err)
+		}
+		fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
+		intents[i] = it
+	}
+	// Pushes and deferred commands run in the workspace.
+	if slices.ContainsFunc(intents, func(it outbox.Intent) bool {
+		return it.Status == outbox.Pending || it.Status == string(operation.Approved)
+	}) {
+		if err := outboxHeld(s); err != nil {
+			return err
+		}
+	}
 	// After a failure the rest wait (a PR without its push means
 	// nothing), in this run; after an unknown outcome they wait until the
 	// user records what happened with `airbag outbox resolve`. An intent
@@ -390,21 +437,6 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 	looked := o.TrustLinks
 	for _, it := range intents {
 		if it.Status == outbox.Unknown {
-			unknown = it.ID
-			continue
-		}
-		if it.Status == outbox.Running {
-			// A run was recorded but not its end: airbag stopped mid-push.
-			it.Status = outbox.Unknown
-			it.Output = "airbag stopped while this ran, so whether it took effect is not known; it is not run again"
-			if it.Kind == outbox.KindPush {
-				it.Output = "airbag stopped while this ran, so it may or may not have reached the remote " +
-					"(check with git ls-remote); it is not run again"
-			}
-			if err := box.Update(it); err != nil {
-				return fmt.Errorf("intent %s: %w", it.ID, err)
-			}
-			fmt.Fprintf(o.Out, "intent %s: %s\n", it.ID, it.Output)
 			unknown = it.ID
 			continue
 		}
@@ -421,6 +453,11 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 			fmt.Fprintf(o.Out, "intent %s left pending: %s failed before it; once that is sorted out, `airbag apply %s` runs the rest\n",
 				it.ID, failed, s.ID)
 			continue
+		}
+		// Again for each intent: the one before may have moved the
+		// workspace, and the prompt names where this one would run.
+		if err := outboxHeld(s); err != nil {
+			return err
 		}
 		var status string
 		switch it.Kind {
@@ -445,6 +482,18 @@ func runIntents(s *session.Session, box *outbox.Box, risky bool, in *bufio.Reade
 		case outbox.Unknown:
 			unknown = it.ID
 		}
+	}
+	return nil
+}
+
+// outboxHeld refuses to run intents while the workspace is another
+// directory than the session's. It is checked before the outbox and
+// again as each intent starts: a confirmation waits as long as the user
+// takes, and the directory can be moved meanwhile, by an earlier
+// command too. An intent it stops stays as it was.
+func outboxHeld(s *session.Session) error {
+	if err := rootsOf(s).check("ws"); err != nil {
+		return fmt.Errorf("the session's outbox waits: %w; put the directory back to run it", err)
 	}
 	return nil
 }
@@ -521,6 +570,9 @@ func runPush(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, 
 			return "", fmt.Errorf("intent %s: %w", it.ID, err)
 		}
 		return outbox.Rejected, nil
+	}
+	if err := outboxHeld(s); err != nil {
+		return "", fmt.Errorf("intent %s: %w", it.ID, err)
 	}
 	cmd := exec.CommandContext(context.Background(), "git", args...) //nolint:gosec // a push outbox.GitPush checked and the user confirmed
 	cmd.Dir = cwd
@@ -613,6 +665,9 @@ func runCmd(s *session.Session, box *outbox.Box, it outbox.Intent, risky bool, l
 		}
 		return outbox.Rejected, nil
 	}
+	if err := outboxHeld(s); err != nil {
+		return "", fmt.Errorf("intent %s: %w", it.ID, err)
+	}
 	cmd := exec.CommandContext(context.Background(), prog, it.Argv[1:]...) //nolint:gosec // a deferred command: a program from this machine's PATH, its files checked, confirmed by the user
 	cmd.Args[0] = it.Argv[0]
 	cmd.Dir, cmd.Env = cwd, env
@@ -671,8 +726,8 @@ func linksOut(s *session.Session) []string {
 			out = append(out, p+" -> (nowhere)")
 		case secretfs.IsSecret(strings.ToLower(filepath.Base(t))):
 			out = append(out, p+" -> "+t)
-		case inside(t, ws):
-		case !public(t):
+		case links.Inside(t, ws):
+		case !links.Installed(t):
 			out = append(out, p+" -> "+t)
 		}
 	}
@@ -696,83 +751,7 @@ func linkTarget(p string) (string, bool) {
 			return "", false
 		}
 	}
-	return follow(dir, text)
-}
-
-// inside reports whether p, or the nearest part of it that exists, is
-// below the directory root, comparing files rather than names.
-func inside(p string, root os.FileInfo) bool {
-	for d := p; ; d = filepath.Dir(d) {
-		if fi, err := os.Stat(d); err == nil && os.SameFile(fi, root) {
-			return true
-		}
-		if filepath.Dir(d) == d {
-			return false
-		}
-	}
-}
-
-// public reports whether p is an installed program, which is what a
-// venv's interpreter links to: a regular file with an execute bit, owned
-// by root, in directories owned by root that anyone may search, none of
-// them writable by the user. Other files anyone may read are not public:
-// a machine's configuration can carry credentials, and a file root wrote
-// into a user's folder can be the user's data. A directory never is: what
-// lies below it is not known, and on macOS firmlinks join user data into
-// /usr and /System. Something that does not exist is not public either:
-// what appears there later, a process's files under /proc among them, is
-// not known now.
-func public(p string) bool {
-	file, ok := placeOf(p)
-	if !ok {
-		return false
-	}
-	var dirs []place
-	for d := filepath.Dir(p); ; d = filepath.Dir(d) {
-		dir, ok := placeOf(d)
-		if !ok {
-			return false
-		}
-		dirs = append(dirs, dir)
-		if filepath.Dir(d) == d {
-			break
-		}
-	}
-	return program(file, dirs)
-}
-
-// place is what public looks at in a file or directory: its mode, owner,
-// and whether the user may write it.
-type place struct {
-	mode     fs.FileMode
-	uid      int64
-	writable bool
-}
-
-func placeOf(p string) (place, bool) {
-	fi, err := os.Stat(p)
-	if err != nil {
-		return place{}, false
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return place{}, false
-	}
-	return place{mode: fi.Mode(), uid: int64(st.Uid), writable: unix.Access(p, unix.W_OK) == nil}, true
-}
-
-// program reports whether file, below dirs, is an installed program: see
-// public.
-func program(file place, dirs []place) bool {
-	if !file.mode.IsRegular() || file.mode&0o111 == 0 || file.uid != 0 || file.writable {
-		return false
-	}
-	for _, d := range dirs {
-		if !d.mode.IsDir() || d.mode&0o001 == 0 || d.uid != 0 || d.writable {
-			return false
-		}
-	}
-	return true
+	return links.Follow(dir, text)
 }
 
 // listLinks names up to three links, and how many more.
@@ -797,37 +776,6 @@ func namesSession(s *session.Session, args []string) string {
 		}
 	}
 	return ""
-}
-
-// follow resolves name from the real directory dir one component at a
-// time, as the kernel does: a link is replaced by where it leads before
-// a later ".." applies. The part that does not exist yet is joined on as
-// written. ok is false for a link on the way that leads nowhere or a
-// loop of links.
-func follow(dir, name string) (string, bool) {
-	cur := dir
-	parts := strings.Split(name, "/")
-	for i, part := range parts {
-		switch part {
-		case "", ".":
-			continue
-		case "..":
-			cur = filepath.Dir(cur)
-			continue
-		}
-		next := filepath.Join(cur, part)
-		fi, err := os.Lstat(next)
-		if err != nil {
-			return filepath.Join(append([]string{next}, parts[i+1:]...)...), true
-		}
-		if fi.Mode()&fs.ModeSymlink != 0 {
-			if next, err = filepath.EvalSymlinks(next); err != nil {
-				return "", false
-			}
-		}
-		cur = next
-	}
-	return cur, true
 }
 
 func hashFile(p string) (string, error) {
@@ -944,6 +892,89 @@ func parentsUnlinked(c review.Change, replacing []string) error {
 		}
 	}
 	return nil
+}
+
+// roots holds the session's recorded roots by layer: "ws" the
+// workspace, "home" $HOME.
+type roots map[string]root
+
+type root struct {
+	path string
+	id   session.DirID
+}
+
+func rootsOf(s *session.Session) roots {
+	r := roots{}
+	if s.WorkspaceID.Real != "" {
+		r["ws"] = root{s.Workspace, s.WorkspaceID}
+	}
+	// Only a branched $HOME has changes to apply; one that is not is
+	// left as it is, whatever it is now.
+	if s.HomeID.Real != "" && s.OverHome {
+		r["home"] = root{s.Home, s.HomeID}
+	}
+	return r
+}
+
+// check refuses a layer whose root is another directory than when the
+// session began: the host renamed the workspace and put a link or a new
+// directory in its place, say. Every change below it, a new top-level
+// file included, would land there. A session from before roots were
+// recorded has none, and is not checked.
+func (r roots) check(layer string) error {
+	if ro, ok := r[layer]; ok {
+		return ro.id.Check(ro.path)
+	}
+	return nil
+}
+
+// all checks every recorded root.
+func (r roots) all() error {
+	for _, layer := range []string{"ws", "home"} {
+		if err := r.check(layer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// under checks the roots p lies below, every root when it lies below
+// none: a directory the apply made in the workspace does not wait on a
+// $HOME that moved.
+func (r roots) under(p string) error {
+	below := false
+	for _, layer := range []string{"ws", "home"} {
+		if ro, ok := r[layer]; ok && within(p, ro.path) {
+			below = true
+			if err := ro.id.Check(ro.path); err != nil {
+				return err
+			}
+		}
+	}
+	if !below {
+		return r.all()
+	}
+	return nil
+}
+
+// held checks the root of the layer a change at path is in, found by
+// the layer, not by the spelling of the path the session was given (a
+// trailing slash in $HOME, say); the change must lie below it. A root
+// not recorded is not checked; a layer the session has no root for at
+// all is refused once any is recorded.
+func (r roots) held(layer, path, rel string) error {
+	ro, ok := r[layer]
+	switch {
+	case ok:
+	case len(r) == 0 || layer == "ws" || layer == "home":
+		return nil
+	default:
+		return fmt.Errorf("%s: the session has no %q layer", path, layer)
+	}
+	if r := filepath.FromSlash(rel); !filepath.IsLocal(r) || r == "." || filepath.Join(ro.path, r) != filepath.Clean(path) {
+		return fmt.Errorf("%s is not %s in %s", path, rel, ro.path)
+	}
+	return ro.id.Check(ro.path)
 }
 
 // copyFile replaces dst atomically: write a temp file next to it, then

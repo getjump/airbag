@@ -116,12 +116,15 @@ func buildWorld(s *session.Session, client *runtimepolicy.Client, profile *runti
 	}
 	// Separate mounts for the session dir (kept writable) and the real
 	// $HOME (source of pass-through binds), made before the host turns
-	// read-only.
+	// read-only. Only a branched $HOME passes anything through; one that
+	// is not may not be there at all (HOME=/nonexistent with --no-home).
 	if err := bind(s.Dir, s.Dir, false); err != nil {
 		return err
 	}
-	if err := bind(s.Home, s.MountDir("realhome"), true); err != nil {
-		return err
+	if s.OverHome {
+		if err := bind(s.Home, s.MountDir("realhome"), true); err != nil {
+			return err
+		}
 	}
 	// Open .env files now: once the workspace is branched, their paths
 	// lead to the copies airbag serves.
@@ -364,6 +367,11 @@ func buildWorld(s *session.Session, client *runtimepolicy.Client, profile *runti
 			}
 		}
 		for _, path := range []string{s.Home, s.Workspace} {
+			// A $HOME that is not there and not branched has nothing to
+			// view, and the read-only host keeps it from being made.
+			if _, err := os.Lstat(path); path == s.Home && !s.OverHome && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			view, err := policyfs.CaptureWithOptions(path, check, beforeRead, options)
 			if err != nil {
 				return fmt.Errorf("capture policy view %s: %w", path, err)

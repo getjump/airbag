@@ -18,6 +18,11 @@ import (
 func TestDiscardKeepsVersionsARollbackLeft(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)

@@ -39,6 +39,11 @@ func TestExecutionRequirementFailsBeforeSessionCreation(t *testing.T) {
 func TestResumeCannotDowngradeRecordedBoundary(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := t.TempDir()
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Backend: "native", RequireIsolation: "virtual-machine"})
 	if err != nil {
 		t.Fatal(err)

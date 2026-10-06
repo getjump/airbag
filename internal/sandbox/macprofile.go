@@ -65,13 +65,22 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 	// state directory would be written through that name, which a deny
 	// on its path does not cover: then no state directory is writable.
 	linked, unchecked := protectedLinks(s.Home)
+	unrecorded := s.HomeUnrecorded()
 	switch {
+	case unrecorded:
+		fmt.Fprintf(os.Stderr, "airbag: warning: ~/.claude and ~/.codex stay read-only: %s was not there when the session began\n", s.Home)
 	case linked != "":
 		fmt.Fprintf(os.Stderr, "airbag: warning: ~/.claude and ~/.codex stay read-only: %s has another hard link (find it with find ~ -samefile, and make one of them a copy or a symlink)\n", linked)
 	case unchecked != "":
 		fmt.Fprintf(os.Stderr, "airbag: warning: ~/.claude and ~/.codex stay read-only: %s could not be checked in full for hard links (unreadable, or more than %d files)\n", unchecked, maxPassFiles)
 	}
-	for _, d := range stateDirs {
+	// Nothing tells what is in a $HOME the session did not record from
+	// what was there, so nothing there is made or opened for writing.
+	dirs, pass, files := stateDirs, s.Passthrough, macStateWriteFiles
+	if unrecorded {
+		dirs, pass, files = nil, nil, nil
+	}
+	for _, d := range dirs {
 		if noSymlinkSoFar(s.Home, d) == nil {
 			_ = os.MkdirAll(filepath.Join(s.Home, d), 0o700)
 		}
@@ -79,7 +88,7 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 			p.Write = append(p.Write, filepath.Join(home, strings.TrimSuffix(d, "/")))
 		}
 	}
-	for _, f := range s.Passthrough {
+	for _, f := range pass {
 		// Seatbelt rules match paths, so a file there with another name
 		// elsewhere would be written through this one: each is denied
 		// (the state directories around it are writable as a whole).
@@ -100,7 +109,7 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 			p.WriteFiles = append(p.WriteFiles, filepath.Join(home, f))
 		}
 	}
-	for _, f := range macStateWriteFiles {
+	for _, f := range files {
 		p.WriteFiles = append(p.WriteFiles, filepath.Join(home, f))
 	}
 	for _, f := range stateReadOnly {
@@ -152,7 +161,7 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 		}
 	}
 	for _, h := range s.BranchHoles {
-		if noSymlinkSoFar(s.Home, h) == nil { // MkdirAll would follow a symlink out of $HOME
+		if !unrecorded && noSymlinkSoFar(s.Home, h) == nil { // MkdirAll would follow a symlink out of $HOME
 			_ = os.MkdirAll(filepath.Join(s.Home, h), 0o700)
 		}
 	}

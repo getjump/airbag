@@ -342,6 +342,23 @@ func DroppedState(c Change) bool {
 	return Dropped(c) && kind == "agent state"
 }
 
+// LeftOut reports which of cs apply leaves out unless --only names
+// them: what review folds, other than agent state under a directory the
+// session replaced, which goes with the replacement (~/.claude rebuilt).
+// A cache there is left out all the same.
+func LeftOut(cs []Change) func(Change) bool {
+	var replaced []string
+	for _, c := range cs {
+		if c.Kind == Replaced && c.IsDir() && !Dropped(c) {
+			replaced = append(replaced, c.Path+string(filepath.Separator))
+		}
+	}
+	return func(c Change) bool {
+		under := DroppedState(c) && slices.ContainsFunc(replaced, func(r string) bool { return strings.HasPrefix(c.Path, r) })
+		return Dropped(c) && !under
+	}
+}
+
 // attentionLine is one line of the attention list: a change, or the
 // unflagged changes in one git directory in $HOME, counted.
 type attentionLine struct {
