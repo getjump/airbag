@@ -557,22 +557,36 @@ func TestScanDoesNotWaitOnAFIFO(t *testing.T) {
 		"upper": func() ([]Change, error) { return Scan(s) },
 		"clone": func() ([]Change, error) { return ScanTree("ws", s.Workspace, clone) },
 	} {
-		done := make(chan []Change, 1)
+		type result struct {
+			cs   []Change
+			diff string
+		}
+		done := make(chan result, 1)
 		go func() {
 			cs, err := scan()
 			if err != nil {
 				t.Error(err)
 			}
-			done <- cs
+			// diff would open it too.
+			var b strings.Builder
+			for _, c := range cs {
+				if c.Rel == "same.txt" {
+					Diff(&b, c)
+				}
+			}
+			done <- result{cs, b.String()}
 		}()
 		select {
-		case cs := <-done:
+		case r := <-done:
 			found := false
-			for _, c := range cs {
-				found = found || c.Rel == "same.txt" && c.Kind == Modified
+			for _, c := range r.cs {
+				found = found || c.Rel == "same.txt" && c.Kind == Modified && c.Type == fs.ModeNamedPipe
 			}
 			if !found {
-				t.Errorf("%s: the FIFO at same.txt is not a change: %+v", name, cs)
+				t.Errorf("%s: the FIFO at same.txt is not a change of its type: %+v", name, r.cs)
+			}
+			if !strings.Contains(r.diff, "named pipe") {
+				t.Errorf("%s: the FIFO's diff: %q", name, r.diff)
 			}
 		case <-time.After(5 * time.Second):
 			for _, p := range []string{fifo, filepath.Join(clone, "same.txt")} {
@@ -580,7 +594,7 @@ func TestScanDoesNotWaitOnAFIFO(t *testing.T) {
 					_ = w.Close()
 				}
 			}
-			t.Fatalf("%s: the scan waited on a FIFO", name)
+			t.Fatalf("%s: the scan or its diff waited on a FIFO", name)
 		}
 	}
 }

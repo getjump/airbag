@@ -614,6 +614,12 @@ func Diff(w io.Writer, c Change) {
 		}
 		return
 	}
+	// A FIFO, socket or device: diff would open it, and a FIFO waits for
+	// a writer. It is named, never read, and apply does not carry it.
+	if c.Type != 0 {
+		fmt.Fprintf(w, "%s %s (%s; not a file apply carries over)\n", map[string]string{Added: "+", Deleted: "-", Modified: "~", Replaced: "!"}[c.Kind], display(c), specialName(c.Type))
+		return
+	}
 	// Agent state and copies of an agent config (Claude Code keeps
 	// backups of ~/.claude.json) may hold tokens: no contents.
 	// Only Claude Code's own backups, beside the config in $HOME: an
@@ -707,4 +713,20 @@ func renderRequests(w io.Writer, effs []effects.Effect) {
 		}
 		fmt.Fprintf(w, "  %s ×%d%s\n", k, reqs[k], note)
 	}
+}
+
+// specialName names a type of file that is neither a regular file, a
+// directory nor a link.
+func specialName(t fs.FileMode) string {
+	switch {
+	case t&fs.ModeNamedPipe != 0:
+		return "named pipe"
+	case t&fs.ModeSocket != 0:
+		return "socket"
+	case t&fs.ModeCharDevice != 0:
+		return "character device"
+	case t&fs.ModeDevice != 0:
+		return "device"
+	}
+	return "special file"
 }
