@@ -114,7 +114,7 @@ func PreflightRuntime(b Backend, c session.RuntimeConfig, workspace string, over
 			roots = append(roots, follow(abs))
 		}
 		if err := outsideTrees(filepath.Join(filepath.Dir(c.Binary), "gvisor-bin"), roots, 0); err != nil {
-			return c, err
+			return c, fmt.Errorf("runsc's sidecars: %w", err)
 		}
 	}
 	if b.Name == "microvm" {
@@ -175,16 +175,16 @@ func outsideTrees(p string, roots []string, depth int) error {
 	if depth > 8 {
 		return fmt.Errorf("%s: too many links to follow", p)
 	}
-	real, err := filepath.EvalSymlinks(p)
-	if depth == 0 && errors.Is(err, fs.ErrNotExist) {
-		return nil
+	if _, err := os.Lstat(p); depth == 0 && errors.Is(err, fs.ErrNotExist) {
+		return nil // nothing there at all; a link to nothing is refused below
 	}
+	real, err := filepath.EvalSymlinks(p)
 	if err != nil {
 		return err
 	}
 	for _, root := range roots {
 		if pathWithin(real, root) {
-			return fmt.Errorf("%s is %s, inside the workspace or the sessions; the runtime's sidecars must come from outside them", p, real)
+			return fmt.Errorf("%s is %s, inside the workspace or the sessions; they must come from outside them", p, real)
 		}
 	}
 	return filepath.WalkDir(real, func(q string, _ fs.DirEntry, err error) error {

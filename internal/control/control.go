@@ -286,12 +286,11 @@ func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 	summary := agents.ToolSummary(p.ToolName, p.ToolInput)
 	switch event {
 	case "PreToolUse":
-		if s.Steps != nil {
-			s.Steps.Between()
-		}
 		s.Log.Add(effects.Effect{Kind: "tool.call", Target: p.ToolName + ": " + summary, Verdict: "allow", Reason: agent + " " + p.ToolUseID})
 		// Tell the agent before the command runs; the shell shim checks
-		// again for agents without hooks.
+		// again for agents without hooks. The decision comes before the
+		// step is closed: a walk of a large branch must not hold a deny
+		// past the hook's timeout, after which the agent goes on.
 		var input map[string]any
 		_ = json.Unmarshal(p.ToolInput, &input)
 		if command, ok := agents.ShellCommand(p.ToolName, input); ok {
@@ -307,6 +306,9 @@ func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+		}
+		if s.Steps != nil {
+			s.Steps.Between()
 		}
 	case "PostToolUse", "PostToolUseFailure":
 		if s.Steps != nil {

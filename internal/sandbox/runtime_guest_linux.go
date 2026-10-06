@@ -70,7 +70,12 @@ func Guest(args []string) int {
 	if vm {
 		// No process of the agent's may be left to change the tree while
 		// the export reads it.
-		reapErr := reapAll(func() { _ = syscall.Kill(-1, syscall.SIGKILL) }, 10*time.Second)
+		reapErr := errors.New("not PID 1: no process was stopped, and the export is refused")
+		if os.Getpid() == 1 {
+			// kill(-1) from anything but the microVM's init would reach
+			// every process of the user's.
+			reapErr = reapAll(func() { _ = syscall.Kill(-1, syscall.SIGKILL) }, 10*time.Second)
+		}
 		if reapErr != nil {
 			fmt.Fprintln(os.Stderr, "airbag guest:", reapErr)
 		}
@@ -136,7 +141,7 @@ func reapAll(kill func(), limit time.Duration) error {
 			return fmt.Errorf("wait for the agent's processes: %w", err)
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("the agent's processes did not stop within %s; the branch is kept as it was", limit)
+			return fmt.Errorf("the agent's processes did not stop within %s", limit)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

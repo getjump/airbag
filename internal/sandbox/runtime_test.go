@@ -209,6 +209,13 @@ func TestGVisorSidecarsComeFromOutside(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		// Into a session not made yet: the link leads nowhere now, and
+		// into the agent's files once the session exists.
+		"gvisor-bin itself a link to nothing": func(dir string) {
+			if err := os.Symlink(filepath.Join(sessions, "s-later", "ws", "clone", "tools"), dir); err != nil {
+				t.Fatal(err)
+			}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			bin := filepath.Join(t.TempDir(), "runsc")
@@ -217,7 +224,7 @@ func TestGVisorSidecarsComeFromOutside(t *testing.T) {
 			}
 			sidecars(filepath.Join(filepath.Dir(bin), "gvisor-bin"))
 			_, err := PreflightRuntime(b, session.RuntimeConfig{RootFS: rootfs, Binary: bin}, workspace, false, false, 0, &policy.Policy{})
-			if err == nil || strings.Contains(err.Error(), "sidecars") == (name == "a link to nothing") {
+			if err == nil || !strings.Contains(err.Error(), "runsc's sidecars") {
 				t.Fatalf("preflight: %v", err)
 			}
 		})

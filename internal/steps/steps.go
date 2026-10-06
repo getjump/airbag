@@ -32,6 +32,9 @@ type entry struct {
 	gone        bool // whiteout
 }
 
+// maxEntries bounds one snapshot of a layer.
+const maxEntries = 1 << 20
+
 type Tracker struct {
 	mu   sync.Mutex
 	s    *session.Session
@@ -59,22 +62,35 @@ func (t *Tracker) snapshot() map[string]entry {
 		layers["home"] = t.s.HomeUpper()
 	}
 	for name, root := range layers {
-		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		// The agent writes this tree while the walk runs. Walked through
+		// an os.Root, a directory it swaps for a link out of the tree is
+		// an error here, not a walk of the host.
+		r, err := os.OpenRoot(root)
+		if err != nil {
+			continue
+		}
+		n := 0
+		_ = fs.WalkDir(r.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return nil //nolint:nilerr // steps only attribute changes; the review still shows an entry left out here
+			}
+			// A tree of millions of files stops the count, not the
+			// agent's tool call: the review still shows every change.
+			if n++; n > maxEntries {
+				return fs.SkipAll
 			}
 			info, err := d.Info()
 			if err != nil {
 				return nil //nolint:nilerr // gone since the walk listed it: nothing to attribute
 			}
-			rel, _ := filepath.Rel(root, p)
 			e := entry{mtime: info.ModTime().UnixNano(), size: info.Size()}
 			if st, ok := info.Sys().(*syscall.Stat_t); ok && info.Mode()&fs.ModeCharDevice != 0 && st.Rdev == 0 {
 				e.gone = true
 			}
-			out[name+":"+rel] = e
+			out[name+":"+filepath.FromSlash(rel)] = e
 			return nil
 		})
+		_ = r.Close()
 	}
 	return out
 }
