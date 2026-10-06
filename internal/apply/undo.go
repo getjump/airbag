@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -54,11 +55,12 @@ type genEntry struct {
 
 type generation struct {
 	dir      string
-	roots    roots     // checked before each change; not kept in the journal
-	Clone    bool      `json:"clone,omitempty"` // the branch is a full copy, not an upper layer
-	Session  string    `json:"session"`
-	Started  time.Time `json:"started"`
-	Complete bool      `json:"complete"`
+	roots    roots             // checked before each change; not kept in the journal
+	branches map[string]string // each layer's root in the session, all a rollback writes to; not kept either
+	Clone    bool              `json:"clone,omitempty"` // the branch is a full copy, not an upper layer
+	Session  string            `json:"session"`
+	Started  time.Time         `json:"started"`
+	Complete bool              `json:"complete"`
 	// Partial: rolled back except Entries, which were left as they were;
 	// their previous versions are kept under saved/.
 	Partial bool `json:"partial,omitempty"`
@@ -104,7 +106,7 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	// one, so a numbered directory without one is a journal lost, never a
 	// crash before the first write. A crash leaves only the .new.
 	final := filepath.Join(root, strconv.Itoa(n))
-	g := &generation{dir: fmt.Sprintf("%s.%d.new", final, time.Now().UnixNano()), roots: rootsOf(s), Session: s.ID, Started: time.Now(), Clone: s.Clone}
+	g := &generation{dir: fmt.Sprintf("%s.%d.new", final, time.Now().UnixNano()), roots: rootsOf(s), branches: branchesOf(s), Session: s.ID, Started: time.Now(), Clone: s.Clone}
 	if err := os.MkdirAll(filepath.Join(g.dir, "saved"), 0o700); err != nil {
 		return nil, err
 	}
@@ -408,7 +410,7 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			if err := held(); err != nil {
 				return stop(i, err)
 			}
-			if err := giveBack(e, g.Clone); err != nil {
+			if err := giveBack(e, g.Clone, g.branches[e.Layer]); err != nil {
 				return stop(i, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err))
 			}
 			// Journal first, as apply does: from the removal below to the
@@ -691,46 +693,82 @@ func gone(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
+// branchesOf is where each layer's changes live in s.
+func branchesOf(s *session.Session) map[string]string {
+	return map[string]string{"ws": s.WSBranch(), "home": s.HomeUpper()}
+}
+
 // giveBack puts the agent's version of an applied path back into the
-// session's upper layer: the file itself, or a whiteout for a deletion.
-func giveBack(e genEntry, clone bool) error {
-	if _, err := os.Lstat(e.Upper); err == nil {
+// session's branch: the file itself, or a whiteout for a deletion. Since
+// the apply took that version out, the agent may have made any path in
+// its branch a link (in a run resumed after a partial apply, say), and
+// through one to a host directory the version would land there, never
+// reviewed. So every write goes through branch, the layer's root in the
+// session, opened as an os.Root: a link that leads out of it is refused.
+func giveBack(e genEntry, clone bool, branch string) error {
+	// The path comes from the layer's root and Rel, as the scan made
+	// Upper, not from the journal's copy of it.
+	rel := filepath.Clean(e.Rel)
+	if branch == "" || rel == "." || !filepath.IsLocal(rel) {
+		return fmt.Errorf("%s: no place in the session's branch %q", e.Rel, branch)
+	}
+	r, err := os.OpenRoot(branch)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Close() }()
+	switch _, err := r.Lstat(rel); {
+	case err == nil:
 		// Still there: the change was never forgotten, or, for a
 		// replaced directory, a path inside it given back first made
 		// it, without the mark.
 		if !clone && e.Type == fs.ModeDir && e.Kind == review.Replaced {
-			markOpaque(e.Upper)
+			return markOpaqueIn(r, rel)
 		}
 		return nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return err // a link out of the branch on the way, among others
 	}
 	if clone && e.Kind == review.Deleted {
 		return nil // absent from the clone is what a deletion is
 	}
-	if err := os.MkdirAll(filepath.Dir(e.Upper), 0o755); err != nil { //nolint:gosec // a directory of the session's upper layer, inside the 0700 session dir
+	if err := r.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
 		return err
 	}
 	switch {
 	case e.Kind == review.Deleted:
 		// overlayfs's whiteout: a 0:0 character device (unprivileged
-		// since Linux 5.8).
-		return unix.Mknod(e.Upper, syscall.S_IFCHR, 0)
+		// since Linux 5.8), made in the directory the root opened.
+		dir, err := r.Open(filepath.Dir(rel))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = dir.Close() }()
+		return whiteoutAt(dir, filepath.Base(rel))
 	case e.Type == fs.ModeDir:
-		if err := os.MkdirAll(e.Upper, 0o755); err != nil { //nolint:gosec // a directory of the session's upper layer, inside the 0700 session dir
+		if err := r.MkdirAll(rel, 0o755); err != nil {
 			return err
 		}
 		if e.Kind == review.Replaced {
-			markOpaque(e.Upper)
+			return markOpaqueIn(r, rel)
 		}
 		return nil
 	default:
-		return copyTree(e.Path, e.Upper)
+		return copyTreeIn(r, e.Path, rel)
 	}
 }
 
-// markOpaque makes dir opaque again: the directory replaces the real
-// one, and the session shows none of what the real one holds.
-func markOpaque(dir string) {
-	_ = unix.Setxattr(dir, "user.overlay.opaque", []byte("y"), 0)
+// markOpaqueIn makes rel in r opaque again: the directory replaces the
+// real one, and the session shows none of what the real one holds. It is
+// best effort, as markOpaque is; only a directory outside r is refused.
+func markOpaqueIn(r *os.Root, rel string) error {
+	dir, err := r.Open(rel)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	_ = unix.Fsetxattr(int(dir.Fd()), "user.overlay.opaque", []byte("y"), 0)
+	return nil
 }
 
 // clearOpaque makes dir an ordinary directory of the upper layer: what
@@ -808,6 +846,66 @@ func copyTree(from, to string) error {
 	})
 }
 
+// copyTreeIn is copyTree into r: from is a path of the real tree, to is
+// relative to r, and nothing is written outside r.
+func copyTreeIn(r *os.Root, from, to string) error {
+	return filepath.WalkDir(from, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(from, p)
+		dst := filepath.Join(to, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir():
+			return r.MkdirAll(dst, info.Mode().Perm())
+		case info.Mode()&fs.ModeSymlink != 0:
+			t, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			return r.Symlink(t, dst)
+		case info.Mode().IsRegular():
+			return copyFileIn(r, p, dst, info.Mode().Perm())
+		}
+		return nil // sockets, devices: nothing to keep
+	})
+}
+
+// copyFileIn is copyFile into r: a temp file next to dst, renamed over
+// it once whole, so a crash leaves no half a version at dst.
+func copyFileIn(r *os.Root, src, dst string, mode fs.FileMode) error {
+	if err := r.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }() // read only
+	tmp := filepath.Join(filepath.Dir(dst), ".airbag-"+rand.Text())
+	f, err := r.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Remove(tmp) }() // gone after the rename
+	if _, err := io.Copy(f, in); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return r.Rename(tmp, dst)
+}
+
 // Held is the user's version of Path from before an apply, which only
 // the session has, at Saved.
 type Held struct{ Path, Saved string }
@@ -842,6 +940,10 @@ func HeldVersions(s *session.Session) ([]Held, error) {
 // versions back, the agent's versions return to the session. A pushed
 // intent is not undone; Rollback lists those.
 func Rollback(s *session.Session, done []string, out io.Writer) error {
+	// During a run the agent can change its branch under the rollback.
+	if s.Status == session.StatusRunning {
+		return fmt.Errorf("session %s is running; roll back once it has stopped", s.ID)
+	}
 	gs, err := listGenerations(s)
 	if err != nil {
 		return err
@@ -856,7 +958,7 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	g.roots = rootsOf(s)
+	g.roots, g.branches = rootsOf(s), branchesOf(s)
 	n, partial := len(g.Entries), g.Partial
 	left, err := g.rollback(out)
 	if err != nil {
