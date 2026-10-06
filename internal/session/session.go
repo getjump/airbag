@@ -276,9 +276,10 @@ func Create(m Meta) (*Session, error) {
 	// refuse them once they are other directories. The workspace, and a
 	// $HOME that is branched, must be recorded, or the session is
 	// refused. A $HOME that is not branched is written only on macOS
-	// (Clone), for agent state: it is recorded where it can be, and one
-	// that is not (not there, HOME=/nonexistent, say) gets nothing made or
-	// written there (HomeUnrecorded). On Linux nothing writes in it, so
+	// (a native Clone), for agent state: it is recorded where it can be,
+	// and one that is not (not there, HOME=/nonexistent, say) gets nothing
+	// made or written there (HomeUnrecorded). On Linux, and in an optional
+	// runtime, whose branch is a clone too, nothing writes in it, so
 	// nothing is recorded or checked.
 	for _, r := range []struct {
 		path string
@@ -288,7 +289,7 @@ func Create(m Meta) (*Session, error) {
 			continue
 		}
 		unbranched := r.id == &m.HomeID && !m.OverHome
-		if unbranched && !m.Clone {
+		if unbranched && (!m.Clone || m.Backend != "" && m.Backend != "native") {
 			continue
 		}
 		id, err := RecordDirID(r.path)
