@@ -17,6 +17,7 @@ const (
 	EgressProxy          = "allowlist-proxy"
 	EgressProxyNixDaemon = EgressProxy + egressNixDaemon
 	EgressProxyForward   = EgressProxy + egressForward
+	EgressProxyTrustd    = EgressProxy + "+trustd"
 
 	egressNixDaemon = "+nix-daemon"
 	egressForward   = "+tcp-forward"
@@ -61,6 +62,7 @@ func nativeBackend(platform string) Backend {
 	case "darwin":
 		b.Mechanism, b.WorkspaceBranch = "seatbelt+workspace-clone", "clone"
 		b.Limitations = append(b.Limitations, "macOS is a prototype; HOME has no branch",
+			"--allow-trustd: the system TLS trust service can make requests outside the proxy; such a session records egress "+EgressProxyTrustd,
 			"--allow tcp://localhost:PORT: the agent connects to that port directly, outside the proxy and unchecked; such a session records egress "+EgressProxyForward)
 	default:
 		b.Isolation, b.Mechanism, b.Egress = "unsupported", "unsupported", "unsupported"
@@ -83,6 +85,13 @@ func (b Backend) ForRun(hiddenHost []string, forwards []session.Forward) Backend
 	}
 	if slices.ContainsFunc(forwards, func(f session.Forward) bool { return b.Platform == "linux" || macForward(f) }) {
 		b.Egress += egressForward
+	}
+	return b
+}
+
+func (b Backend) WithTrustd(enabled bool) Backend {
+	if enabled && b.Platform == "darwin" {
+		b.Egress += "+trustd"
 	}
 	return b
 }

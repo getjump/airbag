@@ -53,6 +53,10 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 		Write:   []string{clone, real(tmp), real(cache)},
 		Ports:   []int{port},
 		Sockets: []string{real(s.ControlSock())},
+		Trustd:  s.Trustd,
+	}
+	if s.Launcher != "" {
+		p.Write = append(p.Write, real(s.AgentStateDir()))
 	}
 	// tcp:// forwards to this machine: on macOS the agent reaches them
 	// directly, the profile only has to let it.
@@ -77,7 +81,7 @@ func macProfile(s *session.Session, port int, tmp, cache string) (seatbelt.Profi
 	// Nothing tells what is in a $HOME the session did not record from
 	// what was there, so nothing there is made or opened for writing.
 	dirs, pass, files := stateDirs, s.Passthrough, macStateWriteFiles
-	if unrecorded {
+	if unrecorded || s.Launcher != "" {
 		dirs, pass, files = nil, nil, nil
 	}
 	for _, d := range dirs {

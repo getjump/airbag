@@ -206,7 +206,11 @@ jobs:
       - name: end-to-end tests
         run: |
           airbag doctor
-          for t in test/e2e.sh test/agent-state-e2e.sh test/linked-workspace-e2e.sh test/killed-run-e2e.sh; do echo "== $t"; sh "$t"; done
+          for t in test/e2e.sh test/agent-state-e2e.sh test/linked-workspace-e2e.sh test/killed-run-e2e.sh test/codex-launch-e2e.sh; do echo "== $t"; sh "$t"; done
+      - name: Codex daemon regression
+        run: |
+          npm install -g @openai/codex@0.160.1
+          sh test/codex-daemon-e2e.sh
 
   lint:
     if: github.event_name != 'schedule'
