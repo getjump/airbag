@@ -127,7 +127,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	// Ctrl-C belongs to the agent, which shares the terminal here.
 	swallow(os.Interrupt, syscall.SIGQUIT)
 	defer signal.Reset(os.Interrupt, syscall.SIGQUIT)
-	err = startAgent(s, cmd).Run()
+	if err = startAgent(s, cmd); err == nil {
+		err = cmd.Wait()
+	}
 	code := 0
 	var ee *exec.ExitError
 	switch {
@@ -142,16 +144,21 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	return code, s.Save()
 }
 
-// startAgent passes the session's run lock to the agent. Nothing ends the
-// agent with airbag on macOS: killed, airbag would leave it writing in
-// the clone with the lock let go, and a rollback could start beside it.
-// Held by the agent from before it runs anything, the lock lasts as long
-// as the agent does, or a process of its that keeps the descriptor.
-func startAgent(s *session.Session, cmd *exec.Cmd) *exec.Cmd {
-	if lock := s.RunLockFile(); lock != nil {
-		cmd.ExtraFiles = append(cmd.ExtraFiles, lock)
+// startAgent starts cmd as the agent, holding the session's agent lock.
+// Nothing ends the agent with airbag on macOS: killed, airbag would leave
+// it writing in the clone, and a rollback could start beside it. The lock
+// passes to the agent from before it runs anything and lasts as long as
+// the agent does, or a process of its that keeps the descriptor; airbag
+// keeps none of its own. The agent never gets the run lock, which stays
+// airbag's. An agent lock that cannot be taken starts no agent.
+func startAgent(s *session.Session, cmd *exec.Cmd) error {
+	lock, err := s.LockAgent()
+	if err != nil {
+		return fmt.Errorf("take the agent lock: %w", err)
 	}
-	return cmd
+	defer func() { _ = lock.Close() }()
+	cmd.ExtraFiles = append(cmd.ExtraFiles, lock)
+	return cmd.Start()
 }
 
 // cloneWorkspace makes the branch on the first run: an APFS clone is

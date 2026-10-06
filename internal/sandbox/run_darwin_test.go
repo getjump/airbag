@@ -10,10 +10,11 @@ import (
 	"github.com/getjump/airbag/internal/session"
 )
 
-// sandbox-exec execs the agent with the descriptors it was given: the run
-// lock passed to the agent stays held after airbag lets go of its own, as
-// when airbag is killed, until the agent ends.
-func TestTheAgentHoldsTheRunLock(t *testing.T) {
+// sandbox-exec execs the agent with the descriptors it was given: the
+// agent lock passed to the agent stays held, after airbag has let go of
+// its own copy and of the run lock (as when airbag is killed), until the
+// agent ends.
+func TestTheAgentHoldsTheAgentLock(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir(), Clone: true})
 	if err != nil {
@@ -24,18 +25,18 @@ func TestTheAgentHoldsTheRunLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent := exec.CommandContext(t.Context(), "/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/bin/sleep", "30")
-	if err := startAgent(s, agent).Start(); err != nil {
+	if err := startAgent(s, agent); err != nil {
 		t.Fatal(err)
 	}
 	unlock()
-	if _, err := s.LockRun(); !errors.Is(err, session.ErrInUse) {
-		t.Fatalf("the lock was free while the agent ran: %v", err)
+	if _, err := s.LockRun(); !errors.Is(err, session.ErrAgentLives) {
+		t.Fatalf("the run lock while the agent ran: %v", err)
 	}
 	_ = agent.Process.Kill()
 	_ = agent.Wait()
 	again, err := s.LockRun()
 	if err != nil {
-		t.Fatalf("the lock was not let go with the agent: %v", err)
+		t.Fatalf("the run lock once the agent is gone: %v", err)
 	}
 	again()
 }

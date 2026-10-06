@@ -404,7 +404,7 @@ func TestRollbackWaitsForTheRunLock(t *testing.T) {
 	again()
 }
 
-// On macOS the agent holds the run lock it was passed, and nothing ends
+// On macOS the agent holds the agent lock it was passed, and nothing ends
 // it with airbag: after airbag is killed, a rollback waits for the agent
 // (or a process of its that keeps the descriptor), not only for airbag.
 func TestRollbackWaitsForAnAgentThatOutlivesItsRun(t *testing.T) {
@@ -427,8 +427,8 @@ func TestRollbackWaitsForAnAgentThatOutlivesItsRun(t *testing.T) {
 	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
 		t.Fatal(err, out.String())
 	}
-	// A resumed run takes the lock and passes it to its agent; then
-	// airbag is killed, which lets go of its own descriptor.
+	// A resumed run takes the run lock and passes the agent lock to its
+	// agent; then airbag is killed, which lets go of the run lock.
 	run, err := session.Load(s.Dir)
 	if err != nil {
 		t.Fatal(err)
@@ -437,11 +437,16 @@ func TestRollbackWaitsForAnAgentThatOutlivesItsRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lock, err := run.LockAgent()
+	if err != nil {
+		t.Fatal(err)
+	}
 	agent := exec.CommandContext(t.Context(), "sleep", "30")
-	agent.ExtraFiles = []*os.File{run.RunLockFile()}
+	agent.ExtraFiles = []*os.File{lock}
 	if err := agent.Start(); err != nil {
 		t.Fatal(err)
 	}
+	_ = lock.Close()
 	unlock()
 	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "outlive airbag") {
 		t.Fatalf("rolled back beside the agent: %v", err)

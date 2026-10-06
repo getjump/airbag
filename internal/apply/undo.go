@@ -1023,17 +1023,20 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	// During a live run the agent could change its branch under the
 	// rollback, read a version it puts back before the run's own guards
 	// cover it, and the run and the rollback would each save the session
-	// over the other. A run holds the session's run lock from before it
-	// marks the session running (on macOS its agent holds it too, and
-	// can outlive airbag); the control socket answers for a run of an
-	// airbag that took none. A running mark that a killed run left (the
-	// lock free, nothing answering) holds nothing up: rollback is the way
-	// back to the user's versions. The lock held, no run starts under the
-	// rollback.
+	// over the other. A resumed run holds the session's run lock from
+	// before it marks the session running, and on macOS its agent holds
+	// the agent lock, which can outlive airbag; the control socket
+	// answers for a run of an airbag that took neither. A running mark
+	// that a killed run left (the locks free, nothing answering) holds
+	// nothing up: rollback is the way back to the user's versions. The
+	// lock held, no run starts under the rollback.
 	unlock, err := s.LockRun()
-	if errors.Is(err, session.ErrInUse) {
-		return fmt.Errorf("session %s is running, or a process its run left is (on macOS one can outlive airbag), or another rollback is; roll back once it has ended", s.ID)
-	} else if err != nil {
+	switch {
+	case errors.Is(err, session.ErrInUse):
+		return fmt.Errorf("session %s is running, or another rollback is; roll back once it has ended", s.ID)
+	case errors.Is(err, session.ErrAgentLives):
+		return fmt.Errorf("session %s: %w (on macOS one can outlive airbag; lsof %s finds it); roll back once it has ended", s.ID, err, s.AgentLockPath())
+	case err != nil:
 		return err
 	}
 	if s.Status == session.StatusRunning && runLive(s) {
@@ -1070,13 +1073,19 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	// have was lost with the crash.
 	// A running mark the checks above found dead (a run killed after a
 	// partial apply) goes as well: kept, it would hold run --session,
-	// apply and discard off for good.
-	save := !partial
-	if s.Status == session.StatusApplied || s.Status == session.StatusRunning {
+	// apply and discard off for good. It moves no baseline: only a
+	// rollback that is not a partial one's retry does.
+	save, rebase := !partial, !partial
+	switch s.Status {
+	case session.StatusApplied:
+		s.Status, save, rebase = session.StatusStopped, true, true
+	case session.StatusRunning:
 		s.Status, save = session.StatusStopped, true
 	}
 	if save {
-		s.Baseline = time.Now()
+		if rebase {
+			s.Baseline = time.Now()
+		}
 		if err := s.Save(); err != nil {
 			return err
 		}

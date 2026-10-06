@@ -301,8 +301,10 @@ func Create(m Meta) (*Session, error) {
 			return nil, err
 		}
 	}
-	if err := os.WriteFile(s.lockPath(), nil, 0o600); err != nil {
-		return nil, err
+	for _, lock := range []string{s.lockPath(), s.AgentLockPath()} {
+		if err := os.WriteFile(lock, nil, 0o600); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.Save(); err != nil {
 		return nil, err
@@ -482,9 +484,12 @@ func ResumeChecked(id, workspace string, validate func(*Session) error) (*Sessio
 	// services answer, nor this run under a rollback. A resume refused
 	// below lets it go.
 	unlock, err := s.LockRun()
-	if errors.Is(err, ErrInUse) {
-		return nil, fmt.Errorf("session %s is in use by another airbag process (a rollback, say) or, on macOS, a process its last run left running; resume it once that has ended", s.ID)
-	} else if err != nil {
+	switch {
+	case errors.Is(err, ErrInUse):
+		return nil, fmt.Errorf("session %s is in use by another airbag process (a rollback, say); resume it once that has ended", s.ID)
+	case errors.Is(err, ErrAgentLives):
+		return nil, fmt.Errorf("session %s: %w (on macOS one can outlive airbag; lsof %s finds it); resume once it has ended", s.ID, err, s.AgentLockPath())
+	case err != nil:
 		return nil, err
 	}
 	resumed := false

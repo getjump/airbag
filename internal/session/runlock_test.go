@@ -85,46 +85,40 @@ func TestRunLockHelper(t *testing.T) {
 	time.Sleep(time.Minute)
 }
 
-// A process the lock is passed to holds it: the lock lasts past the
-// descriptor of the process that took it, as the macOS agent's does past
-// an airbag killed under it, until that process ends too.
-func TestRunLockLastsInAProcessItIsPassedTo(t *testing.T) {
+// The agent lock that a run passes to its agent is held by the agent: the
+// run lock cannot be taken while the agent, or a process of its that
+// keeps the descriptor, runs (on macOS past an airbag killed under it),
+// and the run lock itself is never in the agent's hands.
+func TestAgentLockHoldsOffTheRunLock(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	s, err := Create(Meta{Workspace: t.TempDir(), Home: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.RunLockFile() != nil {
-		t.Fatal("a lock this process does not hold")
-	}
-	unlock, err := s.LockRun()
+	lock, err := s.LockAgent()
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := s.RunLockFile()
-	if f == nil {
-		t.Fatal("the lock this process holds is not there")
-	}
-	if _, err := f.Write([]byte("x")); err == nil {
-		t.Fatal("the lock's descriptor writes")
+	if _, err := lock.Write([]byte("x")); err == nil {
+		t.Fatal("the agent lock's descriptor writes")
 	}
 	child := exec.CommandContext(t.Context(), "sleep", "30")
-	child.ExtraFiles = []*os.File{f}
+	child.ExtraFiles = []*os.File{lock}
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
-	unlock()
-	if s.RunLockFile() != nil {
-		t.Fatal("a lock let go is still there")
+	_ = lock.Close()
+	if _, err := s.LockRun(); !errors.Is(err, ErrAgentLives) {
+		t.Fatalf("the run lock with the agent lock held: %v", err)
 	}
-	if _, err := s.LockRun(); !errors.Is(err, ErrInUse) {
-		t.Fatalf("the lock the child holds was free: %v", err)
+	if _, err := s.LockAgent(); !errors.Is(err, ErrAgentLives) {
+		t.Fatalf("a second agent lock: %v", err)
 	}
 	_ = child.Process.Kill()
 	_ = child.Wait()
-	again, err := s.LockRun()
+	unlock, err := s.LockRun()
 	if err != nil {
-		t.Fatalf("the lock was not let go with the child: %v", err)
+		t.Fatalf("the run lock once the agent is gone: %v", err)
 	}
-	again()
+	unlock()
 }

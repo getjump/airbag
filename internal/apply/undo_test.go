@@ -493,6 +493,44 @@ func TestPartialRollbackKeepsPreviousVersion(t *testing.T) {
 	}
 }
 
+// The retry of a partial rollback on a session a killed run left marked
+// running clears the mark, and moves no baseline: edits made on the host
+// since the apply still count as conflicts.
+func TestPartialRetryOfADeadRunKeepsBaseline(t *testing.T) {
+	s, box := undoSession(t)
+	mod := filepath.Join(s.Workspace, "mod.txt")
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if err := os.WriteFile(mod, []byte("edited after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	before, err := session.Load(s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A resumed run, killed: the mark stays, nothing holds a lock.
+	s.Status = session.StatusRunning
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("the retry: %v\n%s", err, out.String())
+	}
+	after, err := session.Load(s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != session.StatusStopped {
+		t.Errorf("the dead running mark after the retry: %s", after.Status)
+	}
+	if !after.Baseline.Equal(before.Baseline) {
+		t.Errorf("the retry moved the baseline: %v, was %v", after.Baseline, before.Baseline)
+	}
+}
+
 // A directory the apply made inside a replaced directory, which the
 // first rollback cannot remove because the user put a file in it, is
 // still known as the apply's: once the user removes that file, a second
