@@ -71,6 +71,9 @@ func FuzzBindSplitRPC(f *testing.F) {
 	f.Add(`{"id":3,"method":"config/read","params":{"cwd":"/host"}}`)
 	f.Add(`{"id":4,"method":"thread/start","params":{"config":{"allow_login_shell":false}}}`)
 	f.Add(`{"id":5,"method":"thread/start","params":{"config":{"allow_login_shell":true}}}`)
+	f.Add(`{"id":6,"method":"thread/start","Params":{"config":{"allow_login_shell":true}}}`)
+	f.Add(`{"id":7,"method":"thread/start","params":{"Config":{"allow_login_shell":true}}}`)
+	f.Add(`{"id":8,"method":"thread/start","params":{"Cwd":"/host","Environments":[{"cwd":"/host"}]}}`)
 	f.Fuzz(func(t *testing.T, raw string) {
 		got, err := BindSplitRPC(SplitBinding{Neutral: "/control/cwd", Clone: "/clone"}, []byte(raw))
 		if err != nil {
@@ -79,31 +82,30 @@ func FuzzBindSplitRPC(f *testing.F) {
 		if !json.Valid(got) {
 			t.Fatalf("invalid forwarded RPC: %s", got)
 		}
-		var msg struct {
-			Method string
-			Params struct {
-				Cwd          string
-				Config       map[string]any
-				Environments []struct {
-					EnvironmentID, Cwd    string
-					RuntimeWorkspaceRoots []string
-				}
-				RuntimeWorkspaceRoots []string
-			}
-		}
+		var msg map[string]any
 		if err := json.Unmarshal(got, &msg); err != nil {
 			t.Fatal(err)
 		}
-		switch msg.Method {
+		method, _ := msg["method"].(string)
+		params, _ := msg["params"].(map[string]any)
+		switch method {
 		case "thread/start", "turn/start":
-			if value, ok := msg.Params.Config["allow_login_shell"]; ok && value != false {
+			config, _ := params["config"].(map[string]any)
+			if value, ok := config["allow_login_shell"]; ok && value != false {
 				t.Fatalf("login shell config forwarded: %s", got)
 			}
-			if msg.Params.Cwd != "/control/cwd" || len(msg.Params.Environments) != 1 || msg.Params.Environments[0].EnvironmentID != "airbag" || msg.Params.Environments[0].Cwd != "/clone" || len(msg.Params.RuntimeWorkspaceRoots) != 1 || msg.Params.RuntimeWorkspaceRoots[0] != "/control/cwd" || len(msg.Params.Environments[0].RuntimeWorkspaceRoots) != 1 || msg.Params.Environments[0].RuntimeWorkspaceRoots[0] != "/clone" {
+			environments, _ := params["environments"].([]any)
+			if len(environments) != 1 {
+				t.Fatalf("worker environment escaped: %s", got)
+			}
+			environment, _ := environments[0].(map[string]any)
+			hostRoots, _ := params["runtimeWorkspaceRoots"].([]any)
+			workerRoots, _ := environment["runtimeWorkspaceRoots"].([]any)
+			if params["cwd"] != "/control/cwd" || environment["environmentId"] != "airbag" || environment["cwd"] != "/clone" || len(hostRoots) != 1 || hostRoots[0] != "/control/cwd" || len(workerRoots) != 1 || workerRoots[0] != "/clone" {
 				t.Fatalf("binding escaped: %s", got)
 			}
 		case "config/read":
-			if msg.Params.Cwd != "/control/cwd" {
+			if params["cwd"] != "/control/cwd" {
 				t.Fatalf("host config cwd escaped: %s", got)
 			}
 		case "thread/resume", "thread/fork", "command/exec", "fs/readFile":
