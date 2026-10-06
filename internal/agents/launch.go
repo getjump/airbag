@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -33,7 +34,17 @@ func LaunchArgs(name string, args []string) (Launch, error) {
 	if at < 0 {
 		at = len(args)
 	}
-	run := slices.Clone(args[:at])
+	flags := slices.Clone(args[:at])
+	for i := 0; i < len(flags); i++ {
+		if flags[i] == "--execution=split" {
+			id = "codex-yolo-split"
+			flags = slices.Delete(flags, i, i+1)
+			i--
+		} else if strings.HasPrefix(flags[i], "--execution") {
+			return Launch{}, errors.New("--execution only accepts --execution=split")
+		}
+	}
+	run := flags
 	run = append(run, "--", name, "--no-daemon", "--dangerously-bypass-approvals-and-sandbox")
 	if at < len(args) {
 		run = append(run, args[at+1:]...)
@@ -42,21 +53,21 @@ func LaunchArgs(name string, args []string) (Launch, error) {
 }
 
 func LaunchEnv(id, state string) map[string]string {
-	if id == "codex-yolo" {
+	if id == "codex-yolo" || IsSplitLaunch(id) {
 		return map[string]string{"CODEX_HOME": state}
 	}
 	return nil
 }
 
 func ValidateLaunch(id string, argv []string) error {
-	if id == "codex-yolo" && len(argv) >= 3 && argv[0] == "codex" && argv[1] == "--no-daemon" && argv[2] == "--dangerously-bypass-approvals-and-sandbox" {
+	if (id == "codex-yolo" || IsSplitLaunch(id)) && len(argv) >= 3 && argv[0] == "codex" && argv[1] == "--no-daemon" && argv[2] == "--dangerously-bypass-approvals-and-sandbox" {
 		return nil
 	}
 	return errors.New("invalid named launcher arguments; put agent arguments after --")
 }
 
 func LaunchSource(id, home string) string {
-	if id == "codex-yolo" {
+	if id == "codex-yolo" || IsSplitLaunch(id) {
 		if dir := os.Getenv("CODEX_HOME"); dir != "" {
 			return dir
 		}
@@ -70,7 +81,7 @@ type PrepareLaunchIn struct {
 }
 
 func PrepareLaunch(in PrepareLaunchIn) error {
-	if in.ID != "codex-yolo" {
+	if in.ID != "codex-yolo" && !IsSplitLaunch(in.ID) {
 		return fmt.Errorf("unknown agent launcher %q", in.ID)
 	}
 	if fi, err := os.Lstat(in.State); err == nil {

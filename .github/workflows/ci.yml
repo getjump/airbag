@@ -206,11 +206,16 @@ jobs:
       - name: end-to-end tests
         run: |
           airbag doctor
+          export AIRBAG_E2E_HOSTDIR
+          AIRBAG_E2E_HOSTDIR=$(mktemp -d /var/tmp/airbag-host-socket.XXXXXX)
+          trap 'rm -rf "$AIRBAG_E2E_HOSTDIR"' EXIT
           for t in test/e2e.sh test/agent-state-e2e.sh test/linked-workspace-e2e.sh test/killed-run-e2e.sh test/codex-launch-e2e.sh; do echo "== $t"; sh "$t"; done
+          python3 test/ctrlc.py
       - name: Codex daemon regression
         run: |
           npm install -g @openai/codex@0.160.1
           sh test/codex-daemon-e2e.sh
+          sh test/codex-split-e2e.sh
 
   lint:
     if: github.event_name != 'schedule'

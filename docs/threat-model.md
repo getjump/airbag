@@ -39,3 +39,20 @@ proxy and to the control socket a session holds at once. Each refusal (a deny,
 or an ask) is a row in the effect log on the host's disk: past a burst of 1000,
 refusals of one kind are logged at most 50 a second, and review counts the rest. A connection that keeps moving bytes stays open as long as it does, and
 bandwidth and the rate of new connections are not limited.
+
+The experimental macOS split launcher adds a private Unix WebSocket parser
+in airbag's host process. It accepts one client, caps frames at 8 MiB,
+binds threads and turns to one prestarted remote executor, and refuses
+unknown or local execution RPCs. Its private coordinator runs under Seatbelt
+with the workspace unreadable and unwritable; the executor cannot access
+the coordinator's control files. Neither uses the shared host daemon.
+This depends on the pinned Codex 0.160.1 remote executor contract; other
+versions and conversation restore modes are refused.
+
+An executor command can outlive a killed executor without retaining the
+session's file lock. A disk lease outside both writable profiles therefore
+blocks apply, rollback, discard and resume until normal EOF and successful
+executor exit have been confirmed. Forced or unconfirmed shutdown leaves
+the lease in place, including when airbag itself is killed. The lease is
+not proof that a crashed process tree has been cleaned up, and there is no
+automatic unlock. See [split execution](macos.md#experimental-split-execution).

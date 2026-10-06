@@ -124,6 +124,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		}
 		path = p
 	}
+	if agents.IsSplitLaunch(s.Launcher) {
+		return runSplit(runSplitIn{Session: s, Path: path, Self: self, Cwd: filepath.Join(s.CloneDir(), rel), Env: env, Profile: prof})
+	}
 	cmd := exec.CommandContext(context.Background(), "/usr/bin/sandbox-exec", append([]string{"-p", prof.String(), path}, s.Argv[1:]...)...) //nolint:gosec // the command the user asked to run, inside the profile
 	cmd.Dir = filepath.Join(s.CloneDir(), rel)
 	cmd.Env = env
