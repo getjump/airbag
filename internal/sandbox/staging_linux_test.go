@@ -147,17 +147,25 @@ func TestProviderSignalBeforeTheStart(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
+	ctx, done := stage()
+	defer done()
+	st, _ := ctx.Value(stagingKey{}).(*staging)
 	notifyProvider = func(c chan<- os.Signal, sigs ...os.Signal) {
+		select {
+		case <-st.quit:
+			t.Error("the staging let its signals go before the provider registered its own")
+		default:
+		}
 		signal.Notify(c, sigs...)
 		c <- syscall.SIGINT // as one that comes right then
 	}
 	defer func() { notifyProvider = signal.Notify }()
-	code, err := executeProvider(context.Background(), sh, []string{"-c", "exit 0"})
+	code, err := executeProvider(ctx, sh, []string{"-c", "exit 0"})
 	var e interrupted
 	if !errors.As(err, &e) || e.sig != syscall.SIGINT {
 		t.Fatalf("the provider started past a signal: %d %v", code, err)
 	}
-	if code := failedCode(context.Background(), code, err); code != 128+int(syscall.SIGINT) {
+	if code := failedCode(ctx, code, err); code != 128+int(syscall.SIGINT) {
 		t.Fatalf("the run's code: %d", code)
 	}
 }
@@ -187,12 +195,26 @@ func TestHandOverKeepsAStagedSignal(t *testing.T) {
 
 // After the first signal, a second Ctrl-C ends airbag, should the
 // staging hang. A second hang-up, as a closed terminal sends, or kill
-// does not: the run goes on to save its stop.
-func TestSecondSignalDuringStaging(t *testing.T) {
-	for sig, ends := range map[syscall.Signal]bool{syscall.SIGINT: true, syscall.SIGHUP: false, syscall.SIGTERM: false} {
-		t.Run(sig.String(), func(t *testing.T) {
+// does not: the run goes on to save its stop. After the provider has
+// exited, none does, as with the native runner: a Ctrl-C that would have
+// gone to the agent comes during the cleanup. Once the run has returned,
+// each is airbag's own again.
+func TestSignalsDuringAnOptionalRun(t *testing.T) {
+	for _, c := range []struct {
+		mode string
+		sig  syscall.Signal
+		ends bool
+	}{
+		{"staging", syscall.SIGINT, true},
+		{"staging", syscall.SIGHUP, false},
+		{"staging", syscall.SIGTERM, false},
+		{"provider", syscall.SIGINT, false},
+		{"provider", syscall.SIGHUP, false},
+		{"provider", syscall.SIGTERM, false},
+	} {
+		t.Run(c.mode+"/"+c.sig.String(), func(t *testing.T) {
 			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestStagingSignalsHelper$") //nolint:gosec // this test binary, as the helper
-			cmd.Env = append(os.Environ(), "AIRBAG_TEST_STAGING=1")
+			cmd.Env = append(os.Environ(), "AIRBAG_TEST_STAGING="+c.mode)
 			stdin, err := cmd.StdinPipe()
 			if err != nil {
 				t.Fatal(err)
@@ -205,42 +227,70 @@ func TestSecondSignalDuringStaging(t *testing.T) {
 				t.Fatal(err)
 			}
 			lines := bufio.NewScanner(stdout)
-			await := func(want string) {
+			await := func(want string) bool {
 				for lines.Scan() {
 					if lines.Text() == want {
-						return
+						return true
 					}
 				}
-				t.Fatalf("the helper never said %q", want)
+				return false
 			}
-			await("staging")
-			_ = cmd.Process.Signal(sig)
-			await("interrupted")
-			_ = cmd.Process.Signal(sig)
+			killedBy := func(sig syscall.Signal) bool {
+				for lines.Scan() {
+				}
+				_ = cmd.Wait()
+				ws, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
+				return ws.Signaled() && ws.Signal() == sig
+			}
+			if !await("staging") {
+				t.Fatal("the helper never staged")
+			}
+			if c.mode == "staging" {
+				_ = cmd.Process.Signal(c.sig)
+			}
+			if !await("waiting") {
+				t.Fatal("the helper never got to its cleanup")
+			}
+			_ = cmd.Process.Signal(c.sig)
 			time.Sleep(200 * time.Millisecond)
 			_ = stdin.Close()
-			stopped := false
-			for lines.Scan() {
-				stopped = stopped || lines.Text() == "stopped"
+			if c.ends {
+				if !killedBy(c.sig) {
+					t.Fatalf("a second %v did not end a hung staging", c.sig)
+				}
+				return
 			}
-			err = cmd.Wait()
-			ws, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
-			if killed := ws.Signaled() && ws.Signal() == sig; killed != ends || stopped == ends {
-				t.Fatalf("a second %v: %v, stop saved %v", sig, err, stopped)
+			if !await("stopped") || !await("done") {
+				_ = cmd.Wait()
+				t.Fatalf("a %v ended the run before it saved its stop: %v", c.sig, cmd.ProcessState)
+			}
+			_ = cmd.Process.Signal(c.sig)
+			if !killedBy(c.sig) {
+				t.Fatalf("a %v after the run is still caught: %v", c.sig, cmd.ProcessState)
 			}
 		})
 	}
 }
 
 func TestStagingSignalsHelper(t *testing.T) {
-	if os.Getenv("AIRBAG_TEST_STAGING") == "" {
+	mode := os.Getenv("AIRBAG_TEST_STAGING")
+	if mode == "" {
 		return
 	}
 	ctx, done := stage()
-	defer done()
 	fmt.Println("staging")
-	<-ctx.Done()
-	fmt.Println("interrupted")
-	_, _ = io.Copy(io.Discard, os.Stdin) // the run's unwind, until the test lets it end
+	switch mode {
+	case "staging":
+		<-ctx.Done()
+	case "provider":
+		if _, err := executeProvider(ctx, "/bin/sh", []string{"-c", "exit 0"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fmt.Println("waiting")
+	_, _ = io.Copy(io.Discard, os.Stdin) // the run's cleanup, until the test lets it end
 	fmt.Println("stopped")
+	done()
+	fmt.Println("done")
+	time.Sleep(5 * time.Second) // for the test's signal
 }

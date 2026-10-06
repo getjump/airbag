@@ -32,6 +32,8 @@ type staging struct {
 	soft, hard   chan os.Signal
 	quit, exited chan struct{}
 	once         sync.Once
+	mu           sync.Mutex
+	kept         []chan<- os.Signal // the provider's, after it has exited
 }
 
 // stage is the context an optional run's staging works under. The first
@@ -60,8 +62,27 @@ func stage() (ctx context.Context, done func()) {
 	return context.WithValue(ctx, stagingKey{}, st), func() {
 		st.end()
 		signal.Stop(st.hard)
+		st.mu.Lock()
+		for _, c := range st.kept {
+			signal.Stop(c)
+		}
+		st.mu.Unlock()
 		cancel(nil)
 	}
+}
+
+// keepCaught holds the provider's signals caught once it has exited,
+// until the run has returned: a Ctrl-C during its cleanup and the save of
+// its stop is dropped, as the native runner drops it, and does not end
+// airbag first. Without a staging they go at once.
+func keepCaught(ctx context.Context, sigs chan<- os.Signal) {
+	if st, ok := ctx.Value(stagingKey{}).(*staging); ok {
+		st.mu.Lock()
+		st.kept = append(st.kept, sigs)
+		st.mu.Unlock()
+		return
+	}
+	signal.Stop(sigs)
 }
 
 // interrupt stops the staging. A Ctrl-C or Ctrl-\ after it ends airbag,

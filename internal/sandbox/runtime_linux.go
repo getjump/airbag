@@ -348,7 +348,7 @@ func executeProvider(ctx context.Context, binary string, args []string) (int, er
 	// the session stays marked running with no stop or cleanup.
 	sigs := make(chan os.Signal, 8)
 	notifyProvider(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sigs)
+	defer keepCaught(ctx, sigs)
 	// The provider takes the signals over from the staging, with no gap
 	// between: its own are registered first, and one that came before
 	// the start, in either, starts nothing.
