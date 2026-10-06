@@ -176,7 +176,12 @@ app-server and their child processes under the session's Seatbelt profile.
 It never permits the shared host daemon socket. Codex 0.160.1 is the tested
 version; older versions must support `--no-daemon`.
 
-The launcher also defaults `allow_login_shell=false`. Model shell tools
+The launcher also defaults `allow_login_shell=false` in CLI arguments and
+a new private `config.toml`. Codex 0.160.1 drops pre-subcommand `-c` values
+when more `-c` values follow the subcommand; the private default also covers
+`exec` with later provider flags. Existing private config files are kept.
+For an older session whose config lacks this default, pass
+`exec -c allow_login_shell=false` before the other exec options. Model shell tools
 inherit the session's shim PATH instead of running login profiles that can
 replace it and bypass the git outbox. An explicit later
 `-c allow_login_shell=true` overrides this default in the ordinary launcher.

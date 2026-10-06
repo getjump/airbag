@@ -21,7 +21,7 @@ shift 2
 [ "$2" = allow_login_shell=false ]
 shift 2
 [ "$CODEX_HOME" != "$SOURCE_HOME" ]
-[ ! -e "$CODEX_HOME/config.toml" ]
+[ "$(cat "$CODEX_HOME/config.toml")" = 'allow_login_shell = false' ]
 if [ "$1" = first ]; then
     [ "$(cat "$CODEX_HOME/auth.json")" = host-login ]
     printf 'session-login\n' > "$CODEX_HOME/auth.json"

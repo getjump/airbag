@@ -91,7 +91,7 @@ func PrepareLaunch(in PrepareLaunchIn) error {
 		if !fi.IsDir() {
 			return errors.New("private agent state is not a directory")
 		}
-		return nil
+		return prepareLaunchConfig(in.State)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("check private agent state: %w", err)
 	}
@@ -125,5 +125,20 @@ func PrepareLaunch(in PrepareLaunchIn) error {
 			return fmt.Errorf("seed private agent login: %w", err)
 		}
 	}
-	return nil
+	return prepareLaunchConfig(in.State)
+}
+
+func prepareLaunchConfig(state string) error {
+	f, err := os.OpenFile(filepath.Join(state, "config.toml"), os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("create private agent defaults: %w", err)
+	}
+	if _, err := f.WriteString("allow_login_shell = false\n"); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write private agent defaults: %w", err)
+	}
+	return f.Close()
 }

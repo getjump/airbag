@@ -215,6 +215,7 @@ jobs:
         run: |
           npm install -g @openai/codex@0.160.1
           sh test/codex-daemon-e2e.sh
+          sh test/codex-exec-e2e.sh
           sh test/codex-split-e2e.sh
 
   lint:

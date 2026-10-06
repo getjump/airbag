@@ -17,6 +17,8 @@ import time
 def wait_screen(fd, process, needle, captured, timeout=45):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
+        if needle.encode() in captured:
+            return
         ready, _, _ = select.select([fd], [], [], 0.1)
         if ready:
             try:
@@ -121,7 +123,7 @@ def main(mode="sandbox"):
                     time.sleep(0.05)
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 36, 120, 0, 0))
-            arguments = [airbag, 'codex', 'yolo', *(['--execution=split'] if mode.startswith('split') else []), '--allow', f'tcp://127.0.0.1:{port}', '--', '--no-alt-screen', '-m', 'mock-model', '-c', 'model_provider="mock"', '-c', 'model_providers.mock.name="mock"', '-c', f'model_providers.mock.base_url="http://127.0.0.1:{port}/v1"', '-c', 'model_providers.mock.wire_api="responses"', '-c', 'model_providers.mock.env_key="OPENAI_API_KEY"', '-c', 'check_for_update_on_startup=false', '-c', 'tui.animations=false', 'do the task']
+            arguments = [airbag, 'codex', 'yolo', *(['--execution=split'] if mode.startswith('split') else []), '--allow', f'tcp://127.0.0.1:{port}', '--', *(['exec', '--skip-git-repo-check', '--ephemeral'] if mode == 'exec' else ['--no-alt-screen']), '-m', 'mock-model', '-c', 'model_provider="mock"', '-c', 'model_providers.mock.name="mock"', '-c', f'model_providers.mock.base_url="http://127.0.0.1:{port}/v1"', '-c', 'model_providers.mock.wire_api="responses"', '-c', 'model_providers.mock.env_key="OPENAI_API_KEY"', '-c', 'check_for_update_on_startup=false', '-c', 'tui.animations=false', 'do the task']
             tui = subprocess.Popen(arguments, cwd=project, env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=lambda: take_terminal(slave))
             os.close(slave)
             captured = bytearray()
@@ -182,8 +184,9 @@ def main(mode="sandbox"):
                 else:
                     wait_screen(master, tui, 'from-codex', captured)
                     wait_screen(master, tui, 'done', captured)
-                    time.sleep(0.5)
-                    os.write(master, b'\x03')
+                    if mode != 'exec':
+                        time.sleep(0.5)
+                        os.write(master, b'\x03')
                     assert wait_exit(master, tui, captured) == 0, captured.decode(errors='replace')[-8000:]
             finally:
                 os.close(master)

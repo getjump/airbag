@@ -56,10 +56,13 @@ func TestPrepareLaunchKeepsStatePrivate(t *testing.T) {
 	if got := LaunchEnv("codex-yolo", state); got["CODEX_HOME"] != state {
 		t.Fatalf("CODEX_HOME = %q, want %q", got["CODEX_HOME"], state)
 	}
-	for _, name := range []string{"config.toml", "AGENTS.md"} {
+	for _, name := range []string{"AGENTS.md"} {
 		if _, err := os.Stat(filepath.Join(state, name)); !os.IsNotExist(err) {
 			t.Fatalf("host %s imported: %v", name, err)
 		}
+	}
+	if got, err := os.ReadFile(filepath.Join(state, "config.toml")); err != nil || string(got) != "allow_login_shell = false\n" {
+		t.Fatalf("private defaults = %q, %v; want nonlogin shell setting only", got, err)
 	}
 	if err := os.WriteFile(filepath.Join(state, "auth.json"), []byte("session-login"), 0o600); err != nil {
 		t.Fatal(err)
@@ -72,6 +75,31 @@ func TestPrepareLaunchKeepsStatePrivate(t *testing.T) {
 		if err != nil || string(got) != want {
 			t.Fatalf("read %s = %q, %v; want %q", path, got, err, want)
 		}
+	}
+}
+
+func TestPrepareLaunchKeepsExistingConfig(t *testing.T) {
+	state := t.TempDir()
+	path := filepath.Join(state, "config.toml")
+	want := "model = \"chosen\"\n"
+	if err := os.WriteFile(path, []byte(want), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareLaunch(PrepareLaunchIn{ID: "codex-yolo", Source: t.TempDir(), State: state}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != want {
+		t.Fatalf("existing config = %q, %v; want %q", got, err, want)
+	}
+}
+
+func TestPrepareLaunchSeedsMissingConfig(t *testing.T) {
+	state := t.TempDir()
+	if err := PrepareLaunch(PrepareLaunchIn{ID: "codex-yolo", Source: t.TempDir(), State: state}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(state, "config.toml")); err != nil || string(got) != "allow_login_shell = false\n" {
+		t.Fatalf("missing config = %q, %v; want nonlogin shell default", got, err)
 	}
 }
 
