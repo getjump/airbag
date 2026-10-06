@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/outbox"
@@ -68,8 +71,8 @@ func TestRollbackWritesNothingThroughALinkInTheBranch(t *testing.T) {
 			}
 			out.Reset()
 			err = Rollback(s, nil, &out)
-			if b, readErr := os.ReadFile(filepath.Join(outside, "b.txt")); readErr == nil {
-				t.Fatalf("rollback wrote %q through the branch's link, outside the session", b)
+			if left, _ := os.ReadDir(outside); len(left) != 0 {
+				t.Fatalf("rollback wrote %v through the branch's link, outside the session", left)
 			}
 			if err == nil {
 				t.Fatalf("rollback through a link in the branch reported success: %s", out.String())
@@ -85,37 +88,114 @@ func TestRollbackWritesNothingThroughALinkInTheBranch(t *testing.T) {
 			if got := read(t, held[0].Saved); got != "user\n" {
 				t.Fatalf("the kept version is %q", got)
 			}
+			// With the link gone, the rollback finishes.
+			if err := os.Remove(filepath.Join(branch, "a")); err != nil {
+				t.Fatal(err)
+			}
+			out.Reset()
+			if err := Rollback(s, nil, &out); err != nil {
+				t.Fatalf("the rollback once the link is gone: %v\n%s", err, out.String())
+			}
+			if got := read(t, filepath.Join(ws, "a", "b.txt")); got != "user\n" {
+				t.Fatalf("not rolled back: %q", got)
+			}
+			if got := read(t, filepath.Join(branch, "a", "b.txt")); got != "agent\n" {
+				t.Fatalf("the agent's version is not back in the session: %q", got)
+			}
 		})
 	}
 }
 
-// A rollback runs on a stopped session: during a run, the agent could
-// change the branch under it.
-func TestRollbackRefusesARunningSession(t *testing.T) {
+// On macOS the agent may write the clone's own entry in the session. A
+// link put there must not lead the rollback elsewhere: os.OpenRoot
+// follows links in the name it opens.
+func TestRollbackRefusesABranchThatIsALink(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
-	ws := t.TempDir()
-	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(filepath.Join(ws, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "a", "b.txt"), []byte("user\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(s.WSUpper(), "f"), []byte("agent\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	s.Status = session.StatusStopped
+	clone := s.CloneDir()
+	for rel, body := range map[string]string{"a/b.txt": "agent\n", "other.txt": "kept in the session\n"} {
+		p := filepath.Join(clone, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	box, err := outbox.Open(s.EffectsPath())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = box.Close() }()
 	var out bytes.Buffer
-	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Only: []string{"a"}, Out: &out}); err != nil {
 		t.Fatal(err, out.String())
 	}
-	s.Status = session.StatusRunning
-	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "running") {
-		t.Fatalf("rolled back a running session: %v", err)
+	// The apply took a/b.txt out of the clone; the clone itself moves
+	// away, and a link to an outside directory takes its place.
+	outside := t.TempDir()
+	if err := os.Rename(clone, clone+".moved"); err != nil {
+		t.Fatal(err)
 	}
-	if got := read(t, filepath.Join(ws, "f")); got != "agent\n" {
-		t.Fatalf("the refused rollback changed the file: %q", got)
+	if err := os.Symlink(outside, clone); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	err = Rollback(s, nil, &out)
+	if left, _ := os.ReadDir(outside); len(left) != 0 {
+		t.Fatalf("rollback wrote %v through the link at the clone's place", left)
+	}
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("rollback through a branch that is a link: %v\n%s", err, out.String())
+	}
+}
+
+// What the agent left at a replaced directory's path that is not a
+// directory gets no opaque mark and holds nothing up: a FIFO opened to
+// mark it would block the rollback until someone wrote to it.
+func TestMarkOpaqueLeavesWhatIsNotADirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := unix.Mkfifo(filepath.Join(dir, "fifo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "file"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	done := make(chan error, 2)
+	go func() {
+		done <- markOpaqueIn(r, "fifo")
+		done <- markOpaqueIn(r, "file")
+	}()
+	for range 2 {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("marking a FIFO blocked")
+		}
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "out")); err != nil {
+		t.Fatal(err)
+	}
+	if err := markOpaqueIn(r, "out/x"); err == nil {
+		t.Fatal("a path that leads out of the branch was not refused")
 	}
 }

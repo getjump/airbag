@@ -712,7 +712,10 @@ func giveBack(e genEntry, clone bool, branch string) error {
 	if branch == "" || rel == "." || !filepath.IsLocal(rel) {
 		return fmt.Errorf("%s: no place in the session's branch %q", e.Rel, branch)
 	}
-	r, err := os.OpenRoot(branch)
+	if clone && e.Kind == review.Deleted {
+		return nil // absent from the clone is what a deletion is
+	}
+	r, err := openBranch(branch)
 	if err != nil {
 		return err
 	}
@@ -728,9 +731,6 @@ func giveBack(e genEntry, clone bool, branch string) error {
 		return nil
 	case !errors.Is(err, fs.ErrNotExist):
 		return err // a link out of the branch on the way, among others
-	}
-	if clone && e.Kind == review.Deleted {
-		return nil // absent from the clone is what a deletion is
 	}
 	if err := r.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
 		return err
@@ -758,13 +758,47 @@ func giveBack(e genEntry, clone bool, branch string) error {
 	}
 }
 
+// openBranch opens branch as an os.Root, which follows links in the
+// name it is given: on macOS the agent may write the clone's own entry
+// in the session, so a link put there would lead every write elsewhere.
+// The branch must be a directory itself, and the one opened.
+func openBranch(branch string) (*os.Root, error) {
+	fi, err := os.Lstat(branch)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("%s, the session's branch, is not a directory", branch)
+	}
+	r, err := os.OpenRoot(branch)
+	if err != nil {
+		return nil, err
+	}
+	if got, err := r.Stat("."); err != nil || !os.SameFile(fi, got) {
+		_ = r.Close()
+		return nil, fmt.Errorf("%s, the session's branch, changed while it was opened", branch)
+	}
+	return r, nil
+}
+
 // markOpaqueIn makes rel in r opaque again: the directory replaces the
 // real one, and the session shows none of what the real one holds. It is
-// best effort, as markOpaque is; only a directory outside r is refused.
+// best effort: what the agent left at rel that is not a directory (a
+// file, a FIFO, a whiteout) gets no mark and stops nothing. Only a path
+// that leads out of r is refused.
 func markOpaqueIn(r *os.Root, rel string) error {
-	dir, err := r.Open(rel)
+	fi, err := r.Lstat(rel)
 	if err != nil {
 		return err
+	}
+	if !fi.IsDir() {
+		return nil
+	}
+	dir, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		// Best effort: unreadable, or no longer a directory. Nothing
+		// was written.
+		return nil
 	}
 	defer func() { _ = dir.Close() }()
 	_ = unix.Fsetxattr(int(dir.Fd()), "user.overlay.opaque", []byte("y"), 0)
@@ -900,6 +934,12 @@ func copyFileIn(r *os.Root, src, dst string, mode fs.FileMode) error {
 		_ = f.Close()
 		return err
 	}
+	// Whole on disk before its name says it is there: after a power
+	// loss, an empty file at dst would pass for the agent's version.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
 	if err := f.Close(); err != nil {
 		return err
 	}
@@ -940,10 +980,6 @@ func HeldVersions(s *session.Session) ([]Held, error) {
 // versions back, the agent's versions return to the session. A pushed
 // intent is not undone; Rollback lists those.
 func Rollback(s *session.Session, done []string, out io.Writer) error {
-	// During a run the agent can change its branch under the rollback.
-	if s.Status == session.StatusRunning {
-		return fmt.Errorf("session %s is running; roll back once it has stopped", s.ID)
-	}
 	gs, err := listGenerations(s)
 	if err != nil {
 		return err

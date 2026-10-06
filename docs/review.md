@@ -42,11 +42,12 @@ undoes the last apply the same way, and the agent's changes go back into the ses
 to apply again or discard; a file you edited after the apply is left as it is, and
 its version from before the apply stays in the session: `airbag discard` refuses
 to delete it until a later rollback restores it, or you pass `--force`. A push that
-already ran is not undone. A rollback runs only on a stopped session, and it puts
-the agent's versions back inside the session's branch and nowhere else. If the
-agent made a path there a link out of the branch, in a run resumed after a partial
-apply say, the rollback stops at that path and keeps your versions from before the
-apply in the session.
+already ran is not undone. A rollback puts the agent's versions back inside the
+session's branch and nowhere else. If the agent made a directory on the way there,
+or the branch itself, a link out of the branch (in a run resumed after a partial
+apply, say), the rollback stops at that path and keeps your versions from before
+the apply in the session. Whatever the agent has put at the path itself stays
+there as its version, a link included, for the next review to show.
 
 A session records the directories its workspace and a branched `$HOME` were when it
 began; on macOS, which never branches `$HOME`, it records the `$HOME` it keeps the
