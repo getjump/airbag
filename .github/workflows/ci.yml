@@ -206,7 +206,7 @@ jobs:
       - name: end-to-end tests
         run: |
           airbag doctor
-          for t in test/e2e.sh test/agent-state-e2e.sh test/linked-workspace-e2e.sh; do echo "== $t"; sh "$t"; done
+          for t in test/e2e.sh test/agent-state-e2e.sh test/linked-workspace-e2e.sh test/killed-run-e2e.sh; do echo "== $t"; sh "$t"; done
 
   lint:
     if: github.event_name != 'schedule'

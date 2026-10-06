@@ -493,6 +493,44 @@ func TestPartialRollbackKeepsPreviousVersion(t *testing.T) {
 	}
 }
 
+// The retry of a partial rollback on a session a killed run left marked
+// running clears the mark, and moves no baseline: edits made on the host
+// since the apply still count as conflicts.
+func TestPartialRetryOfADeadRunKeepsBaseline(t *testing.T) {
+	s, box := undoSession(t)
+	mod := filepath.Join(s.Workspace, "mod.txt")
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if err := os.WriteFile(mod, []byte("edited after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	before, err := session.Load(s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A resumed run, killed: the mark stays, nothing holds a lock.
+	s.Status = session.StatusRunning
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("the retry: %v\n%s", err, out.String())
+	}
+	after, err := session.Load(s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != session.StatusStopped {
+		t.Errorf("the dead running mark after the retry: %s", after.Status)
+	}
+	if !after.Baseline.Equal(before.Baseline) {
+		t.Errorf("the retry moved the baseline: %v, was %v", after.Baseline, before.Baseline)
+	}
+}
+
 // A directory the apply made inside a replaced directory, which the
 // first rollback cannot remove because the user put a file in it, is
 // still known as the apply's: once the user removes that file, a second
@@ -1682,8 +1720,25 @@ func rootSession(t *testing.T, ws string) *session.Session {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The clone its first run made.
+	if err := os.MkdirAll(s.CloneDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	s.Status = session.StatusStopped
 	return s
+}
+
+// inBranch writes the agent's version of rel where a scan of s finds it.
+func inBranch(t *testing.T, s *session.Session, rel, body string) string {
+	t.Helper()
+	p := filepath.Join(s.WSBranch(), rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // A workspace that leads elsewhere than when the session began takes no
@@ -2197,10 +2252,7 @@ func modifiedApplied(t *testing.T) (*session.Session, *outbox.Box, string) {
 		t.Fatal(err)
 	}
 	s := rootSession(t, ws)
-	upper := filepath.Join(t.TempDir(), "m.txt")
-	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	upper := inBranch(t, s, "m.txt", "agent\n")
 	c := review.Change{Layer: "ws", Rel: "m.txt", Path: filepath.Join(ws, "m.txt"), Upper: upper, Kind: review.Modified, Mode: 0o644}
 	box, err := outbox.Open(s.EffectsPath())
 	if err != nil {
@@ -2455,10 +2507,7 @@ func TestApplyPassesAnUnbranchedHomeThatMoved(t *testing.T) {
 		t.Fatalf("not an unbranched, recorded $HOME: %+v", s.Meta)
 	}
 	replaceDir(t, s.Home)
-	upper := filepath.Join(t.TempDir(), "n.txt")
-	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	upper := inBranch(t, s, "n.txt", "agent\n")
 	c := review.Change{Layer: "ws", Rel: "n.txt", Path: filepath.Join(ws, "n.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
 	box, err := outbox.Open(s.EffectsPath())
 	if err != nil {
@@ -2487,10 +2536,7 @@ func TestRollbackDirectoriesWaitOnlyOnTheirRoot(t *testing.T) {
 	}
 	s := rootSession(t, ws)
 	s.OverHome = true
-	upper := filepath.Join(t.TempDir(), "n.txt")
-	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	upper := inBranch(t, s, "d/n.txt", "agent\n")
 	c := review.Change{Layer: "ws", Rel: "d/n.txt", Path: filepath.Join(ws, "d", "n.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
 	box, err := outbox.Open(s.EffectsPath())
 	if err != nil {
@@ -2618,7 +2664,7 @@ func TestRollbackLeavingPathsStaysStoppedUntilTheSessionIsSaved(t *testing.T) {
 	if err != nil || g == nil {
 		t.Fatal(err)
 	}
-	g.roots = rootsOf(s)
+	g.roots, g.branches = rootsOf(s), branchesOf(s)
 	var out bytes.Buffer
 	if left, err := g.rollback(&out); err != nil || left != 1 {
 		t.Fatalf("left %d: %v\n%s", left, err, out.String())
@@ -2654,11 +2700,9 @@ func TestFinishedRollbackReplaysNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := rootSession(t, ws)
-	up := t.TempDir()
+	up := s.WSBranch()
 	for _, n := range []string{"a.txt", "m.txt"} {
-		if err := os.WriteFile(filepath.Join(up, n), []byte("agent\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		inBranch(t, s, n, "agent\n")
 	}
 	// a.txt goes after m.txt's restore, the journal's last save.
 	cs := []review.Change{
@@ -2683,7 +2727,7 @@ func TestFinishedRollbackReplaysNothing(t *testing.T) {
 	if err != nil || g == nil {
 		t.Fatal(err)
 	}
-	g.roots = rootsOf(s)
+	g.roots, g.branches = rootsOf(s), branchesOf(s)
 	if left, err := g.rollback(&out); err != nil || left != 0 {
 		t.Fatalf("left %d: %v\n%s", left, err, out.String())
 	}
