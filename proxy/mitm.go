@@ -188,6 +188,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, g Gate, host s
 	if !f.hold(conn) { // not tconn: see hold
 		return // cut
 	}
+	f.begin()
 	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	_ = tconn.SetDeadline(time.Now().Add(15 * time.Second))
 	if err := tconn.HandshakeContext(context.Background()); err != nil {

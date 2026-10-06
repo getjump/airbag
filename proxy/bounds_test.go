@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/getjump/airbag/audit"
 	"github.com/getjump/airbag/internal/effects"
 )
 
@@ -117,12 +118,13 @@ func (s *ignoresEOF) close() {
 
 func boundedProxy(t *testing.T, lim Limits) (*Proxy, string, string) {
 	t.Helper()
-	return boundedProxyVia(t, lim, "")
+	return boundedProxyVia(t, lim, "", nil)
 }
 
 // boundedProxyVia is boundedProxy behind the upstream proxy at
-// upstream ("": none).
-func boundedProxyVia(t *testing.T, lim Limits, upstream string) (*Proxy, string, string) {
+// upstream ("": none), with adjust (if any) run on the proxy before it
+// serves.
+func boundedProxyVia(t *testing.T, lim Limits, upstream string, adjust func(*Proxy)) (*Proxy, string, string) {
 	t.Helper()
 	log, path := newLog(t)
 	p := New(Allowlist{"127.0.0.1:*"}, log)
@@ -133,6 +135,9 @@ func boundedProxyVia(t *testing.T, lim Limits, upstream string) (*Proxy, string,
 		return &url.URL{Scheme: "http", Host: upstream}, nil
 	}
 	p.Limits = lim
+	if adjust != nil {
+		adjust(p)
+	}
 	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -589,6 +594,13 @@ func openFlows(p *Proxy, want int, d time.Duration) int {
 	}
 }
 
+// testClock moves only when the test moves it: flows that measure quiet
+// by it (Proxy.now) do not count a pause of a busy runner.
+type testClock struct{ ns atomic.Int64 }
+
+func (c *testClock) now() time.Time          { return time.Unix(0, c.ns.Load()) }
+func (c *testClock) advance(d time.Duration) { c.ns.Add(int64(d)) }
+
 // A forwarded response the client stops reading: the copy blocks in a
 // write to the client, and closing the upstream as idle does not end
 // it. The flow's write deadline does: the slot and the client's
@@ -635,22 +647,35 @@ func TestForwardClientStopsReading(t *testing.T) {
 // answered and the slot let go. A body that keeps coming, however
 // slowly, goes on past Idle.
 func TestForwardClientStallsBody(t *testing.T) {
-	target := listenTCP(t, func(c net.Conn) {
-		defer c.Close()
-		req, err := http.ReadRequest(bufio.NewReader(c))
-		if err != nil {
-			return
-		}
-		b, err := io.ReadAll(req.Body) // to the end, or until the proxy closes
-		if err != nil {
-			return
-		}
-		_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(b), b)
-	})
+	// echoBody answers each request with its body; got counts the body
+	// bytes it has read, as they arrive.
+	echoBody := func(t *testing.T, got *atomic.Int64) string {
+		return listenTCP(t, func(c net.Conn) {
+			defer c.Close()
+			req, err := http.ReadRequest(bufio.NewReader(c))
+			if err != nil {
+				return
+			}
+			var b []byte
+			for one := make([]byte, 1); ; { // to the end, or until the proxy closes
+				n, err := req.Body.Read(one)
+				b = append(b, one[:n]...)
+				got.Add(int64(n))
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					return
+				}
+			}
+			_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(b), b)
+		})
+	}
+	target := echoBody(t, new(atomic.Int64))
 	lim := testLimits
 	lim.Idle = 300 * time.Millisecond
 	p, pa, _ := boundedProxy(t, lim)
-	post := func(t *testing.T, length int) (net.Conn, *bufio.Reader) {
+	post := func(t *testing.T, pa, target string, length int) (net.Conn, *bufio.Reader) {
 		t.Helper()
 		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", pa)
 		if err != nil {
@@ -661,7 +686,7 @@ func TestForwardClientStallsBody(t *testing.T) {
 	}
 	t.Run("stalls", func(t *testing.T) {
 		g0, fd0 := usage()
-		c, br := post(t, 1000000)
+		c, br := post(t, pa, target, 1000000)
 		defer c.Close()
 		_, _ = io.WriteString(c, "abc") // and no more
 		start := time.Now()
@@ -681,13 +706,32 @@ func TestForwardClientStallsBody(t *testing.T) {
 		settle(t, g0, fd0, 1, 1, 3*time.Second)
 	})
 	t.Run("progresses", func(t *testing.T) {
+		// The flows measure quiet by a clock that moves Idle/4 once each
+		// byte has reached the upstream: a pause of a busy runner is not
+		// the client's quiet. The bytes still come Idle/4 apart in real
+		// time too. KeepAlive is not under test; such a pause must not
+		// close the connection before the next request either.
+		var got atomic.Int64
+		target := echoBody(t, &got)
+		clk := &testClock{}
+		plim := lim
+		plim.KeepAlive = KeepAliveIdle
+		_, pa, _ := boundedProxyVia(t, plim, "", func(p *Proxy) { p.now = clk.now })
 		const n = 12 // a byte each Idle/4: 3×Idle
-		c, br := post(t, n)
+		c, br := post(t, pa, target, n)
 		defer c.Close()
 		start := time.Now()
-		for range n {
+		for i := range n {
+			if i > 0 {
+				time.Sleep(lim.Idle / 4)
+			}
 			_, _ = io.WriteString(c, "x")
-			time.Sleep(lim.Idle / 4)
+			for deadline := time.Now().Add(5 * time.Second); got.Load() <= int64(i); time.Sleep(time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatalf("byte %d of the body did not reach the upstream", i+1)
+				}
+			}
+			clk.advance(lim.Idle / 4)
 		}
 		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
 		resp, err := http.ReadResponse(br, nil)
@@ -734,7 +778,7 @@ func TestUpstreamProxyNeverAnswers(t *testing.T) {
 			})
 			lim := testLimits
 			lim.Idle = tc.idle
-			p, pa, _ := boundedProxyVia(t, lim, hung)
+			p, pa, _ := boundedProxyVia(t, lim, hung, nil)
 			c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", pa)
 			if err != nil {
 				t.Fatal(err)
@@ -825,6 +869,154 @@ func TestForwardStoppedFlowEndsTheConnection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// slowLog is a log whose writes are slow, as on a busy disk or behind
+// another writer: an allow entry for a connection takes d, of real time
+// and of clk, which the proxy's flows may measure quiet by. writing says
+// when one has started.
+type slowLog struct {
+	audit.Recorder
+	d       time.Duration
+	clk     testClock
+	writing chan struct{}
+}
+
+func (l *slowLog) Add(e audit.Event) {
+	if e.Kind == "net.egress" && e.Verdict == "allow" {
+		select {
+		case l.writing <- struct{}{}:
+		default:
+		}
+		l.clk.advance(l.d)
+		time.Sleep(l.d) // a timer that counts the write fires while it lasts
+	}
+	l.Recorder.Add(e)
+}
+
+// The proxy's own time before it hands a connection on, here a log write
+// longer than Idle, is not quiet on the connection. It was counted: the
+// flow stopped before the proxy held anything, a host that would have
+// answered was refused as cut, and a silent one got 403 or 502 by how
+// long the write took. Only a cut stops the flow in that time.
+func TestSlowLogIsNotIdle(t *testing.T) {
+	good := listenTCP(t, func(c net.Conn) {
+		defer c.Close()
+		br := bufio.NewReader(c)
+		for {
+			req, err := http.ReadRequest(br)
+			if err != nil {
+				return
+			}
+			_, _ = io.Copy(io.Discard, req.Body)
+			_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+		}
+	})
+	silent := listenTCP(t, func(c net.Conn) {
+		defer c.Close()
+		_, _ = io.Copy(io.Discard, c) // reads the request, never answers
+	})
+	echoed := listenTCP(t, echoConn)
+	lim := testLimits
+	lim.Idle = 300 * time.Millisecond
+	// slowly serves through a slowLog. With clk, which only the log
+	// moves, a connection the proxy has handed on is never quiet, so a
+	// busy runner cannot fail an exchange that should pass; without, a
+	// silent upstream is quiet as it is in use.
+	slowly := func(sl *slowLog, clk bool) func(*Proxy) {
+		return func(p *Proxy) {
+			p.Limits = lim
+			sl.Recorder, p.Log = p.Log, sl
+			if clk {
+				p.now = sl.clk.now
+			}
+		}
+	}
+	slowProxy := func(t *testing.T, clk bool) (*Proxy, string, *slowLog) {
+		t.Helper()
+		sl := &slowLog{d: 2 * lim.Idle, writing: make(chan struct{}, 1)}
+		p, pa, _ := boundedProxyVia(t, lim, "", slowly(sl, clk))
+		return p, pa, sl
+	}
+	// ask sends req to the proxy at pa: the answer's status and body,
+	// and whether it is the connection's last.
+	ask := func(t *testing.T, pa, req string) (int, string, bool) {
+		t.Helper()
+		c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", pa)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _ = io.WriteString(c, req)
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil {
+			t.Fatalf("no answer: %v", err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode, string(b), resp.Close
+	}
+	get := func(host string) string { return "GET http://" + host + "/ HTTP/1.1\r\nHost: " + host + "\r\n\r\n" }
+	t.Run("forward", func(t *testing.T) {
+		t.Parallel()
+		_, pa, _ := slowProxy(t, true)
+		if code, body, _ := ask(t, pa, get(good)); code != http.StatusOK || body != "ok" {
+			t.Fatalf("a host that answers: %d %q, want 200", code, body)
+		}
+	})
+	t.Run("silent upstream", func(t *testing.T) {
+		t.Parallel()
+		_, pa, _ := slowProxy(t, false)
+		code, body, last := ask(t, pa, "POST http://"+silent+"/ HTTP/1.1\r\nHost: "+silent+"\r\nContent-Length: 2\r\n\r\nok")
+		if code != http.StatusBadGateway || !last {
+			t.Fatalf("a silent host: %d %q close %v, want 502 and the connection's last, as with a quick log", code, body, last)
+		}
+	})
+	t.Run("connect", func(t *testing.T) {
+		t.Parallel()
+		_, pa, _ := slowProxy(t, true)
+		c, br, code := connectVia(t, pa, echoed)
+		defer c.Close()
+		if code != http.StatusOK {
+			t.Fatalf("CONNECT: %d, want 200", code)
+		}
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _ = io.WriteString(c, "ping")
+		if b, err := io.ReadAll(io.LimitReader(br, 4)); err != nil || string(b) != "ping" {
+			t.Fatalf("through the tunnel: %q %v", b, err)
+		}
+	})
+	t.Run("intercept", func(t *testing.T) {
+		t.Parallel()
+		up, _ := echo(t)
+		sl := &slowLog{d: 2 * lim.Idle, writing: make(chan struct{}, 1)}
+		c, _, _ := mitmProxyWith(t, up, "", slowly(sl, true))
+		req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, up.URL+"/", nil)
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatalf("an intercepted host: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("an intercepted host: %d, want 200", resp.StatusCode)
+		}
+	})
+	t.Run("cut", func(t *testing.T) {
+		t.Parallel()
+		p, pa, sl := slowProxy(t, false)
+		go func() {
+			select {
+			case <-sl.writing:
+				p.Cut(Allowlist{}, "test")
+			case <-t.Context().Done():
+			}
+		}()
+		if code, body, _ := ask(t, pa, get(good)); code != http.StatusForbidden || !strings.Contains(body, "was cut") {
+			t.Fatalf("a cut while the request was logged: %d %q, want 403", code, body)
+		}
+	})
 }
 
 // deadlineWriter counts the read deadlines set on it through a
