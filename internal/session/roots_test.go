@@ -100,6 +100,13 @@ func TestCreateRecordsTheRootsARunWrites(t *testing.T) {
 			t.Fatalf("a $HOME nothing writes in refused resume: %v", err)
 		}
 	}
+	// An optional runtime's branch is a clone too, but it writes nothing
+	// in $HOME.
+	home := t.TempDir()
+	s, err := Create(Meta{Backend: "gvisor", Workspace: t.TempDir(), Home: home, Clone: true})
+	if err != nil || s.WorkspaceID.Real == "" || s.HomeID.Real != "" {
+		t.Fatalf("an optional runtime recorded a $HOME it does not write in: %+v %v", s, err)
+	}
 }
 
 // A directory with the inode of a removed one is told apart by its

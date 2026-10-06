@@ -81,9 +81,10 @@ const usage = `airbag — approve outcomes, not commands
   airbag log [ID] [--json]    raw effect log with runtime source, PID and argv
   airbag approve [ID]         list or approve requests blocked by an "ask" rule
   airbag doctor               check that this machine can run airbag
-  airbag capabilities [--json] describe the compiled execution boundary and limits
+  airbag capabilities [--backend=NAME] [--json]
+                              describe a backend's execution boundary and limits
 
-run: --backend=native; --require-isolation=any|shared-kernel|application-kernel|virtual-machine
+run: --backend=native|gvisor|microvm; --require-isolation=any|shared-kernel|application-kernel|virtual-machine
      unavailable backends and unmet requirements fail before creating a session
 
 ID defaults to the newest open session of the current workspace.
@@ -113,6 +114,9 @@ func main() {
 	if len(os.Args) >= 3 && os.Args[1] == sandbox.InitArg {
 		sandbox.Init(os.Args[2], len(os.Args) > 3 && os.Args[3] == "tty")
 		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == sandbox.GuestArg {
+		os.Exit(sandbox.Guest(os.Args[2:]))
 	}
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
@@ -172,11 +176,14 @@ func cmdRun(args []string) (int, error) {
 		return 1, errors.New("already inside an airbag session")
 	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	backend := fs.String("backend", "native", "execution backend (only native is implemented)")
+	backend := fs.String("backend", "native", "execution backend: native, gvisor or microvm")
+	rootfs := fs.String("runtime-rootfs", "", "trusted root filesystem directory for an optional backend")
+	runtimeBin := fs.String("runtime-bin", "", "operator-supplied runsc or Firecracker executable")
+	kernel := fs.String("runtime-kernel", "", "microVM kernel image")
 	requireIsolation := fs.String("require-isolation", "any", "require an exact isolation boundary; never fall back")
 	var allow stringList
 	fs.Var(&allow, "allow", "extra host to allow, e.g. api.github.com or *.example.com (repeatable)")
-	noHome := fs.Bool("no-home", false, "do not branch $HOME (it stays read-only)")
+	noHome := fs.Bool("no-home", false, "native: read-only HOME; optional runtime: private empty HOME")
 	var passEnv stringList
 	fs.Var(&passEnv, "pass-env", "give the agent this credential-like environment variable (repeatable)")
 	strict := fs.Bool("strict", false, "keep the agent from creating user namespaces; breaks the agents' own sandboxes and Chromium's sandbox")
@@ -213,6 +220,11 @@ func cmdRun(args []string) (int, error) {
 	execution, err := sandbox.SelectBackend(*backend, *requireIsolation)
 	if err != nil {
 		return 2, err
+	}
+	// The runtime policies run in the native sandbox's PID 1 and FUSE
+	// views; an optional runtime has neither, and would run without them.
+	if execution.Name != "native" && (*filePolicy || *execPolicy || auditExplicit || *fileCache != "off" || *runtimeProfile) {
+		return 2, fmt.Errorf("%s does not run the runtime policy, audit, cache and profile options; use the native backend", execution.Name)
 	}
 	if env := os.Getenv("AIRBAG_ALLOW"); env != "" {
 		allow = append(allow, strings.Split(env, ",")...)
@@ -259,12 +271,25 @@ func cmdRun(args []string) (int, error) {
 	if *nixDaemon {
 		fmt.Fprintln(os.Stderr, "airbag: warning: --nix-daemon: Nix builds and substitutes run outside the sandbox and reach the network without the proxy")
 	}
+	runtimeConfig, err := sandbox.PreflightRuntime(execution, session.RuntimeConfig{RootFS: *rootfs, Binary: *runtimeBin, Kernel: *kernel}, ws, !*noHome, *nixDaemon, len(forwards), pol)
+	if err != nil {
+		return 2, err
+	}
 	var s *session.Session
 	if *resume != "" {
 		// Same branch, same outbox and labels; this run's command, plus
 		// whatever this run's flags add.
 		if s, err = session.ResumeChecked(*resume, ws, func(s *session.Session) error {
-			return validateExecution(s, execution, *requireIsolation)
+			if err := validateExecution(s, execution, *requireIsolation); err != nil {
+				return err
+			}
+			if err := validateRuntimeResume(s, execution); err != nil {
+				return err
+			}
+			if s.Runtime != runtimeConfig {
+				return errors.New("resume requires the same runtime rootfs, binary and kernel")
+			}
+			return nil
 		}); err != nil {
 			return 1, err
 		}
@@ -275,9 +300,12 @@ func cmdRun(args []string) (int, error) {
 		s.Argv, s.Cwd = argv, cwd
 		// A session from an older airbag may have stored a wider
 		// passthrough; keep only today's. This run's directory may have
-		// its own transcript directory.
-		sandbox.NarrowPassthrough(s)
-		sandbox.AddClaudeProjectState(s, cwd)
+		// its own transcript directory. An optional runtime has a private
+		// HOME and passes nothing through, as when it was created.
+		if execution.Name == "native" {
+			sandbox.NarrowPassthrough(s)
+			sandbox.AddClaudeProjectState(s, cwd)
+		}
 		for _, h := range allow {
 			if !slices.Contains(s.Allow, h) {
 				s.Allow = append(s.Allow, h)
@@ -318,7 +346,7 @@ func cmdRun(args []string) (int, error) {
 		projPass, holes := sandbox.ClaudeProjectState(cwd, ws)
 		pass = append(pass, projPass...)
 		meta := session.Meta{
-			Backend: execution.Name, Isolation: execution.Isolation, RequireIsolation: *requireIsolation,
+			Backend: execution.Name, Isolation: execution.Isolation, RequireIsolation: *requireIsolation, Runtime: runtimeConfig,
 			Egress:    execution.ForRun(hiddenHost, forwards).Egress,
 			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
@@ -333,6 +361,9 @@ func cmdRun(args []string) (int, error) {
 		}
 		if cacheExplicit {
 			meta.FileCache = *fileCache
+		}
+		if execution.Name != "native" {
+			meta.OverHome, meta.Clone, meta.Passthrough, meta.BranchHoles = false, true, nil, nil
 		}
 		if runtime.GOOS == "darwin" {
 			// The macOS prototype: the workspace branch is a clone, $HOME

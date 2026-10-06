@@ -29,15 +29,16 @@ const (
 type Meta struct {
 	// Execution boundary and the user's persisted requirement. Empty fields
 	// identify legacy native sessions, not a stronger isolation guarantee.
-	Backend          string    `json:"backend,omitempty"`
-	Isolation        string    `json:"isolation,omitempty"`
-	Egress           string    `json:"egress,omitempty"`
-	RequireIsolation string    `json:"require_isolation,omitempty"`
-	ID               string    `json:"id"`
-	Created          time.Time `json:"created"`
-	Ended            time.Time `json:"ended,omitzero"`
-	Workspace        string    `json:"workspace"`
-	Home             string    `json:"home"`
+	Runtime          RuntimeConfig `json:"runtime,omitzero"`
+	Backend          string        `json:"backend,omitempty"`
+	Isolation        string        `json:"isolation,omitempty"`
+	Egress           string        `json:"egress,omitempty"`
+	RequireIsolation string        `json:"require_isolation,omitempty"`
+	ID               string        `json:"id"`
+	Created          time.Time     `json:"created"`
+	Ended            time.Time     `json:"ended,omitzero"`
+	Workspace        string        `json:"workspace"`
+	Home             string        `json:"home"`
 	// WorkspaceID and HomeID: the directories Workspace and Home were
 	// when the session began. Apply writes nothing below one that is
 	// another directory now.
@@ -51,6 +52,9 @@ type Meta struct {
 	Status      string   `json:"status"`
 	ExitCode    int      `json:"exit_code"`
 	Allow       []string `json:"allow"`
+	// RuntimeCopied: an optional runtime's branch holds the whole
+	// workspace, copied before its first run. Until then it has none.
+	RuntimeCopied bool `json:"runtime_copied,omitempty"`
 	// Paths under $HOME that bypass the branch (agent state, logs).
 	Passthrough []string `json:"passthrough"`
 	// BranchHoles: paths under a Passthrough directory that stay in the
@@ -107,6 +111,14 @@ type Meta struct {
 	// for what is below it). A path changed after that, rather than after
 	// Baseline, conflicts: the apply's own write is not a host edit.
 	Applied map[string]time.Time `json:"applied,omitempty"`
+}
+
+// RuntimeConfig persists the exact optional provider configuration for resume.
+// Paths name operator-supplied trusted artifacts; they are never guest requests.
+type RuntimeConfig struct {
+	RootFS string `json:"rootfs,omitempty"`
+	Binary string `json:"binary,omitempty"`
+	Kernel string `json:"kernel,omitempty"`
 }
 
 // DirID is a directory as a session found it: its path with links
@@ -210,9 +222,13 @@ func (s *Session) CheckRoots() error {
 	return nil
 }
 
+// Optional reports a session of an optional runtime (gVisor, a
+// microVM). An empty Backend is a native session from before the option.
+func (m Meta) Optional() bool { return m.Backend != "" && m.Backend != "native" }
+
 // HomeUnrecorded reports a $HOME the session records nothing for: one
 // not branched, and not there (or not readable) when it began, or on
-// Linux, where nothing writes in it. Nothing tells what is there now
+// Linux and in an optional runtime, where nothing writes in it. Nothing tells what is there now
 // from what was, so run makes and opens nothing there. A session from
 // before roots were recorded has no workspace recorded either, and
 // keeps what it did then.
@@ -264,9 +280,10 @@ func Create(m Meta) (*Session, error) {
 	// refuse them once they are other directories. The workspace, and a
 	// $HOME that is branched, must be recorded, or the session is
 	// refused. A $HOME that is not branched is written only on macOS
-	// (Clone), for agent state: it is recorded where it can be, and one
-	// that is not (not there, HOME=/nonexistent, say) gets nothing made or
-	// written there (HomeUnrecorded). On Linux nothing writes in it, so
+	// (a native Clone), for agent state: it is recorded where it can be,
+	// and one that is not (not there, HOME=/nonexistent, say) gets nothing
+	// made or written there (HomeUnrecorded). On Linux, and in an optional
+	// runtime, whose branch is a clone too, nothing writes in it, so
 	// nothing is recorded or checked.
 	for _, r := range []struct {
 		path string
@@ -276,7 +293,7 @@ func Create(m Meta) (*Session, error) {
 			continue
 		}
 		unbranched := r.id == &m.HomeID && !m.OverHome
-		if unbranched && !m.Clone {
+		if unbranched && (!m.Clone || m.Optional()) {
 			continue
 		}
 		id, err := RecordDirID(r.path)
@@ -321,6 +338,24 @@ func (s *Session) EtcWork() string             { return filepath.Join(s.Dir, "et
 func (s *Session) MountDir(name string) string { return filepath.Join(s.Dir, "mnt", name) }
 func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "run") }
 func (s *Session) CloneDir() string            { return filepath.Join(s.Dir, "ws", "clone") }
+
+// RuntimeBranchError says why an optional runtime's session has no branch
+// to review or apply: the copy of the workspace did not finish (or an
+// older airbag made it, possibly empty), or the branch is gone. Compared
+// with the real files, such a branch shows every file it lacks as deleted,
+// and apply would remove them. Discard still works.
+func (s *Session) RuntimeBranchError() error {
+	if !s.Optional() {
+		return nil
+	}
+	if !s.RuntimeCopied {
+		return fmt.Errorf("session %s has no complete branch: its copy of the workspace did not finish, or an older airbag made it; nothing to review or apply, discard it", s.ID)
+	}
+	if fi, err := os.Lstat(s.CloneDir()); err != nil || !fi.IsDir() {
+		return fmt.Errorf("session %s has lost its branch %s; nothing to review or apply, discard it", s.ID, s.CloneDir())
+	}
+	return nil
+}
 func (s *Session) ForwardSock(i int) string {
 	return filepath.Join(s.RunDir(), fmt.Sprintf("fwd-%d.sock", i))
 }

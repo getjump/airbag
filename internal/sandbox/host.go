@@ -35,6 +35,7 @@ type hostServices struct {
 	Proxy     *proxy.Proxy
 	ProxyAddr net.Addr
 	box       *outbox.Box
+	ctl       *control.Server
 	servers   []*http.Server
 	listeners []net.Listener
 	forwards  []*forwarder
@@ -101,9 +102,16 @@ func startHostServices(s *session.Session, allow proxy.Allowlist, pol *policy.Po
 	if h.box, err = outbox.Open(s.EffectsPath()); err != nil {
 		return nil, err
 	}
-	ctl := &control.Server{Box: h.box, Log: h.Log, Steps: steps.NewTracker(s), Gate: h.Gate, Root: ep.ControlRoot}
+	// A microVM's branch changes on the host only when its export is
+	// taken, after the run, so no tool call could be told what it
+	// changed; the review still shows every change.
+	var tracker *steps.Tracker
+	if s.Backend != "microvm" {
+		tracker = steps.NewTracker(s)
+	}
+	h.ctl = &control.Server{Box: h.box, Log: h.Log, Steps: tracker, Gate: h.Gate, Root: ep.ControlRoot}
 	h.serve(h.Proxy.HTTPServer(), h.Proxy.LimitListener(pl))
-	h.serve(ctl.HTTPServer(), control.LimitListener(cl))
+	h.serve(h.ctl.HTTPServer(), control.LimitListener(cl))
 	return h, nil
 }
 

@@ -2,13 +2,9 @@
 
 package sandbox
 
-import (
-	"fmt"
-	"os"
-)
+import "fmt"
 
-// ExecInit exists on Linux only: cmdRun refuses --exec-policy elsewhere.
-func ExecInit(string, []string) {
-	fmt.Fprintln(os.Stderr, "airbag: exec policy requires Linux")
-	os.Exit(125)
-}
+func Guest([]string) int { fmt.Println("airbag: optional runtime guest requires Linux"); return 125 }
+
+// PreflightRuntime rejects non-Linux providers before reaching host readiness.
+func optionalHostReady(string, string) error { return nil }

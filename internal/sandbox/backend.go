@@ -38,19 +38,24 @@ type Backend struct {
 	Limitations     []string `json:"limitations"`
 }
 
+// sharedLimitations hold for every backend: they come from the host's
+// policy, proxy and credentials, which all backends share.
+var sharedLimitations = []string{
+	"allowed network destinations can receive agent data and perform remote effects",
+	"credential placeholders do not provide JIT issuance, token scope or TTL",
+	"secret taint narrows egress; it is not a general automatic process kill switch",
+}
+
 func NativeBackend() Backend { return nativeBackend(runtime.GOOS) }
 
 func nativeBackend(platform string) Backend {
 	b := Backend{
 		Schema: 1, Name: "native", Platform: platform, Isolation: "shared-kernel",
 		Readiness: "not-probed", Egress: EgressProxy,
-		Limitations: []string{
+		Limitations: append([]string{
 			"agent code shares the host kernel; kernel exploits are outside this boundary",
-			"allowed network destinations can receive agent data and perform remote effects",
 			"agent state passthroughs can persist without apply",
-			"credential placeholders do not provide JIT issuance, token scope or TTL",
-			"secret taint narrows egress; it is not a general automatic process kill switch",
-		},
+		}, sharedLimitations...),
 	}
 	switch platform {
 	case "linux":
@@ -74,6 +79,8 @@ func nativeBackend(platform string) Backend {
 // hides nothing, an older airbag's, is reported so), and every forward is
 // dialed from the host. macOS's profile allows no Nix socket whatever
 // HiddenHost says, and only the forwards to this machine (macForward).
+// The optional runtimes mount no host socket and refuse --nix-daemon and
+// forwards, so their egress is the proxy's.
 func (b Backend) ForRun(hiddenHost []string, forwards []session.Forward) Backend {
 	if b.Name != "native" || b.Egress != EgressProxy {
 		return b
@@ -93,11 +100,38 @@ func macForward(f session.Forward) bool {
 	return f.Host == "localhost" || f.Host == "127.0.0.1" || f.Host == "::1"
 }
 
+// UsesRuntimePolicies reports whether s asks for a runtime policy
+// option, which only the native sandbox runs.
+func UsesRuntimePolicies(s *session.Session) bool {
+	return s.FilePolicy || s.ExecPolicy || s.RuntimeProfile || s.FileCache != "" && s.FileCache != "off" || s.RuntimeAudit == "buffered"
+}
+
 // SelectBackend never substitutes native execution for an unavailable backend.
 func SelectBackend(name, isolation string) (Backend, error) {
 	b := NativeBackend()
 	if name != "native" {
-		return Backend{}, fmt.Errorf("execution backend %q is unavailable in this build; only native is implemented (no fallback)", name)
+		if runtime.GOOS != "linux" || (name != "gvisor" && name != "microvm") {
+			return Backend{}, fmt.Errorf("execution backend %q is unavailable on %s (no fallback)", name, runtime.GOOS)
+		}
+		b.Name, b.HomeBranch, b.WorkspaceBranch = name, false, "private-copy"
+		b.Readiness = "experimental; runtime preflight required"
+		b.Limitations = append([]string{
+			"isolated profile requires --no-home; host HOME and agent state passthroughs are unavailable",
+			"workspace secret files, explicit hide rules, TCP forwards and Nix daemon access are rejected",
+			"noninteractive execution only; no terminal resize/job control",
+			"command models remain shim-based; complete filesystem/process audit is unavailable",
+			"trusted rootfs and runtime binaries are supplied by the operator; no image provenance verification",
+		}, sharedLimitations...)
+		if name == "gvisor" {
+			b.Isolation, b.Mechanism = "application-kernel", "runsc-systrap+network-none+scoped-unix-sockets"
+			b.Limitations = append(b.Limitations,
+				"run as root, runsc is rootful: the sandbox's uid 0 is the host's root for its file access, and the branch's files are owned by root")
+		} else {
+			b.Isolation, b.Mechanism = "virtual-machine", "firecracker-kvm+no-nic+scoped-vsock"
+			b.Limitations = append(b.Limitations,
+				"Firecracker runs without its jailer: a VMM escape runs as the invoking user, with their HOME, credentials and unfiltered network, and no chroot, cgroup or uid drop (Firecracker's own seccomp filters still apply)",
+				"fleet resource management is not integrated")
+		}
 	}
 	if b.Isolation == "unsupported" {
 		return Backend{}, fmt.Errorf("native execution is unsupported on %s", b.Platform)
