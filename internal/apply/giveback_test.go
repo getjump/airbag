@@ -199,3 +199,46 @@ func TestMarkOpaqueLeavesWhatIsNotADirectory(t *testing.T) {
 		t.Fatal("a path that leads out of the branch was not refused")
 	}
 }
+
+// A version the agent put at the path after giveBack found it empty (in
+// a run still going) stays: the agent's version from the journal is not
+// renamed over it, and no temp file is left beside it.
+func TestGiveBackKeepsWhatAppearedSince(t *testing.T) {
+	branch, src := t.TempDir(), filepath.Join(t.TempDir(), "journal-version")
+	if err := os.WriteFile(src, []byte("from the journal\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(branch, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(branch, "d", "f"), []byte("newer, the agent's\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("elsewhere", filepath.Join(branch, "d", "l")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.OpenRoot(branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	if err := copyFileIn(r, src, "d/f", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(branch, "d", "f")); got != "newer, the agent's\n" {
+		t.Fatalf("the agent's newer version was replaced: %q", got)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink("from the journal", link); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyTreeIn(r, link, "d/l"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.Readlink(filepath.Join(branch, "d", "l")); got != "elsewhere" {
+		t.Fatalf("the agent's link was replaced: %q", got)
+	}
+	if ents, _ := os.ReadDir(filepath.Join(branch, "d")); len(ents) != 2 {
+		t.Fatalf("left beside them: %v", ents)
+	}
+}

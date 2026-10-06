@@ -744,7 +744,10 @@ func giveBack(e genEntry, clone bool, branch string) error {
 			return err
 		}
 		defer func() { _ = dir.Close() }()
-		return whiteoutAt(dir, filepath.Base(rel))
+		if err := whiteoutAt(dir, filepath.Base(rel)); !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		return nil // the agent's own, made since
 	case e.Type == fs.ModeDir:
 		if err := r.MkdirAll(rel, 0o755); err != nil {
 			return err
@@ -901,7 +904,10 @@ func copyTreeIn(r *os.Root, from, to string) error {
 			if err != nil {
 				return err
 			}
-			return r.Symlink(t, dst)
+			if err := r.Symlink(t, dst); !errors.Is(err, fs.ErrExist) {
+				return err
+			}
+			return nil // the agent's own, made since
 		case info.Mode().IsRegular():
 			return copyFileIn(r, p, dst, info.Mode().Perm())
 		}
@@ -943,7 +949,17 @@ func copyFileIn(r *os.Root, src, dst string, mode fs.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return r.Rename(tmp, dst)
+	dir, err := r.Open(filepath.Dir(dst))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	// Not over dst: an agent still running may have put a version of its
+	// own there since giveBack found the path empty, and that one stays.
+	if err := renameNoReplace(dir, filepath.Base(tmp), filepath.Base(dst)); !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	return nil
 }
 
 // Held is the user's version of Path from before an apply, which only
