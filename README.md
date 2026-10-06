@@ -21,10 +21,11 @@ apply it, take it onto a git branch, or throw it away.
 [Threat model](#threat-model) · [FAQ](#faq) · [Docs](#docs)
 
 > [!NOTE]
-> Early v0, Linux first; macOS is a prototype. airbag is not a VM: the kernel is
-> shared, and whatever the agent reads is still sent to the model API. It guards
-> against accidents and casual exfiltration by an agent you let run without
-> prompts; for code that may try to break out, use a VM. See the
+> Early v0, Linux first; macOS is a prototype. By default airbag is not a VM: the
+> native backend shares the host's kernel, and whatever the agent reads is still
+> sent to the model API. It guards against accidents and casual exfiltration by an
+> agent you let run without prompts; for code that may try to break out, use a VM
+> (airbag's experimental microVM backend has its own limits). See the
 > [threat model](#threat-model).
 
 ```console
@@ -98,7 +99,7 @@ pushes.
 
 | | Built-in sandbox (Claude Code, Codex) | Dev container | VM or microVM | airbag |
 |---|---|---|---|---|
-| Isolation | bubblewrap on Linux, Seatbelt on macOS | a container; shared kernel | its own kernel | namespaces, overlayfs and seccomp around the whole agent; shared kernel |
+| Isolation | bubblewrap on Linux, Seatbelt on macOS | a container; shared kernel | its own kernel | namespaces, overlayfs and seccomp around the whole agent; shared kernel by default (experimental gVisor and microVM backends on Linux) |
 | You decide | during the run, at each prompt | before: mounts and network | before: what goes in | after: one review of the whole run |
 | Writes to the workspace | land in place | land in place (bind mount) | stay in the VM until you copy or merge them out | stay in a branch until `apply`; `rollback` undoes an apply |
 | `git push` | runs if the network allows it | runs if the network allows it | runs if the network allows it | waits in the outbox until review |
@@ -124,12 +125,15 @@ the allowlist and policy decide beforehand. Review shows that they happened.
 ## Threat model
 
 airbag protects against accidents and casual exfiltration by an agent you let run
-without prompts. It is not a VM: the kernel is shared, and whatever the agent reads
-is still sent to the model API. A bound credential keeps its value from the agent,
+without prompts. By default it is not a VM: the native backend shares the host's
+kernel (the experimental `--backend=microvm` boots a guest kernel instead, with the
+limits in [docs/runtime-options.md](docs/runtime-options.md)), and whatever the
+agent reads is still sent to the model API. A bound credential keeps its value from the agent,
 not its use: through the bound hosts the agent can do what the token allows.
 
-- **The kernel.** The seccomp filter makes the shared kernel a smaller target, not
-  a VM boundary. `airbag doctor` reports the host sysctls that harden the rest.
+- **The kernel.** With the native backend, the seccomp filter makes the shared
+  kernel a smaller target, not a VM boundary. `airbag doctor` reports the host
+  sysctls that harden the rest.
 - **The network.** For hosts without a credential the proxy decides from the name
   the client asks for and does not see inside TLS, so a broad allowlist entry
   (`github.com`) is a way for data to leave. Allow narrow names, and where that
