@@ -349,7 +349,14 @@ func TestRollbackWaitsForTheRunLock(t *testing.T) {
 // killed under it, with the lock and the socket gone) holds the rollback
 // off too.
 func TestRollbackWaitsForALiveAgent(t *testing.T) {
-	t.Setenv("AIRBAG_HOME", t.TempDir())
+	// A short root: a unix socket path has room for about 100 bytes, and
+	// one longer reads as a run that may be live.
+	root, err := os.MkdirTemp("/tmp", "rb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("AIRBAG_HOME", root)
 	ws := t.TempDir()
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
 	if err != nil {
