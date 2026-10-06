@@ -277,7 +277,7 @@ func writeJSONFile(root *os.Root, path string, value any) error {
 	return root.WriteFile(path, b, 0o600)
 }
 
-func runGVisor(ctx context.Context, s *session.Session, dir, root string) (int, error) {
+func runGVisor(ctx context.Context, s *session.Session, dir, root string) (code int, err error) {
 	mounts := []map[string]any{
 		{"destination": "/proc", "type": "proc", "source": "proc"},
 		{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
@@ -322,8 +322,12 @@ func runGVisor(ctx context.Context, s *session.Session, dir, root string) (int, 
 		return 1, err
 	}
 	common := []string{"--root=" + filepath.Join(dir, "state"), "--rootless=" + strconv.FormatBool(os.Getuid() != 0)}
+	// A sandbox that was not removed, or its state, is a failed run: what
+	// it left can stand in the way of resume and discard.
 	defer func() {
-		runscDelete(s.Runtime.Binary, append(common, "delete", "--force", s.ID), 30*time.Second)
+		if e := runscDelete(s.Runtime.Binary, append(common, "delete", "--force", s.ID), 30*time.Second); e != nil {
+			err = errors.Join(err, e)
+		}
 		// Run as root, runsc leaves --network=none's namespace mounted in
 		// its state directory, which resume and discard then cannot remove.
 		_ = unix.Unmount(filepath.Join(dir, "state", "null-netns"), unix.MNT_DETACH|unix.UMOUNT_NOFOLLOW)
@@ -338,13 +342,22 @@ var notifyProvider = signal.Notify
 
 // runscDelete removes the run's sandbox, and gives up after limit: the
 // run's signals stay caught until it has returned, so a delete that hung
-// would hold airbag up until a SIGKILL.
-func runscDelete(binary string, args []string, limit time.Duration) {
+// would hold airbag up until a SIGKILL. --force takes a sandbox that is
+// gone already as removed.
+func runscDelete(binary string, args []string, limit time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...) //nolint:gosec // trusted runsc, fixed runtime operation
 	cmd.Env = providerEnv()
-	_ = cmd.Run()
+	cmd.WaitDelay = time.Second // a process it left holding the output
+	out, err := cmd.CombinedOutput()
+	switch {
+	case ctx.Err() != nil:
+		return fmt.Errorf("runsc delete did not end within %s; its sandbox may be left", limit)
+	case err != nil:
+		return fmt.Errorf("runsc delete: %w: %s", err, bytes.TrimSpace(out[:min(len(out), 4096)]))
+	}
+	return nil
 }
 
 func executeProvider(ctx context.Context, binary string, args []string) (int, error) {
@@ -359,8 +372,10 @@ func executeProvider(ctx context.Context, binary string, args []string) (int, er
 	notifyProvider(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
 	defer keepCaught(ctx, sigs)
 	// The provider takes the signals over from the staging, with no gap
-	// between: its own are registered first, and one that came before
-	// the start, in either, starts nothing.
+	// between: its own are registered first, so none is lost. One that
+	// came before the check below starts nothing; one between the check
+	// and the start reaches the provider as soon as it has started, as one
+	// just after would.
 	endStaging(ctx)
 	if err := pending(ctx, sigs); err != nil {
 		return 1, err

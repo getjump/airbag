@@ -119,10 +119,9 @@ func endStaging(ctx context.Context) {
 }
 
 // pending is the staging's interruption, or one that reached the
-// provider's own signals before it started. The provider registers them
+// provider's own signals before the check. The provider registers them
 // before the staging ends, so a signal is the staging's, and has
-// cancelled it once endStaging returns, or is in the provider's channel:
-// either way nothing starts.
+// cancelled it once endStaging returns, or is in the provider's channel.
 func pending(ctx context.Context, sigs <-chan os.Signal) error {
 	select {
 	case sig := <-sigs:

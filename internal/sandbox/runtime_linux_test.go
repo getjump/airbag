@@ -133,9 +133,31 @@ func TestRunscDeleteIsBounded(t *testing.T) {
 		t.Skip("no sh")
 	}
 	start := time.Now()
-	runscDelete(sh, []string{"-c", "sleep 20"}, 100*time.Millisecond)
-	if took := time.Since(start); took > 5*time.Second {
-		t.Fatalf("a hung delete held the run for %s", took)
+	err = runscDelete(sh, []string{"-c", "sleep 20 & wait"}, 100*time.Millisecond) // a child that holds the output
+	if took := time.Since(start); took > 5*time.Second || err == nil || !strings.Contains(err.Error(), "did not end within") {
+		t.Fatalf("a hung delete held the run for %s: %v", took, err)
+	}
+}
+
+// A runsc delete that fails fails the run, with what runsc said: the
+// sandbox or its state may be left.
+func TestFailedRunscDeleteFailsTheRun(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", filepath.Join(t.TempDir(), "sessions"))
+	runsc := filepath.Join(t.TempDir(), "runsc")
+	script := "#!/bin/sh\nfor a; do [ \"$a\" = delete ] && { echo 'cannot destroy the sandbox' >&2; exit 3; }; done\nexit 0\n"
+	if err := os.WriteFile(runsc, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir(), Backend: "gvisor", Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Runtime.Binary = runsc
+	if _, err := runGVisor(context.Background(), s, t.TempDir(), t.TempDir()); err == nil || !strings.Contains(err.Error(), "cannot destroy the sandbox") {
+		t.Fatalf("a failed delete: %v", err)
+	}
+	if err := runscDelete("/bin/true", nil, time.Second); err != nil {
+		t.Fatalf("a delete that went through: %v", err)
 	}
 }
 
