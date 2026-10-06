@@ -102,6 +102,16 @@ func TestAgentLockHoldsOffTheRunLock(t *testing.T) {
 	if _, err := lock.Write([]byte("x")); err == nil {
 		t.Fatal("the agent lock's descriptor writes")
 	}
+	// A shared lock, which a read-only descriptor can hold where flock
+	// is a byte-range lock (NFS): another shared one goes beside it.
+	other, err := os.Open(s.AgentLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(other.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		t.Fatalf("the agent lock is not a shared one: %v", err)
+	}
+	_ = other.Close()
 	child := exec.CommandContext(t.Context(), "sleep", "30")
 	child.ExtraFiles = []*os.File{lock}
 	if err := child.Start(); err != nil {

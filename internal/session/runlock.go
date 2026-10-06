@@ -44,12 +44,10 @@ func (s *Session) LockRun() (unlock func(), err error) {
 	}
 	// With the run lock held, no run starts to take the agent lock; one
 	// held now is an earlier run's.
-	agent, err := s.lockAgent()
-	if err != nil {
+	if err := s.probeAgent(); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
-	_ = agent.Close()
 	held.Store(f, struct{}{})
 	return func() {
 		held.Delete(f)
@@ -61,23 +59,41 @@ func (s *Session) LockRun() (unlock func(), err error) {
 // agent, which holds it from then on: on macOS the lock lasts as long as
 // the agent, or a process of its that keeps the descriptor, runs, past an
 // airbag killed under it too, and LockRun refuses until then. The
-// descriptor is read-only, so the agent can write nothing through it.
-// The caller closes its own once the agent has started.
-func (s *Session) LockAgent() (*os.File, error) { return s.lockAgent() }
-
-func (s *Session) lockAgent() (*os.File, error) {
+// descriptor is read-only, so the agent can write nothing through it, and
+// its lock is a shared one: on NFS, where flock is a byte-range lock, an
+// exclusive one would need a writable descriptor. The caller closes its
+// own once the agent has started.
+func (s *Session) LockAgent() (*os.File, error) {
+	if err := s.probeAgent(); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(s.AgentLockPath(), os.O_CREATE|os.O_RDONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, ErrAgentLives
-		}
 		return nil, err
 	}
 	return f, nil
+}
+
+// probeAgent is ErrAgentLives while anything holds the agent lock: an
+// exclusive lock, through a writable descriptor of airbag's own, cannot
+// be taken beside a shared one.
+func (s *Session) probeAgent() error {
+	f, err := os.OpenFile(s.AgentLockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return ErrAgentLives
+		}
+		return err
+	}
+	return nil
 }
 
 // lockPath is the run lock's file. Create makes it, so a resume that is
