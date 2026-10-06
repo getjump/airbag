@@ -12,9 +12,11 @@ T=$(mktemp -d "$HOME/.airbag-killed-run-e2e.XXXXXX")
 nap=$((3000 + $$ % 1000))
 agent="^[^ ]*sleep $nap\$"
 pid=''
+fresh="^[^ ]*sleep $((nap + 1))\$"
 cleanup() {
 	[ -z "$pid" ] || kill -9 "$pid" 2>/dev/null || true
 	pkill -9 -f "$agent" 2>/dev/null || true
+	pkill -9 -f "$fresh" 2>/dev/null || true
 	rm -rf "$T"
 }
 trap cleanup EXIT
@@ -28,6 +30,27 @@ id=$("$AIRBAG" ls | awk 'NR==1{print $1}')
 # A partial apply: the session stays one to resume.
 "$AIRBAG" apply --only f.txt --yes "$id" >/dev/null
 [ "$(cat f.txt)" = agent ] || fail "f.txt not applied"
+
+# A new run holds its session's run lock from before its agent starts,
+# as a resumed one does: a rollback finds it in use, not only running.
+"$AIRBAG" run -- sleep "$((nap + 1))" </dev/null >"$T/out" 2>&1 &
+pid=$!
+i=0
+until pgrep -f "$fresh" >/dev/null; do
+	i=$((i + 1))
+	[ "$i" -lt 100 ] || fail "the new run's agent did not start: $(cat "$T/out")"
+	sleep 0.1
+done
+id2=$("$AIRBAG" ls | awk 'NR==1{print $1}')
+[ "$id2" != "$id" ] || fail "no new session"
+if out=$("$AIRBAG" rollback "$id2" 2>&1); then
+	fail "rolled back a new run's session: $out"
+fi
+echo "$out" | grep -q "or another rollback is" || fail "the new run does not hold its run lock: $out"
+pkill -f "$fresh"
+wait "$pid" 2>/dev/null || true
+pid=''
+"$AIRBAG" discard --yes "$id2" >/dev/null 2>&1 || true
 
 # The resumed run's agent sleeps; airbag is killed under it.
 "$AIRBAG" run --session "$id" -- sleep "$nap" </dev/null >"$T/out" 2>&1 &
