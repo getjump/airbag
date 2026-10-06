@@ -737,7 +737,14 @@ func giveBack(e genEntry, clone bool, branch string) error {
 	}
 	defer func() { _ = r.Close() }()
 	if clone && e.Kind == review.Deleted {
-		return nil // absent from the clone is what a deletion is
+		// Absent from the clone is what a deletion is, and what is at
+		// the path now is the agent's: nothing to write. The path is
+		// still looked up through the root, so a directory on the way
+		// made a link out of the branch stops the rollback here too.
+		if _, err := r.Lstat(rel); err != nil && !gone(err) {
+			return err
+		}
+		return nil
 	}
 	switch _, err := r.Lstat(rel); {
 	case err == nil:
