@@ -2708,3 +2708,53 @@ func TestFinishedRollbackReplaysNothing(t *testing.T) {
 		t.Fatalf("the finished journal is left: %+v %v", g, err)
 	}
 }
+
+// A rollback whose last journal save fails is not done: it stops with
+// the session as it was, so apply still refuses, and the rollback run
+// once the journal can be written finishes it.
+func TestFinishedRollbackNeedsItsLastSave(t *testing.T) {
+	s, box, ws := modifiedApplied(t)
+	s.Status = session.StatusApplied
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	g, err := lastGeneration(s)
+	if err != nil || g == nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(g.dir, "journal.json.tmp")
+	afterRemove = func(string) {
+		afterRemove = nil
+		// From here on no journal can be written.
+		if err := os.Mkdir(blocker, 0o700); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "cannot say so yet") {
+		t.Fatalf("a rollback whose journal cannot say it is done went on: %v\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
+		t.Fatalf("not rolled back: %q", got)
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status != session.StatusApplied {
+		t.Fatalf("the session moved on without the journal: %+v %v", saved, err)
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "stopped part way") {
+		t.Fatalf("apply ran: %v", err)
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied {
+		t.Fatalf("the session is left applied: %+v %v", saved, err)
+	}
+	if g, err := lastGeneration(s); err != nil || g != nil {
+		t.Fatalf("the finished journal is left: %+v %v", g, err)
+	}
+}

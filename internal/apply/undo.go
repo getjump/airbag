@@ -477,10 +477,15 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		// after a crash in between has nothing to replay: replayed, an
 		// entry rolled back since its last save would take a file the
 		// user made again at its path, the same as the agent's, for the
-		// agent's. Best effort: without it, the last save is replayed,
-		// which finds nothing else to do.
+		// agent's. For a rollback the user ran, until it is saved the
+		// rollback is not done: the session is left as it is, and apply
+		// still refuses. An apply's own rollback needs no space to write
+		// (one that failed for want of space rolls back all the same): its
+		// session was never applied, and its journal goes at once.
 		g.Entries, g.Dirs = nil, nil
-		_ = g.save()
+		if err := g.save(); err != nil && g.Complete {
+			return left, fmt.Errorf("everything is rolled back, but the journal cannot say so yet: %w; once that is fixed, roll back again to finish", err)
+		}
 		return left, nil
 	}
 	// Keep what was left, with its previous versions, so nothing from
