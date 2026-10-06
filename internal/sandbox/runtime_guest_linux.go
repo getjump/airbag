@@ -68,10 +68,13 @@ func Guest(args []string) int {
 		code = guestAgent(c, vm)
 	}
 	if vm {
-		// Kill agent descendants before reading the exported tree; no process may
-		// keep mutating it after the main command exits.
-		_ = syscall.Kill(-1, syscall.SIGKILL)
-		if err := guestExport(code, exportOf(c.Workspace, setupErr)); err != nil {
+		// No process of the agent's may be left to change the tree while
+		// the export reads it.
+		reapErr := reapAll(func() { _ = syscall.Kill(-1, syscall.SIGKILL) }, 10*time.Second)
+		if reapErr != nil {
+			fmt.Fprintln(os.Stderr, "airbag guest:", reapErr)
+		}
+		if err := guestExport(code, exportOf(c.Workspace, setupErr, reapErr)); err != nil {
 			fmt.Fprintln(os.Stderr, "airbag guest export:", err)
 		}
 		unix.Sync()
@@ -98,13 +101,45 @@ func guestExport(code int, export func(io.Writer) (exportStats, error)) error {
 // setup the agent never ran, and what is at the workspace's path may be
 // the rootfs's empty placeholder rather than the branch (the disk not
 // mounted): the export fails, and the host keeps the branch as it was.
-func exportOf(workspace string, setupErr error) func(io.Writer) (exportStats, error) {
-	if setupErr != nil {
+func exportOf(workspace string, setupErr, reapErr error) func(io.Writer) (exportStats, error) {
+	switch {
+	case setupErr != nil:
 		return func(io.Writer) (exportStats, error) {
 			return exportStats{}, fmt.Errorf("guest setup: %w", setupErr)
 		}
+	case reapErr != nil:
+		return func(io.Writer) (exportStats, error) { return exportStats{}, reapErr }
 	}
 	return func(w io.Writer) (exportStats, error) { return exportWorkspace(workspace, w, true) }
+}
+
+// reapAll stops every process but this one and waits until none is left.
+// A process SIGKILL has reached is not gone until it is reaped, and one in
+// the middle of a write finishes that write first: an export read before
+// then could take a tree still being changed, with a digest that matches
+// what it read. Orphans come to PID 1, which the microVM's guest is, so it
+// waits for them all. kill is called again each round, for a process forked
+// while the last signal was on its way. A process that does not go within
+// limit fails the export, and the branch is kept as it was.
+func reapAll(kill func(), limit time.Duration) error {
+	deadline := time.Now().Add(limit)
+	for {
+		kill()
+		var status syscall.WaitStatus
+		pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
+		switch {
+		case errors.Is(err, syscall.ECHILD):
+			return nil
+		case errors.Is(err, syscall.EINTR), err == nil && pid > 0:
+			continue
+		case err != nil:
+			return fmt.Errorf("wait for the agent's processes: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the agent's processes did not stop within %s; the branch is kept as it was", limit)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func guestSetup(c guestConfig, vm bool) error {

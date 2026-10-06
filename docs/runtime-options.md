@@ -29,9 +29,10 @@ there is no automatic download or image provenance claim. Keep runsc's matching
 need unprivileged user namespaces. Firecracker needs writable `/dev/kvm`,
 `mkfs.ext4`, and a kernel with built-in ext4, devtmpfs and virtio-vsock support.
 Both stage the rootfs with GNU `cp` (coreutils) from `PATH`. Rootfs and sessions
-must be separate from the workspace, and the runtime binary, the kernel, and the
-`cp` and `mkfs.ext4` found on `PATH` must lie outside the workspace and the
-sessions: a `PATH` entry into the project is refused. A workspace reached
+must be separate from the workspace, and the runtime binary, the kernel, runsc's
+`gvisor-bin` sidecars (and what links there lead to), and the `cp` and
+`mkfs.ext4` found on `PATH` must lie outside the workspace and the sessions: a
+`PATH` entry into the project is refused. A workspace reached
 through a symlink is checked and copied as the directory it names. Commands must
 exist inside the image; host executable paths are not imported.
 
@@ -112,7 +113,8 @@ session stays marked running, as a native one cut short does.
 
 This adapter supports noninteractive commands and rejects terminal stdin; PTY/resize/job control are not
 provided. Each microVM run starts fresh HOME/tmp and exports only workspace;
-background processes are killed before export. When the export is cut short,
+background processes are killed, and waited for, before export. One that does not
+stop within 10 s fails the export, and the branch is kept. When the export is cut short,
 fails in the guest or does not match, the prior branch is retained and the run
 fails; a run that fails
 after the session exists still records it stopped, so it can be reviewed,

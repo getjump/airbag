@@ -152,6 +152,92 @@ func TestRuntimeFilesComeFromOutside(t *testing.T) {
 	}
 }
 
+// runsc runs the sidecars in gvisor-bin next to it on the host: a
+// gvisor-bin that is, or holds, a link into the workspace or the sessions
+// is refused before a session exists.
+func TestGVisorSidecarsComeFromOutside(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux profile")
+	}
+	sessions := filepath.Join(t.TempDir(), "sessions")
+	t.Setenv("AIRBAG_HOME", sessions)
+	workspace, rootfs := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "tools", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "tools", "sub", "gofer"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sessions, "s-x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b, err := SelectBackend("gvisor", "any")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, sidecars := range map[string]func(dir string){
+		"a link into the workspace": func(dir string) {
+			if err := os.Symlink(filepath.Join(workspace, "tools"), dir); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a file linked into the workspace": func(dir string) {
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(workspace, "tools", "sub", "gofer"), filepath.Join(dir, "gofer")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a directory outside that links into the sessions": func(dir string) {
+			between := t.TempDir()
+			if err := os.Symlink(filepath.Join(sessions, "s-x"), filepath.Join(between, "deeper")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(between, filepath.Join(dir, "lib")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a link to nothing": func(dir string) {
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(dir, "gofer")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bin := filepath.Join(t.TempDir(), "runsc")
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sidecars(filepath.Join(filepath.Dir(bin), "gvisor-bin"))
+			_, err := PreflightRuntime(b, session.RuntimeConfig{RootFS: rootfs, Binary: bin}, workspace, false, false, 0, &policy.Policy{})
+			if err == nil || strings.Contains(err.Error(), "sidecars") == (name == "a link to nothing") {
+				t.Fatalf("preflight: %v", err)
+			}
+		})
+	}
+	// Sidecars of its own, outside both, pass this check.
+	bin := filepath.Join(t.TempDir(), "runsc")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(filepath.Dir(bin), "gvisor-bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(bin), "gvisor-bin", "gofer"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PreflightRuntime(b, session.RuntimeConfig{RootFS: rootfs, Binary: bin}, workspace, false, false, 0, &policy.Policy{}); err != nil && strings.Contains(err.Error(), "sidecars") {
+		t.Fatalf("sidecars outside both refused: %v", err)
+	}
+}
+
 // The sessions inside the workspace, through a link as AIRBAG_HOME, are
 // refused before a session exists: the copy would copy itself.
 func TestSessionsOutsideTheWorkspace(t *testing.T) {

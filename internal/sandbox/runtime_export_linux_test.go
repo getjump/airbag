@@ -166,7 +166,7 @@ func TestImportTakesAWholeExport(t *testing.T) {
 func TestGuestExportsOnlyAfterSetup(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", filepath.Join(t.TempDir(), "s"))
 	placeholder := t.TempDir()
-	failed, err := sent(t, exportOf(placeholder, errors.New("mount /dev/vdb: no such device")))
+	failed, err := sent(t, exportOf(placeholder, errors.New("mount /dev/vdb: no such device"), nil))
 	if err == nil {
 		t.Fatal("the guest reports no failure")
 	}
@@ -191,7 +191,7 @@ func TestGuestExportsOnlyAfterSetup(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(s.CloneDir(), "kept.txt")); err != nil || string(b) != "branch\n" {
 		t.Fatalf("the branch is not kept: %q %v", b, err)
 	}
-	if _, err := sent(t, exportOf(guestWorkspace(t), nil)); err != nil {
+	if _, err := sent(t, exportOf(guestWorkspace(t), nil, nil)); err != nil {
 		t.Fatalf("a set-up guest's export: %v", err)
 	}
 }

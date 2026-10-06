@@ -1,7 +1,9 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,6 +102,21 @@ func PreflightRuntime(b Backend, c session.RuntimeConfig, workspace string, over
 	if !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0 {
 		return c, fmt.Errorf("runtime binary must be an executable regular file")
 	}
+	// runsc runs the sidecars in gvisor-bin next to it on the host, as
+	// the user: none of them may come from where the agent's files are.
+	if b.Name == "gvisor" {
+		var roots []string
+		for _, path := range []string{workspace, session.Root()} {
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				return c, err
+			}
+			roots = append(roots, follow(abs))
+		}
+		if err := outsideTrees(filepath.Join(filepath.Dir(c.Binary), "gvisor-bin"), roots, 0); err != nil {
+			return c, err
+		}
+	}
 	if b.Name == "microvm" {
 		if runtime.GOARCH != "amd64" {
 			return c, fmt.Errorf("microVM adapter currently requires Linux amd64")
@@ -149,6 +166,36 @@ func hostTool(name, workspace string) (string, error) {
 		}
 	}
 	return p, nil
+}
+
+// outsideTrees refuses p, and every file below it or a link in it leads
+// to, when one lies inside roots. A p that is not there passes: runsc then
+// has no sidecars to run.
+func outsideTrees(p string, roots []string, depth int) error {
+	if depth > 8 {
+		return fmt.Errorf("%s: too many links to follow", p)
+	}
+	real, err := filepath.EvalSymlinks(p)
+	if depth == 0 && errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, root := range roots {
+		if pathWithin(real, root) {
+			return fmt.Errorf("%s is %s, inside the workspace or the sessions; the runtime's sidecars must come from outside them", p, real)
+		}
+	}
+	return filepath.WalkDir(real, func(q string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return outsideTrees(q, roots, depth+1)
+		}
+		return nil
+	})
 }
 
 func pathWithin(path, root string) bool {
