@@ -983,11 +983,19 @@ func copyFile(src, dst string, mode fs.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil { //nolint:gosec // a directory in the user's workspace, with the usual mode less the umask
 		return err
 	}
-	in, err := os.Open(src)
+	// The agent may have left a FIFO, a socket or a device in its branch:
+	// a plain open of a FIFO waits for a writer, and would hold the apply
+	// there. Only a regular file is copied.
+	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }() // read only
+	if st, err := in.Stat(); err != nil {
+		return err
+	} else if !st.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file (%s); apply takes files, links and directories only: leave it out with apply -i, or discard the session", src, st.Mode().Type())
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".airbag-*")
 	if err != nil {
 		return err

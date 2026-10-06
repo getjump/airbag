@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -526,5 +527,60 @@ func TestReportComparesTheWorkspaceByFile(t *testing.T) {
 	}
 	if w := linkReport(t, ws, "latest", filepath.Join(other, "v2")); strings.Contains(w, "trust-links") {
 		t.Errorf("a link into the workspace, named in another case, holds the command: %s", w)
+	}
+}
+
+// A FIFO the agent left at a file's path in its branch is a change the
+// scan names, without opening it: an open would wait for a writer. Both
+// an upper layer and a clone.
+func TestScanDoesNotWaitOnAFIFO(t *testing.T) {
+	s := fakeSession(t)
+	// same.txt is in the workspace, with the FIFO's mode.
+	fifo := filepath.Join(s.WSUpper(), "same.txt")
+	if err := os.Remove(fifo); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Skipf("no FIFO here: %v", err)
+	}
+	if err := os.Chmod(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clone := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(clone, "same.txt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(clone, "same.txt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, scan := range map[string]func() ([]Change, error){
+		"upper": func() ([]Change, error) { return Scan(s) },
+		"clone": func() ([]Change, error) { return ScanTree("ws", s.Workspace, clone) },
+	} {
+		done := make(chan []Change, 1)
+		go func() {
+			cs, err := scan()
+			if err != nil {
+				t.Error(err)
+			}
+			done <- cs
+		}()
+		select {
+		case cs := <-done:
+			found := false
+			for _, c := range cs {
+				found = found || c.Rel == "same.txt" && c.Kind == Modified
+			}
+			if !found {
+				t.Errorf("%s: the FIFO at same.txt is not a change: %+v", name, cs)
+			}
+		case <-time.After(5 * time.Second):
+			for _, p := range []string{fifo, filepath.Join(clone, "same.txt")} {
+				if w, err := os.OpenFile(p, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+					_ = w.Close()
+				}
+			}
+			t.Fatalf("%s: the scan waited on a FIFO", name)
+		}
 	}
 }
