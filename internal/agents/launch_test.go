@@ -101,6 +101,12 @@ func TestPrepareLaunchSeedsMissingConfig(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(state, "config.toml")); err != nil || string(got) != "allow_login_shell = false\n" {
 		t.Fatalf("missing config = %q, %v; want nonlogin shell default", got, err)
 	}
+	if entries, err := os.ReadDir(state); err != nil || len(entries) != 1 {
+		t.Fatalf("private state entries = %v, %v; want config only", entries, err)
+	}
+	if fi, err := os.Stat(filepath.Join(state, "config.toml")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("private config stat = %v, %v; want permissions 0600", fi, err)
+	}
 }
 
 func TestPrepareLaunchRejectsStateSymlink(t *testing.T) {

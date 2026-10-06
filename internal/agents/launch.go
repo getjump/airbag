@@ -129,16 +129,30 @@ func PrepareLaunch(in PrepareLaunchIn) error {
 }
 
 func prepareLaunchConfig(state string) error {
-	f, err := os.OpenFile(filepath.Join(state, "config.toml"), os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o600)
-	if errors.Is(err, os.ErrExist) {
+	path := filepath.Join(state, "config.toml")
+	if _, err := os.Lstat(path); err == nil {
 		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check private agent defaults: %w", err)
 	}
+	f, err := os.CreateTemp(state, ".config-")
 	if err != nil {
 		return fmt.Errorf("create private agent defaults: %w", err)
 	}
+	defer func() { _ = os.Remove(f.Name()) }()
 	if _, err := f.WriteString("allow_login_shell = false\n"); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("write private agent defaults: %w", err)
 	}
-	return f.Close()
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync private agent defaults: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close private agent defaults: %w", err)
+	}
+	if err := os.Link(f.Name(), path); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("publish private agent defaults: %w", err)
+	}
+	return nil
 }
