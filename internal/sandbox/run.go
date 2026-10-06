@@ -96,10 +96,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if optional {
 		code, err := runOptional(ctx, s, host.ctl)
 		if err != nil {
-			if e := staged(ctx); e != nil {
-				code = exitCode(e)
-			}
-			return stopFailed(s, code, err)
+			return stopFailed(s, failedCode(ctx, code, err), err)
 		}
 		return code, stop(s, code)
 	}

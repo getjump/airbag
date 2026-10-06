@@ -3,11 +3,15 @@
 package sandbox
 
 import (
+	"archive/tar"
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -88,48 +92,155 @@ func TestProviderStartsOnlyAfterTheStaging(t *testing.T) {
 	}
 }
 
-// Interrupted, the copy of the branch returns without waiting for the
+// A copy that is interrupted, or fails, returns without waiting for the
 // exporter, whose read of the workspace (FUSE, NFS) can block.
-func TestInterruptedCopyDoesNotWaitForTheExporter(t *testing.T) {
-	t.Setenv("AIRBAG_HOME", filepath.Join(t.TempDir(), "sessions"))
-	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir(), Backend: "gvisor", Clone: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	release := make(chan struct{})
-	defer close(release)
-	exportBranch = func(string, io.Writer, bool) (exportStats, error) {
-		<-release // a read that does not return
-		return exportStats{}, errors.New("released")
-	}
-	defer func() { exportBranch = exportWorkspace }()
-	ctx, cancel := context.WithCancelCause(context.Background())
-	time.AfterFunc(50*time.Millisecond, func() { cancel(interrupted{syscall.SIGINT}) })
-	done := make(chan error, 1)
-	go func() { done <- prepareRuntimeWorkspace(ctx, s) }()
-	select {
-	case err := <-done:
-		if !errors.As(err, new(interrupted)) {
-			t.Fatalf("an interrupted copy: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the interrupted copy waited for a blocked exporter")
-	}
-	if _, err := os.Lstat(s.CloneDir()); !os.IsNotExist(err) {
-		t.Fatalf("an interrupted copy left the clone: %v", err)
+func TestCopyDoesNotWaitForABlockedExporter(t *testing.T) {
+	for name, write := range map[string]func(io.Writer){
+		"interrupted": func(io.Writer) {},
+		"failed": func(w io.Writer) { // an entry the import refuses
+			tw := tar.NewWriter(w)
+			_ = tw.WriteHeader(&tar.Header{Name: "../out", Typeflag: tar.TypeReg, Mode: 0o600})
+			_ = tw.Flush()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AIRBAG_HOME", filepath.Join(t.TempDir(), "sessions"))
+			s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir(), Backend: "gvisor", Clone: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			release := make(chan struct{})
+			defer close(release)
+			exportBranch = func(_ string, w io.Writer, _ bool) (exportStats, error) {
+				write(w)
+				<-release // a read that does not return
+				return exportStats{}, errors.New("released")
+			}
+			defer func() { exportBranch = exportWorkspace }()
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			if name == "interrupted" {
+				defer time.AfterFunc(50*time.Millisecond, func() { cancel(interrupted{syscall.SIGINT}) }).Stop()
+			}
+			done := make(chan error, 1)
+			go func() { done <- prepareRuntimeWorkspace(ctx, s) }()
+			select {
+			case err := <-done:
+				if interrupt := errors.As(err, new(interrupted)); err == nil || interrupt != (name == "interrupted") {
+					t.Fatalf("the copy: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the copy waited for a blocked exporter")
+			}
+			if _, err := os.Lstat(s.CloneDir()); !os.IsNotExist(err) {
+				t.Fatalf("the copy left the clone: %v", err)
+			}
+		})
 	}
 }
 
 // A signal that reached the provider's own channel before it started is
-// an interruption too: nothing starts.
-func TestPendingCatchesASignalBeforeTheStart(t *testing.T) {
-	sigs := make(chan os.Signal, 1)
-	if err := pending(context.Background(), sigs); err != nil {
-		t.Fatalf("no signal: %v", err)
+// an interruption too: nothing starts, and the run ends with the
+// signal's code.
+func TestProviderSignalBeforeTheStart(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip(err)
 	}
-	sigs <- syscall.SIGINT
+	notifyProvider = func(c chan<- os.Signal, sigs ...os.Signal) {
+		signal.Notify(c, sigs...)
+		c <- syscall.SIGINT // as one that comes right then
+	}
+	defer func() { notifyProvider = signal.Notify }()
+	code, err := executeProvider(context.Background(), sh, []string{"-c", "exit 0"})
 	var e interrupted
-	if err := pending(context.Background(), sigs); !errors.As(err, &e) || e.sig != syscall.SIGINT {
-		t.Fatalf("a queued signal: %v", err)
+	if !errors.As(err, &e) || e.sig != syscall.SIGINT {
+		t.Fatalf("the provider started past a signal: %d %v", code, err)
 	}
+	if code := failedCode(context.Background(), code, err); code != 128+int(syscall.SIGINT) {
+		t.Fatalf("the run's code: %d", code)
+	}
+}
+
+// A signal the staging got, but has not acted on when the provider takes
+// the signals over, is its interruption still.
+func TestHandOverKeepsAStagedSignal(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGHUP} {
+		for range 200 {
+			ctx, done := stage()
+			st, _ := ctx.Value(stagingKey{}).(*staging)
+			ch := st.hard
+			if sig == syscall.SIGINT {
+				ch = st.soft
+			}
+			ch <- sig // as package signal delivers it
+			endStaging(ctx)
+			err := staged(ctx)
+			done()
+			var e interrupted
+			if !errors.As(err, &e) || e.sig != sig {
+				t.Fatalf("%v before the hand-over: %v", sig, err)
+			}
+		}
+	}
+}
+
+// After the first signal, a second Ctrl-C ends airbag, should the
+// staging hang. A second hang-up, as a closed terminal sends, or kill
+// does not: the run goes on to save its stop.
+func TestSecondSignalDuringStaging(t *testing.T) {
+	for sig, ends := range map[syscall.Signal]bool{syscall.SIGINT: true, syscall.SIGHUP: false, syscall.SIGTERM: false} {
+		t.Run(sig.String(), func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestStagingSignalsHelper$") //nolint:gosec // this test binary, as the helper
+			cmd.Env = append(os.Environ(), "AIRBAG_TEST_STAGING=1")
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			lines := bufio.NewScanner(stdout)
+			await := func(want string) {
+				for lines.Scan() {
+					if lines.Text() == want {
+						return
+					}
+				}
+				t.Fatalf("the helper never said %q", want)
+			}
+			await("staging")
+			_ = cmd.Process.Signal(sig)
+			await("interrupted")
+			_ = cmd.Process.Signal(sig)
+			time.Sleep(200 * time.Millisecond)
+			_ = stdin.Close()
+			stopped := false
+			for lines.Scan() {
+				stopped = stopped || lines.Text() == "stopped"
+			}
+			err = cmd.Wait()
+			ws, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			if killed := ws.Signaled() && ws.Signal() == sig; killed != ends || stopped == ends {
+				t.Fatalf("a second %v: %v, stop saved %v", sig, err, stopped)
+			}
+		})
+	}
+}
+
+func TestStagingSignalsHelper(t *testing.T) {
+	if os.Getenv("AIRBAG_TEST_STAGING") == "" {
+		return
+	}
+	ctx, done := stage()
+	defer done()
+	fmt.Println("staging")
+	<-ctx.Done()
+	fmt.Println("interrupted")
+	_, _ = io.Copy(io.Discard, os.Stdin) // the run's unwind, until the test lets it end
+	fmt.Println("stopped")
 }

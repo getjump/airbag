@@ -76,6 +76,10 @@ func optionalHostReady(backend, workspace string) error {
 	return nil
 }
 
+// exportBranch makes the archive the branch is copied from; a variable,
+// for the tests.
+var exportBranch = exportWorkspace
+
 func prepareRuntimeWorkspace(ctx context.Context, s *session.Session) error {
 	if _, err := os.Lstat(s.CloneDir()); err == nil {
 		// A resumed session keeps its branch, if it is one: a copy that
@@ -115,16 +119,16 @@ func prepareRuntimeWorkspace(ctx context.Context, s *session.Session) error {
 	_, err := importWorkspace(s.CloneDir(), reader)
 	close(copied)
 	_ = reader.CloseWithError(err)
-	// Interrupted, the exporter is not waited for: a read of the
-	// workspace (FUSE, NFS) can block, and its writes fail from here.
-	if e := staged(ctx); e != nil {
-		_ = os.RemoveAll(s.CloneDir())
-		return e
+	// Only a copy that went through waits for the exporter, which has
+	// closed its end by then. One that failed or was interrupted does not:
+	// the exporter's read of the workspace (FUSE, NFS) can block, its
+	// writes fail from here, and the pipe has carried its own error.
+	if err == nil && staged(ctx) == nil {
+		err = <-done
 	}
-	copyErr := <-done
-	if err != nil || copyErr != nil || staged(ctx) != nil {
+	if err != nil || staged(ctx) != nil {
 		_ = os.RemoveAll(s.CloneDir())
-		return stagedOr(ctx, errors.Join(err, copyErr))
+		return stagedOr(ctx, err)
 	}
 	s.RuntimeCopied = true
 	return s.Save()
@@ -330,6 +334,10 @@ func runGVisor(ctx context.Context, s *session.Session, dir, root string) (int, 
 	return executeProvider(ctx, s.Runtime.Binary, args)
 }
 
+// notifyProvider registers the provider's signals; a variable, for the
+// tests.
+var notifyProvider = signal.Notify
+
 func executeProvider(ctx context.Context, binary string, args []string) (int, error) {
 	cmd := exec.CommandContext(context.Background(), binary, args...) //nolint:gosec // explicitly selected trusted runtime, not a guest-supplied executable
 	cmd.Env = providerEnv()
@@ -339,11 +347,11 @@ func executeProvider(ctx context.Context, binary string, args []string) (int, er
 	// itself (SIGQUIT, Ctrl-\, would), Pdeathsig kills the provider, and
 	// the session stays marked running with no stop or cleanup.
 	sigs := make(chan os.Signal, 8)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
+	notifyProvider(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigs)
 	// The provider takes the signals over from the staging, with no gap
-	// between: one that came before the start is the staging's, and
-	// nothing starts.
+	// between: its own are registered first, and one that came before
+	// the start, in either, starts nothing.
 	endStaging(ctx)
 	if err := pending(ctx, sigs); err != nil {
 		return 1, err
