@@ -74,9 +74,11 @@ type Meta struct {
 	// Credential-like environment variables passed to the agent anyway.
 	PassEnv []string `json:"pass_env,omitempty"`
 	// Strict keeps the agent from creating user namespaces.
-	Strict     bool `json:"strict,omitempty"`
-	FilePolicy bool `json:"file_policy,omitempty"`
-	ExecPolicy bool `json:"exec_policy,omitempty"`
+	Strict     bool   `json:"strict,omitempty"`
+	Launcher   string `json:"launcher,omitempty"`
+	Trustd     bool   `json:"trustd,omitempty"`
+	FilePolicy bool   `json:"file_policy,omitempty"`
+	ExecPolicy bool   `json:"exec_policy,omitempty"`
 	// RuntimeAudit is "durable" (also the legacy empty value) or "buffered".
 	RuntimeAudit   string `json:"runtime_audit,omitempty"`
 	FileCache      string `json:"file_cache,omitempty"`
@@ -337,6 +339,7 @@ func (s *Session) EtcUpper() string            { return filepath.Join(s.Dir, "et
 func (s *Session) EtcWork() string             { return filepath.Join(s.Dir, "etc", "work") }
 func (s *Session) MountDir(name string) string { return filepath.Join(s.Dir, "mnt", name) }
 func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "run") }
+func (s *Session) AgentStateDir() string       { return filepath.Join(s.Dir, "agent-state") }
 func (s *Session) CloneDir() string            { return filepath.Join(s.Dir, "ws", "clone") }
 
 // RuntimeBranchError says why an optional runtime's session has no branch

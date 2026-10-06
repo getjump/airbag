@@ -21,6 +21,11 @@ storage are summed up in [experiments.md](experiments.md).
 
 ## Deferred, and why
 
+The macOS `airbag codex yolo` launcher now keeps Codex state in the session
+through `CODEX_HOME`, with only the file-based login copied on the first
+run. Generic runs and Claude Code still use the prototype's original
+state rules. Reviewing and applying private agent settings remains deferred.
+
 | Item | Why not now | What would bring it back |
 |---|---|---|
 | `~/.claude.json` review on macOS | The macOS prototype has no branch of `$HOME`, so the file stays writable in place and persists in full; reviewing it by key needs a branch | A branch of `$HOME` on macOS (the NFS overlay in docs/macos.md) |

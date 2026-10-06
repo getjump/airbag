@@ -117,8 +117,8 @@ So the clone stays the branch: an NFS overlay needs a server that keeps file
 handles valid for a tree that size and that git can write to, which the probe's
 does not. The prototype's profile leaves `trustd` out, so a Go program in the
 sandbox that uses the platform verifier (any with a go line before 1.27, or
-with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset) cannot verify TLS; whether to
-allow it, as sandbox-runtime does, is open.
+with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset) cannot verify TLS; generic runs keep it blocked unless `--allow-trustd` is requested. The
+named Codex launcher enables it, with the exception recorded below.
 
 ### Order
 
@@ -135,7 +135,8 @@ allow it, as sandbox-runtime does, is open.
 prototype: CI runs its unit tests and `test/e2e.sh` on hosted macOS 15, 26
 and 26 Intel runners (the agent's workspace edits, the read-only `~`, unreadable
 secret files, the denied `memory/`, the outbox, review, apply and rollback),
-but it has not yet been used on real work or with Claude Code or Codex.
+and a real Codex 0.160.1 TUI against a local mock model, with a running host
+daemon. It has not yet been used on real work or with Claude Code.
 
 ```console
 $ go build ./cmd/airbag        # on the Mac, or GOOS=darwin GOARCH=arm64 elsewhere
@@ -159,6 +160,41 @@ $ ./airbag review              # then apply, apply --branch NAME, or discard
 | Agent hooks (steps per tool call) | managed settings in a private `/etc` | not installed: managed settings need root on macOS |
 | Terminal | a pseudo-terminal of its own, TIOCSTI filtered | the agent shares your terminal |
 | An airbag killed under the agent | the agent's pid namespace goes with it | the agent keeps running, and holds the session's agent lock, which airbag passes to it: a rollback and `--session` wait until the agent exits, and until a process it left running that keeps the descriptor does (`lsof` on the session's `agent.lock` finds it; one that closes or unlocks it is not waited for) |
+
+### Codex launcher
+
+```console
+$ airbag codex yolo
+$ airbag codex yolo --allow api.example.com -- -m MODEL
+$ airbag codex yolo --session last -- resume --last
+$ airbag codex yolo --allow-trustd=false
+```
+
+The named launcher currently requires macOS. It starts Codex with
+`--no-daemon --dangerously-bypass-approvals-and-sandbox`, keeping the CLI,
+app-server and their child processes under the session's Seatbelt profile.
+It never permits the shared host daemon socket. Codex 0.160.1 is the tested
+version; older versions must support `--no-daemon`.
+
+`CODEX_HOME` points to `agent-state` in the airbag session. Only `auth.json`
+is copied from the host's `CODEX_HOME`, or `~/.codex` when it is unset.
+Symlinked login files are refused. Home config, plugins, MCP settings,
+instructions and transcripts are not copied. Project config still loads
+inside the sandbox. Pass model and provider settings after `--`. A
+keyring-only login needs a file-based login or an API key supplied to Codex.
+The real HOME has no writable agent state in this mode. Private state
+survives `--session` runs and is deleted by discard; it is never applied to
+HOME. Use both `--session last` and Codex `resume --last` to resume the same
+workspace branch and conversation.
+
+This launcher enables `--allow-trustd` for native TLS verification. The
+session records `allowlist-proxy+trustd` egress (plus any TCP forwards).
+The system trust service can make certificate-related requests outside
+airbag's allowlist proxy, which opens a potential exfiltration path.
+`--allow-trustd=false` disables that access; TLS clients using the platform
+verifier may then fail. Generic `airbag run` keeps trustd blocked unless
+explicitly enabled. The option only grants the trust service, not a Codex
+daemon socket or unrestricted TCP access.
 
 Because the prototype has no branch of `$HOME`, the narrowing that keeps agent
 state out of the real files on Linux cannot be expressed in full by the Seatbelt

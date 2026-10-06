@@ -94,6 +94,34 @@ func TestMacProfile(t *testing.T) {
 	}
 }
 
+func TestPrivateLauncherProfile(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir(), Clone: true,
+		Launcher: "codex-yolo", Trustd: true, Passthrough: DefaultPassthrough})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(s.AgentStateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.Trustd {
+		t.Fatal("trustd disabled, want enabled for this session")
+	}
+	home := follow(s.Home)
+	for _, path := range append(append([]string{}, p.Write...), p.WriteFiles...) {
+		if strings.HasPrefix(path, home+string(filepath.Separator)) {
+			t.Fatalf("host HOME path writable: %q", path)
+		}
+	}
+	if !slices.Contains(p.Write, follow(s.AgentStateDir())) {
+		t.Fatalf("private state not writable: %v", p.Write)
+	}
+}
+
 func TestFollowCanonicalizesMissingTargetAncestors(t *testing.T) {
 	root := t.TempDir()
 	real := filepath.Join(root, "real")

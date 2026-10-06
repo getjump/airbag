@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/apply"
 	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/effects"
@@ -53,6 +54,8 @@ func buildVersion(v string, info func() (*debug.BuildInfo, bool)) string {
 
 const usage = `airbag — approve outcomes, not commands
 
+  airbag codex yolo [airbag flags] -- [codex arguments]
+      macOS: private agent state and server; no shared host daemon
   airbag run [--allow HOST]... [--no-home] [--session ID|last] -- AGENT [ARGS...]
       run the agent in a branch of the workspace and $HOME (--session: on the
       branch of a stopped session, with its outbox and labels)
@@ -154,8 +157,18 @@ func main() {
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
+		if agents.IsLauncher(cmd) {
+			var launch agents.Launch
+			launch, err = agents.LaunchArgs(cmd, args)
+			if err == nil {
+				code, err = cmdRunLauncher(launch.Args, launch.ID)
+			} else {
+				code = 2
+			}
+		} else {
+			fmt.Fprint(os.Stderr, usage)
+			os.Exit(2)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "airbag: %s\n", term.String(err.Error()))
@@ -172,10 +185,15 @@ func (l *stringList) String() string     { return strings.Join(*l, ",") }
 func (l *stringList) Set(v string) error { *l = append(*l, strings.Split(v, ",")...); return nil }
 
 func cmdRun(args []string) (int, error) {
+	return cmdRunLauncher(args, "")
+}
+
+func cmdRunLauncher(args []string, launcher string) (int, error) {
 	if os.Getenv("AIRBAG_SESSION") != "" {
 		return 1, errors.New("already inside an airbag session")
 	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	trustd := fs.Bool("allow-trustd", launcher != "", "macOS: allow the system TLS trust service, outside the network proxy")
 	backend := fs.String("backend", "native", "execution backend: native, gvisor or microvm")
 	rootfs := fs.String("runtime-rootfs", "", "trusted root filesystem directory for an optional backend")
 	runtimeBin := fs.String("runtime-bin", "", "operator-supplied runsc or Firecracker executable")
@@ -195,6 +213,9 @@ func cmdRun(args []string) (int, error) {
 	resume := fs.String("session", "", "run on the branch of a stopped session (its ID, or last) instead of a new one")
 	nixDaemon := fs.Bool("nix-daemon", false, "let the agent use the Nix daemon; its builds and substitutes reach the network outside airbag's proxy")
 	_ = fs.Parse(args)
+	if runtime.GOOS != "darwin" && (launcher != "" || *trustd) {
+		return 2, errors.New("named launchers and --allow-trustd currently require macOS")
+	}
 	if *runtimeAudit != "durable" && *runtimeAudit != "buffered" {
 		return 2, errors.New("--runtime-audit must be durable or buffered")
 	}
@@ -204,7 +225,7 @@ func cmdRun(args []string) (int, error) {
 	if runtime.GOOS != "linux" && (*filePolicy || *execPolicy || *runtimeAudit != "durable" || *fileCache != "off" || *runtimeProfile) {
 		return 2, errors.New("runtime policy, audit, cache and profile options require Linux")
 	}
-	var auditExplicit, cacheExplicit bool
+	var auditExplicit, cacheExplicit, trustdExplicit bool
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "runtime-audit" {
 			auditExplicit = true
@@ -212,10 +233,18 @@ func cmdRun(args []string) (int, error) {
 		if f.Name == "fs-cache" {
 			cacheExplicit = true
 		}
+		if f.Name == "allow-trustd" {
+			trustdExplicit = true
+		}
 	})
 	argv := fs.Args()
 	if len(argv) == 0 {
 		return 2, errors.New("usage: airbag run [flags] -- AGENT [ARGS...]")
+	}
+	if launcher != "" {
+		if err := agents.ValidateLaunch(launcher, argv); err != nil {
+			return 2, err
+		}
 	}
 	execution, err := sandbox.SelectBackend(*backend, *requireIsolation)
 	if err != nil {
@@ -298,6 +327,12 @@ func cmdRun(args []string) (int, error) {
 			s.RequireIsolation = *requireIsolation
 		}
 		s.Argv, s.Cwd = argv, cwd
+		if launcher != "" {
+			s.Launcher = launcher
+		}
+		if trustdExplicit {
+			s.Trustd = *trustd
+		}
 		// A session from an older airbag may have stored a wider
 		// passthrough; keep only today's. This run's directory may have
 		// its own transcript directory. An optional runtime has a private
@@ -334,7 +369,7 @@ func cmdRun(args []string) (int, error) {
 		// What this session reaches: HiddenHost is fixed when it is
 		// created, whatever this run's --nix-daemon says; this run may add
 		// forwards.
-		s.Egress = execution.ForRun(s.HiddenHost, s.Forwards).Egress
+		s.Egress = execution.ForRun(s.HiddenHost, s.Forwards).WithTrustd(s.Trustd).Egress
 		if err := s.Save(); err != nil {
 			return 1, err
 		}
@@ -347,7 +382,8 @@ func cmdRun(args []string) (int, error) {
 		pass = append(pass, projPass...)
 		meta := session.Meta{
 			Backend: execution.Name, Isolation: execution.Isolation, RequireIsolation: *requireIsolation, Runtime: runtimeConfig,
-			Egress:    execution.ForRun(hiddenHost, forwards).Egress,
+			Egress:   execution.ForRun(hiddenHost, forwards).WithTrustd(*trustd).Egress,
+			Launcher: launcher, Trustd: *trustd,
 			Workspace: ws, Home: home, OverHome: !*noHome,
 			UID: os.Getuid(), GID: os.Getgid(), Argv: argv, Cwd: cwd,
 			Allow:       append(append([]string{}, proxy.DefaultAllow...), allow...),
@@ -395,8 +431,12 @@ func cmdRun(args []string) (int, error) {
 			fmt.Fprintln(os.Stderr, "airbag: tip: Codex's own sandbox asks per command and cuts the network; airbag already branches the machine, so --dangerously-bypass-approvals-and-sandbox leaves the review to the end")
 		}
 	}
-	fmt.Fprintf(os.Stderr, "airbag: session %s · branch of %s%s · network: allowlist only\n",
-		s.ID, ws, map[bool]string{true: " and ~", false: ""}[s.OverHome])
+	network := "allowlist only"
+	if s.Trustd {
+		network = "allowlist proxy plus macOS trustd (TLS trust requests bypass the proxy)"
+	}
+	fmt.Fprintf(os.Stderr, "airbag: session %s · branch of %s%s · network: %s\n",
+		s.ID, ws, map[bool]string{true: " and ~", false: ""}[s.OverHome], network)
 	var hiddenEnv []string
 	for _, kv := range os.Environ() {
 		k, v, _ := strings.Cut(kv, "=")
@@ -423,6 +463,10 @@ func cmdRun(args []string) (int, error) {
 	review.NoteHostConfigs(s)
 	code, err := sandbox.Run(s, proxy.Allowlist(s.Allow), pol)
 	if err != nil {
+		if s.Launcher != "" {
+			s.Status, s.Ended, s.ExitCode = session.StatusStopped, time.Now(), code
+			err = errors.Join(err, s.Save())
+		}
 		return code, err
 	}
 	cs, _ := review.Scan(s)

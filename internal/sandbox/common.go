@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/mirror"
 	"github.com/getjump/airbag/internal/policy"
@@ -294,6 +295,9 @@ func agentEnvFor(s *session.Session, proxyAddr, binDir, runtimeDir string, extra
 		"CLAUDE_CODE_SHELL": binDir + "/bash",
 	}
 	for k, v := range extra {
+		set[k] = v
+	}
+	for k, v := range agents.LaunchEnv(s.Launcher, s.AgentStateDir()) {
 		set[k] = v
 	}
 	var env []string

@@ -39,6 +39,14 @@ $ airbag apply        # or: apply -i, apply --branch NAME, or: airbag discard
 $ airbag rollback     # undo the last apply
 ```
 
+On macOS, `airbag codex yolo` starts Codex with a private server and state
+directory. It copies only the file-based login from `CODEX_HOME` (or
+`~/.codex`); home settings, required MCP servers and host transcripts are
+not imported. Pass Codex arguments after `--`, for example
+`airbag codex yolo -- -m MODEL`. This launcher enables the macOS TLS trust
+service outside the network proxy; `--allow-trustd=false` keeps it blocked.
+See [the macOS launcher](docs/macos.md#codex-launcher).
+
 Requirements, `go install` and Nix: [Install](#install).
 
 ![demo: the agent deletes src, reads .env, tries to send it out, plants a line in ~/.bashrc and pushes; airbag review shows all of it; discard, and nothing happened](demo/demo.svg)
