@@ -142,3 +142,23 @@ func TestForCanonical(t *testing.T) {
 		}
 	}
 }
+
+// Brackets go only as the pair around an IP literal: stray ones stay
+// part of the name, so no wildcard entry covers it.
+func TestCanonHostBrackets(t *testing.T) {
+	for in, want := range map[string]string{
+		"[::1]":           "::1",
+		"[0:0::1]":        "::1",
+		"[127.0.0.1]":     "127.0.0.1",
+		"[]":              "",
+		"[::1].":          "::1",
+		"a.example.com[":  "a.example.com[",
+		"[a.Example.com]": "[a.example.com]",
+		"a.example.com]":  "a.example.com]",
+		"A.Example.com.":  "a.example.com",
+	} {
+		if got := CanonHost(in); got != want {
+			t.Errorf("CanonHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

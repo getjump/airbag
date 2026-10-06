@@ -201,11 +201,23 @@ func (s Set) For(hostport string) *Live {
 }
 
 // CanonHost is how a host is compared, on the request's side and the
-// configuration's alike: lower case without brackets or a trailing dot,
-// and an IP address as netip writes it ("0:0::1" is "::1"; an IPv6
-// zone keeps its case).
+// configuration's alike: lower case without a trailing dot, and an IP
+// address as netip writes it ("0:0::1" is "::1"; an IPv6 zone keeps its
+// case). Brackets go only as the pair around an IP literal ("[::1]"):
+// stray ones are part of the name, so "a.example.com[" is no host that
+// *.example.com covers.
 func CanonHost(h string) string {
-	h = strings.TrimSuffix(strings.Trim(h, "[]"), ".")
+	h = strings.TrimSuffix(h, ".")
+	if in, ok := strings.CutPrefix(h, "["); ok {
+		if in, ok = strings.CutSuffix(in, "]"); ok {
+			if a, err := netip.ParseAddr(in); err == nil {
+				return a.String()
+			}
+			if in == "" {
+				return "" // "[]" names no host
+			}
+		}
+	}
 	if a, err := netip.ParseAddr(h); err == nil {
 		return a.String()
 	}
