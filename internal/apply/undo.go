@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -623,7 +625,7 @@ func applyTemp(p string, d fs.DirEntry, copying map[string]bool) bool {
 func removeTemps(dir string, copying map[string]bool) {
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && applyTemp(p, d, copying) {
-			_ = os.Remove(p) //nolint:gosec // the rollback runs after the session stopped: nothing from the sandbox can swap a path during the walk
+			_ = os.Remove(p) //nolint:gosec // in the user's tree, which the agent cannot write; Rollback refuses a live run
 		}
 		return nil
 	})
@@ -691,6 +693,21 @@ func emptyOrAbsent(p string) bool {
 // gone: the path is not there, or a parent is not a directory.
 func gone(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// runLive reports a run of s that is still going: its host services
+// answer on the control socket. Only a socket that refuses, or none, is a
+// run that ended; one that does not answer in time may be busy.
+func runLive(s *session.Session) bool {
+	c, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "unix", s.ControlSock())
+	switch {
+	case err == nil:
+		_ = c.Close()
+		return true
+	case errors.Is(err, syscall.ECONNREFUSED), errors.Is(err, fs.ErrNotExist):
+		return false
+	}
+	return true
 }
 
 // branchesOf is where each layer's changes live in s.
@@ -797,13 +814,18 @@ func markOpaqueIn(r *os.Root, rel string) error {
 	if !fi.IsDir() {
 		return nil
 	}
-	dir, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	dir, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		// Best effort: unreadable, or no longer a directory. Nothing
 		// was written.
 		return nil
 	}
 	defer func() { _ = dir.Close() }()
+	// os.Root follows a link at rel, whatever the flags: one put there
+	// since the lstat would have the mark set on another directory.
+	if got, err := dir.Stat(); err != nil || !os.SameFile(fi, got) {
+		return nil
+	}
 	_ = unix.Fsetxattr(int(dir.Fd()), "user.overlay.opaque", []byte("y"), 0)
 	return nil
 }
@@ -875,7 +897,7 @@ func copyTree(from, to string) error {
 			if err != nil {
 				return err
 			}
-			return os.Symlink(t, dst) //nolint:gosec // copies run after the session stopped: nothing from the sandbox can swap a path during the walk
+			return os.Symlink(t, dst) //nolint:gosec // into the generation's saved/, which the agent cannot reach; apply refuses a running session
 		case info.Mode().IsRegular():
 			return copyFile(p, dst, info.Mode().Perm())
 		}
@@ -996,6 +1018,15 @@ func HeldVersions(s *session.Session) ([]Held, error) {
 // versions back, the agent's versions return to the session. A pushed
 // intent is not undone; Rollback lists those.
 func Rollback(s *session.Session, done []string, out io.Writer) error {
+	// During a live run the agent could change its branch under the
+	// rollback, read a version it puts back before the run's own guards
+	// cover it, and the run and the rollback would each save the session
+	// over the other. A running mark that a killed run left (nothing
+	// answers on its control socket) holds nothing up: rollback is the
+	// way back to the user's versions.
+	if s.Status == session.StatusRunning && runLive(s) {
+		return fmt.Errorf("session %s is running; roll back once its run has ended", s.ID)
+	}
 	gs, err := listGenerations(s)
 	if err != nil {
 		return err

@@ -2,6 +2,7 @@ package apply
 
 import (
 	"bytes"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -240,5 +241,58 @@ func TestGiveBackKeepsWhatAppearedSince(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(filepath.Join(branch, "d")); len(ents) != 2 {
 		t.Fatalf("left beside them: %v", ents)
+	}
+}
+
+// A live run holds the rollback off: its agent could change the branch
+// under it, and the two would save the session over each other. A
+// running mark a killed run left, with nothing answering on its control
+// socket, does not: rollback is the way back to the user's versions.
+func TestRollbackWaitsOnlyForALiveRun(t *testing.T) {
+	// A short root: a unix socket path has room for about 100 bytes.
+	root, err := os.MkdirTemp("/tmp", "rb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("AIRBAG_HOME", root)
+	ws := t.TempDir()
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.WSUpper(), "f"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	s.Status = session.StatusRunning
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", s.ControlSock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "running") {
+		t.Fatalf("rolled back under a live run: %v", err)
+	}
+	if got := read(t, filepath.Join(ws, "f")); got != "agent\n" {
+		t.Fatalf("the refused rollback changed the file: %q", got)
+	}
+	// The run is gone; its socket file is left, as after a SIGKILL.
+	l.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = l.Close()
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("a running mark a killed run left held the rollback up: %v\n%s", err, out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "f")); !os.IsNotExist(err) {
+		t.Fatalf("not rolled back: %v", err)
 	}
 }
