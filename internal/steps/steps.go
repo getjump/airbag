@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/getjump/airbag/internal/session"
 )
@@ -31,6 +32,9 @@ type entry struct {
 	mtime, size int64
 	gone        bool // whiteout
 }
+
+// maxEntries bounds one snapshot of a layer (a variable for the tests).
+var maxEntries = 1 << 20
 
 type Tracker struct {
 	mu   sync.Mutex
@@ -52,29 +56,83 @@ func NewTracker(s *session.Session) *Tracker {
 
 func (t *Tracker) snapshot() map[string]entry {
 	out := map[string]entry{}
-	layers := map[string]string{"ws": t.s.WSUpper()}
+	// A clone holds the whole workspace, not only what changed: a file
+	// gone from it is a deletion, as a whiteout is in an upper layer.
+	layers := map[string]string{"ws": t.s.WSBranch()}
 	if t.s.OverHome {
 		layers["home"] = t.s.HomeUpper()
 	}
 	for name, root := range layers {
-		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return nil //nolint:nilerr // steps only attribute changes; the review still shows an entry left out here
+		r, err := os.OpenRoot(root)
+		if err != nil {
+			continue
+		}
+		walk(r, func(rel string, info fs.FileInfo) {
+			if info.IsDir() {
+				return
 			}
-			info, err := d.Info()
-			if err != nil {
-				return nil //nolint:nilerr // gone since the walk listed it: nothing to attribute
-			}
-			rel, _ := filepath.Rel(root, p)
 			e := entry{mtime: info.ModTime().UnixNano(), size: info.Size()}
 			if st, ok := info.Sys().(*syscall.Stat_t); ok && info.Mode()&fs.ModeCharDevice != 0 && st.Rdev == 0 {
 				e.gone = true
 			}
 			out[name+":"+rel] = e
-			return nil
 		})
+		_ = r.Close()
 	}
 	return out
+}
+
+// walk visits the entries of the tree under r, directories included, up
+// to maxEntries of them: a tree of millions of files or empty directories
+// stops the count, not the agent's tool call, and the review still shows
+// every change. The agent writes the tree while the walk runs. Each
+// directory is opened through r, so one swapped for a link out of the
+// tree is an error here, not a walk of the host. Names go to the OS as
+// they are: fs.WalkDir leaves out a directory whose name is not UTF-8,
+// and everything under it. Each entry's type comes from lstat, not from
+// readdir, which gives none on some filesystems. What cannot be listed,
+// or is gone by the time it is looked at, is left out, since steps only
+// attribute changes.
+func walk(r *os.Root, visit func(rel string, info fs.FileInfo)) {
+	n := 0
+	dirs := []string{"."}
+	for len(dirs) > 0 {
+		dir := dirs[len(dirs)-1]
+		dirs = dirs[:len(dirs)-1]
+		f, err := openDir(r, dir)
+		if err != nil {
+			continue
+		}
+		for {
+			ents, err := f.ReadDir(1024)
+			for _, d := range ents {
+				if n++; n > maxEntries {
+					_ = f.Close()
+					return
+				}
+				info, err := d.Info()
+				if err != nil {
+					continue
+				}
+				rel := filepath.Join(dir, d.Name())
+				visit(rel, info)
+				if info.IsDir() {
+					dirs = append(dirs, rel)
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+		_ = f.Close()
+	}
+}
+
+// openDir opens a directory the walk listed. O_DIRECTORY: one the agent
+// has made a FIFO since would block a plain open until a writer came,
+// and the tool call's hook with it.
+func openDir(r *os.Root, dir string) (*os.File, error) {
+	return r.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 }
 
 // Record closes a step: everything that changed since the last one.
@@ -128,7 +186,7 @@ func (t *Tracker) record(tool, summary, id string, onlyIfChanged bool) Step {
 	st := Step{N: t.n, Time: time.Now(), Tool: tool, Summary: summary, ID: id, Changes: ch}
 	// The record is best effort, like the attribution it serves: a step
 	// that is not written still shows its changes in the review.
-	if b, err := json.Marshal(st); err == nil {
+	if b, err := json.Marshal(stored(st)); err == nil {
 		if f, err := os.OpenFile(path(t.s), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
 			_, _ = f.Write(append(b, '\n'))
 			_ = f.Close()
@@ -138,6 +196,41 @@ func (t *Tracker) record(tool, summary, id string, onlyIfChanged bool) Step {
 }
 
 func path(s *session.Session) string { return filepath.Join(s.Dir, "steps.jsonl") }
+
+// record is a step as steps.jsonl keeps it. JSON strings hold UTF-8 only:
+// a name that is not would come back with U+FFFD for its bytes, and two
+// names could read as one. Such a change keeps its bytes beside it as
+// well, by its index in Changes.
+type record struct {
+	Step
+	Raw map[int][]byte `json:"changes_raw,omitempty"`
+}
+
+// spelledAs reports whether JSON, written and read back, turns raw into
+// change: what the record's change is if raw was its bytes. Compared
+// after the round trip, not as written: encoders spell an invalid byte
+// differently (an escape or the character itself).
+func spelledAs(raw, change string) bool {
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return false
+	}
+	var back string
+	return json.Unmarshal(b, &back) == nil && back == change
+}
+
+func stored(st Step) record {
+	r := record{Step: st}
+	for i, c := range st.Changes {
+		if !utf8.ValidString(c) {
+			if r.Raw == nil {
+				r.Raw = map[int][]byte{}
+			}
+			r.Raw[i] = []byte(c)
+		}
+	}
+	return r
+}
 
 func Read(s *session.Session) ([]Step, error) {
 	f, err := os.Open(path(s))
@@ -151,10 +244,18 @@ func Read(s *session.Session) ([]Step, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 4<<20)
 	for sc.Scan() {
-		var st Step
-		if json.Unmarshal(sc.Bytes(), &st) == nil {
-			out = append(out, st)
+		var r record
+		if json.Unmarshal(sc.Bytes(), &r) != nil {
+			continue
 		}
+		for i, c := range r.Raw {
+			// Only the bytes of the change JSON spelled: a record that
+			// says otherwise keeps what it says.
+			if i >= 0 && i < len(r.Changes) && len(c) > 0 && spelledAs(string(c), r.Changes[i]) {
+				r.Changes[i] = string(c)
+			}
+		}
+		out = append(out, r.Step)
 	}
 	return out, sc.Err()
 }

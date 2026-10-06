@@ -46,7 +46,8 @@ type Server struct {
 	// Root is the workspace as the agent sees it: its own path on
 	// Linux, the clone on macOS. Files a deferred command names must
 	// be inside it.
-	Root string
+	Root  string
+	guest guestEnv
 }
 
 func (s *Server) HTTPServer() *http.Server {
@@ -56,6 +57,7 @@ func (s *Server) HTTPServer() *http.Server {
 	mux.HandleFunc("POST /hook/{agent}/{event}", s.hook)
 	mux.HandleFunc("POST /exec", s.exec)
 	mux.HandleFunc("POST /taint", s.taint)
+	mux.HandleFunc("POST /guest/env", s.takeGuestEnv)
 	// The agent can open connections here, and each one held is a
 	// goroutine and a file descriptor on the host side: at most
 	// MaxConns are open at once, a request must arrive whole within a
@@ -284,12 +286,11 @@ func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 	summary := agents.ToolSummary(p.ToolName, p.ToolInput)
 	switch event {
 	case "PreToolUse":
-		if s.Steps != nil {
-			s.Steps.Between()
-		}
 		s.Log.Add(effects.Effect{Kind: "tool.call", Target: p.ToolName + ": " + summary, Verdict: "allow", Reason: agent + " " + p.ToolUseID})
 		// Tell the agent before the command runs; the shell shim checks
-		// again for agents without hooks.
+		// again for agents without hooks. The decision comes before the
+		// step is closed: a walk of a large branch must not hold a deny
+		// past the hook's timeout, after which the agent goes on.
 		var input map[string]any
 		_ = json.Unmarshal(p.ToolInput, &input)
 		if command, ok := agents.ShellCommand(p.ToolName, input); ok {
@@ -305,6 +306,9 @@ func (s *Server) hook(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+		}
+		if s.Steps != nil {
+			s.Steps.Between()
 		}
 	case "PostToolUse", "PostToolUseFailure":
 		if s.Steps != nil {

@@ -27,25 +27,80 @@ import (
 	"github.com/getjump/airbag/proxy"
 )
 
+// stop records the end of a run: resume, apply and discard refuse a
+// session that is still marked running.
+func stop(s *session.Session, code int) error {
+	s.Status, s.ExitCode, s.Ended = session.StatusStopped, code, time.Now()
+	return s.Save()
+}
+
+// stopFailed records a run of an optional runtime that failed after the
+// session existed, so the session stays reachable for review and discard.
+func stopFailed(s *session.Session, code int, err error) (int, error) {
+	if code == 0 {
+		code = 1
+	}
+	return code, errors.Join(err, stop(s, code))
+}
+
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
+	optional := s.Optional()
+	fail := func(err error) (int, error) {
+		if optional {
+			return stopFailed(s, 1, err)
+		}
+		return 1, err
+	}
 	// The roots are checked again right before the first thing made for
 	// the run: since the session was created or resumed, either could
 	// have become another directory.
 	if err := s.CheckRoots(); err != nil {
-		return 1, fmt.Errorf("%w; session %s was not started", err, s.ID)
+		return fail(fmt.Errorf("%w; session %s was not started", err, s.ID))
 	}
 	// An empty mode is durable: a session from before the option, or one
 	// that never set it.
 	switch s.RuntimeAudit {
 	case "", "durable", "buffered":
 	default:
-		return 1, fmt.Errorf("invalid runtime audit mode %q", s.RuntimeAudit)
+		return fail(fmt.Errorf("invalid runtime audit mode %q", s.RuntimeAudit))
 	}
-	host, err := startHostServices(s, allow, pol, hostEndpoints{ProxyNetwork: "unix", ProxyAddress: s.ProxySock(), ControlRoot: s.Workspace, Forwards: true})
+	// run refuses these before a session exists, and on resume; a session
+	// that asks for one anyway is not run without it.
+	if optional && UsesRuntimePolicies(s) {
+		return fail(fmt.Errorf("session %s asks for runtime policy options, which %s does not run", s.ID, s.Backend))
+	}
+	ctx := context.Background()
+	if optional {
+		var done func()
+		ctx, done = stage()
+		defer done()
+		if err := prepareRuntimeWorkspace(ctx, s); err != nil {
+			return stopFailed(s, exitCode(err), err)
+		}
+	}
+	// An optional runtime's agent works in the clone; control requests
+	// name its paths.
+	root := s.Workspace
+	if s.Clone {
+		root = s.CloneDir()
+	}
+	host, err := startHostServices(s, allow, pol, hostEndpoints{ProxyNetwork: "unix", ProxyAddress: s.ProxySock(), ControlRoot: root, Forwards: true})
 	if err != nil {
+		if optional {
+			return stopFailed(s, 1, err)
+		}
 		return 1, err
 	}
 	defer func() { _ = host.Close() }()
+
+	if optional {
+		code, err := runOptional(ctx, s, host.ctl)
+		if err != nil {
+			return stopFailed(s, failedCode(ctx, code, err), err)
+		}
+		return code, stop(s, code)
+	}
+
 	if err := prepareHome(s); err != nil {
 		return 1, err
 	}

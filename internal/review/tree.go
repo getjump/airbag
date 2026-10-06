@@ -57,9 +57,12 @@ func ScanTree(layer, real, branch string) ([]Change, error) {
 				c.Kind = Modified
 			}
 		default:
+			// A FIFO, socket or device keeps its type: no reader opens it
+			// as a file.
+			c.Type = info.Mode().Type()
 			c.Kind = Added
 			if lerr == nil {
-				if lst.Mode().IsRegular() && lst.Mode().Perm() == c.Mode && sameContent(c.Path, p) {
+				if info.Mode().IsRegular() && lst.Mode().IsRegular() && lst.Mode().Perm() == c.Mode && sameContent(c.Path, p) {
 					return nil
 				}
 				c.Kind = Modified

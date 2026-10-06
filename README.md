@@ -21,10 +21,11 @@ apply it, take it onto a git branch, or throw it away.
 [Threat model](#threat-model) · [FAQ](#faq) · [Docs](#docs)
 
 > [!NOTE]
-> Early v0, Linux first; macOS is a prototype. airbag is not a VM: the kernel is
-> shared, and whatever the agent reads is still sent to the model API. It guards
-> against accidents and casual exfiltration by an agent you let run without
-> prompts; for code that may try to break out, use a VM. See the
+> Early v0, Linux first; macOS is a prototype. By default airbag is not a VM: the
+> native backend shares the host's kernel, and whatever the agent reads is still
+> sent to the model API. It guards against accidents and casual exfiltration by an
+> agent you let run without prompts; for code that may try to break out, use a VM
+> (airbag's experimental microVM backend has its own limits). See the
 > [threat model](#threat-model).
 
 ```console
@@ -111,7 +112,7 @@ pushes.
 
 | | Built-in sandbox (Claude Code, Codex) | Dev container | VM or microVM | airbag |
 |---|---|---|---|---|
-| Isolation | bubblewrap on Linux, Seatbelt on macOS | a container; shared kernel | its own kernel | namespaces, overlayfs and seccomp around the whole agent; shared kernel |
+| Isolation | bubblewrap on Linux, Seatbelt on macOS | a container; shared kernel | its own kernel | namespaces, overlayfs and seccomp around the whole agent; shared kernel by default (experimental gVisor and microVM backends on Linux) |
 | You decide | during the run, at each prompt | before: mounts and network | before: what goes in | after: one review of the whole run |
 | Writes to the workspace | land in place | land in place (bind mount) | stay in the VM until you copy or merge them out | stay in a branch until `apply`; `rollback` undoes an apply |
 | `git push` | runs if the network allows it | runs if the network allows it | runs if the network allows it | waits in the outbox until review |
@@ -137,12 +138,15 @@ the allowlist and policy decide beforehand. Review shows that they happened.
 ## Threat model
 
 airbag protects against accidents and casual exfiltration by an agent you let run
-without prompts. It is not a VM: the kernel is shared, and whatever the agent reads
-is still sent to the model API. A bound credential keeps its value from the agent,
+without prompts. By default it is not a VM: the native backend shares the host's
+kernel (the experimental `--backend=microvm` boots a guest kernel instead, with the
+limits in [docs/runtime-options.md](docs/runtime-options.md)), and whatever the
+agent reads is still sent to the model API. A bound credential keeps its value from the agent,
 not its use: through the bound hosts the agent can do what the token allows.
 
-- **The kernel.** The seccomp filter makes the shared kernel a smaller target, not
-  a VM boundary. `airbag doctor` reports the host sysctls that harden the rest.
+- **The kernel.** With the native backend, the seccomp filter makes the shared
+  kernel a smaller target, not a VM boundary. `airbag doctor` reports the host
+  sysctls that harden the rest.
 - **The network.** For hosts without a credential the proxy decides from the name
   the client asks for and does not see inside TLS, so a broad allowlist entry
   (`github.com`) is a way for data to leave. Allow narrow names, and where that
@@ -157,10 +161,11 @@ The whole threat model, with the limits in numbers: [docs/threat-model.md](docs/
 
 It is if you let Claude Code or Codex run long tasks without permission prompts and
 want to see the whole result before it reaches your files, `~` or a remote, on
-Linux, with your own toolchain and without a VM. It is not for you if:
+Linux, with your own toolchain and, by default, without a VM. It is not for you if:
 
 - you need a hard boundary against code that tries to break out: use a VM or a
-  microVM;
+  microVM (airbag's own experimental gVisor and microVM backends have the limits in
+  [docs/runtime-options.md](docs/runtime-options.md));
 - what the agent reads must not reach the model provider: airbag does not change
   what is sent to the model;
 - you are on Windows, or need macOS today: the macOS port is a prototype, and
@@ -171,9 +176,13 @@ Linux, with your own toolchain and without a VM. It is not for you if:
 
 <details><summary>Is airbag a VM, or a hard security boundary?</summary>
 
-No. airbag puts Linux namespaces, overlayfs and a seccomp filter around the agent,
-on the host's kernel. That guards against accidents and casual exfiltration; it is
-not built to hold code that tries to break out. For that, use a VM or a microVM.
+Not by default. The native backend puts Linux namespaces, overlayfs and a seccomp
+filter around the agent, on the host's kernel. That guards against accidents and
+casual exfiltration; it is not built to hold code that tries to break out. For that,
+use a VM or a microVM. On Linux, the experimental `--backend=gvisor` and
+`--backend=microvm` run the agent on gVisor's kernel or in a Firecracker VM, with
+the same review, apply and outbox, but a narrower profile and their own limits:
+[docs/runtime-options.md](docs/runtime-options.md).
 </details>
 
 <details><summary>How is it different from the sandbox built into Claude Code or Codex?</summary>
@@ -280,7 +289,8 @@ Before more features comes a measurement on real work against the alternatives:
 - [Policies](docs/policies.md): rules over effects, deferred commands, bound credentials
 - [Runtime policy](docs/runtime-policy.md): opt-in file and exec checks on Linux, their audit and limits
 - [Threat model](docs/threat-model.md): what airbag protects against, and what not
-- [Execution boundaries](docs/execution-backends.md): `airbag capabilities`, `--require-isolation`, no fallback
+- [Execution boundaries](docs/execution-backends.md): `airbag capabilities`, `--require-isolation`, no fallback;
+  [optional gVisor and microVM runtimes](docs/runtime-options.md) on Linux
 - [How airbag compares](docs/comparison.md): nono, try, AgentFS, Docker Sandboxes, agentsh
 - [Status in detail](docs/status.md): hooks, shell models, tests, the effect log
 - [Roadmap and decisions](docs/roadmap.md): what is deferred on purpose, and why
