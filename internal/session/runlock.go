@@ -73,6 +73,9 @@ func (s *Session) LockAgent() (*os.File, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrAgentLives
+		}
 		return nil, err
 	}
 	return f, nil

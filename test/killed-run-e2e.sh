@@ -1,7 +1,7 @@
 #!/bin/sh
 # A resumed run whose airbag is killed. On Linux the agent goes with it
 # (its pid namespace ends with airbag). On macOS nothing ends it: it keeps
-# running and holds the session's run lock, which airbag passed to it, so
+# running and holds the session's agent lock, which airbag passed to it, so
 # a rollback waits for it. Once the agent is gone the rollback goes on
 # and marks the session stopped, and the session resumes.
 set -eu

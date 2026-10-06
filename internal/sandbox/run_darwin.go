@@ -136,6 +136,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	case errors.As(err, &ee):
 		code = ee.ExitCode()
 	case err != nil:
+		// No agent ran: the session is not left marked running.
+		s.Status, s.Ended = session.StatusStopped, time.Now()
+		_ = s.Save()
 		return 1, fmt.Errorf("start the agent: %w", err)
 	}
 	s.Status = session.StatusStopped
@@ -150,7 +153,8 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 // passes to the agent from before it runs anything and lasts as long as
 // the agent does, or a process of its that keeps the descriptor; airbag
 // keeps none of its own. The agent never gets the run lock, which stays
-// airbag's. An agent lock that cannot be taken starts no agent.
+// airbag's and under which the agent lock is taken. An agent lock that
+// cannot be taken starts no agent.
 func startAgent(s *session.Session, cmd *exec.Cmd) error {
 	lock, err := s.LockAgent()
 	if err != nil {
