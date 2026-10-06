@@ -323,9 +323,7 @@ func runGVisor(ctx context.Context, s *session.Session, dir, root string) (int, 
 	}
 	common := []string{"--root=" + filepath.Join(dir, "state"), "--rootless=" + strconv.FormatBool(os.Getuid() != 0)}
 	defer func() {
-		cmd := exec.CommandContext(context.Background(), s.Runtime.Binary, append(common, "delete", "--force", s.ID)...) //nolint:gosec // trusted runsc, fixed runtime operation
-		cmd.Env = providerEnv()
-		_ = cmd.Run()
+		runscDelete(s.Runtime.Binary, append(common, "delete", "--force", s.ID), 30*time.Second)
 		// Run as root, runsc leaves --network=none's namespace mounted in
 		// its state directory, which resume and discard then cannot remove.
 		_ = unix.Unmount(filepath.Join(dir, "state", "null-netns"), unix.MNT_DETACH|unix.UMOUNT_NOFOLLOW)
@@ -337,6 +335,17 @@ func runGVisor(ctx context.Context, s *session.Session, dir, root string) (int, 
 // notifyProvider registers the provider's signals; a variable, for the
 // tests.
 var notifyProvider = signal.Notify
+
+// runscDelete removes the run's sandbox, and gives up after limit: the
+// run's signals stay caught until it has returned, so a delete that hung
+// would hold airbag up until a SIGKILL.
+func runscDelete(binary string, args []string, limit time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, args...) //nolint:gosec // trusted runsc, fixed runtime operation
+	cmd.Env = providerEnv()
+	_ = cmd.Run()
+}
 
 func executeProvider(ctx context.Context, binary string, args []string) (int, error) {
 	cmd := exec.CommandContext(context.Background(), binary, args...) //nolint:gosec // explicitly selected trusted runtime, not a guest-supplied executable

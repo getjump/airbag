@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -121,6 +122,20 @@ func TestOptionalRunRefusesRuntimePolicies(t *testing.T) {
 	}
 	if _, err := os.Lstat(s.CloneDir()); !os.IsNotExist(err) {
 		t.Fatalf("the workspace was copied first: %v", err)
+	}
+}
+
+// A runsc delete that hangs is given up on: the run's signals are still
+// caught then, and it would hold airbag up until a SIGKILL.
+func TestRunscDeleteIsBounded(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	start := time.Now()
+	runscDelete(sh, []string{"-c", "sleep 20"}, 100*time.Millisecond)
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("a hung delete held the run for %s", took)
 	}
 }
 
