@@ -187,11 +187,17 @@ func outsideTrees(p string, roots []string, depth int) error {
 			return fmt.Errorf("%s is %s, inside the workspace or the sessions; the runtime's sidecars must come from outside them", p, real)
 		}
 	}
-	return filepath.WalkDir(real, func(q string, d fs.DirEntry, err error) error {
+	return filepath.WalkDir(real, func(q string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.Type()&fs.ModeSymlink != 0 {
+		// lstat each entry rather than trust the type readdir gives: on
+		// a filesystem that gives none, a link would pass for a file.
+		fi, err := os.Lstat(q)
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
 			return outsideTrees(q, roots, depth+1)
 		}
 		return nil
