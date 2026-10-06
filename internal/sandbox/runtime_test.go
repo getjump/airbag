@@ -227,6 +227,9 @@ func TestGVisorSidecarsComeFromOutside(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "runsc's sidecars") {
 				t.Fatalf("preflight: %v", err)
 			}
+			if strings.Contains(name, "link to nothing") && !strings.Contains(err.Error(), "is a link to nothing") {
+				t.Fatalf("a dangling link refused for another reason: %v", err)
+			}
 		})
 	}
 	// No sidecars at all, and sidecars of its own outside both, pass this

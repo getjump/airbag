@@ -508,6 +508,9 @@ func renderSteps(w io.Writer, sts []steps.Step) {
 		git, more := 0, 0
 		noise := map[string]int{}
 		for _, c := range st.Changes {
+			if c == "" {
+				continue
+			}
 			mark, rest := c[:1], c[1:]
 			layer, path, _ := strings.Cut(rest, ":")
 			if GitDir(path) != "" {

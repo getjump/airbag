@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/session"
 )
@@ -123,5 +125,60 @@ func TestWalkCountsDirectories(t *testing.T) {
 	walk(r, func(string, fs.FileInfo) { n++ })
 	if n != maxEntries {
 		t.Fatalf("walked %d entries, want the cap of %d", n, maxEntries)
+	}
+}
+
+// A directory made a FIFO since the walk listed it fails to open at once
+// instead of blocking the snapshot, and the tool call's hook with it.
+func TestOpenDirDoesNotWaitOnAFIFO(t *testing.T) {
+	root := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(root, "d"), 0o600); err != nil {
+		t.Skipf("no FIFO here: %v", err)
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		f, err := openDir(r, "d")
+		if err == nil {
+			_ = f.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a FIFO opened as a directory")
+		}
+	case <-time.After(5 * time.Second):
+		// Unblock the open before failing.
+		if w, err := os.OpenFile(filepath.Join(root, "d"), os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = w.Close()
+		}
+		t.Fatal("the open waited on a FIFO")
+	}
+}
+
+// Raw bytes that do not match the change they stand for, or none, leave
+// the change as JSON spelled it.
+func TestReadKeepsChangesRawBytesDoNotMatch(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"n":1,"tool":"Bash","changes":["+ws:a","+ws:b\ufffd"],"changes_raw":{"0":"","1":"K3dzOmM="}}` + "\n"
+	if err := os.WriteFile(path(s), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sts, err := Read(s)
+	if err != nil || len(sts) != 1 {
+		t.Fatalf("read: %+v, %v", sts, err)
+	}
+	if want := []string{"+ws:a", "+ws:b\ufffd"}; !slices.Equal(sts[0].Changes, want) {
+		t.Fatalf("changes %q, want %q", sts[0].Changes, want)
 	}
 }

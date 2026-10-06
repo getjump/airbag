@@ -99,7 +99,7 @@ func walk(r *os.Root, visit func(rel string, info fs.FileInfo)) {
 	for len(dirs) > 0 {
 		dir := dirs[len(dirs)-1]
 		dirs = dirs[:len(dirs)-1]
-		f, err := r.Open(dir)
+		f, err := openDir(r, dir)
 		if err != nil {
 			continue
 		}
@@ -126,6 +126,13 @@ func walk(r *os.Root, visit func(rel string, info fs.FileInfo)) {
 		}
 		_ = f.Close()
 	}
+}
+
+// openDir opens a directory the walk listed. O_DIRECTORY: one the agent
+// has made a FIFO since would block a plain open until a writer came,
+// and the tool call's hook with it.
+func openDir(r *os.Root, dir string) (*os.File, error) {
+	return r.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 }
 
 // Record closes a step: everything that changed since the last one.
@@ -199,6 +206,13 @@ type record struct {
 	Raw map[int][]byte `json:"changes_raw,omitempty"`
 }
 
+// sameJSON reports whether JSON writes a and b the same.
+func sameJSON(a, b string) bool {
+	x, err1 := json.Marshal(a)
+	y, err2 := json.Marshal(b)
+	return err1 == nil && err2 == nil && string(x) == string(y)
+}
+
 func stored(st Step) record {
 	r := record{Step: st}
 	for i, c := range st.Changes {
@@ -229,7 +243,9 @@ func Read(s *session.Session) ([]Step, error) {
 			continue
 		}
 		for i, c := range r.Raw {
-			if i >= 0 && i < len(r.Changes) {
+			// Only the bytes of the change JSON spelled: a record that
+			// says otherwise keeps what it says.
+			if i >= 0 && i < len(r.Changes) && len(c) > 0 && sameJSON(string(c), r.Changes[i]) {
 				r.Changes[i] = string(c)
 			}
 		}
