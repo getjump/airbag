@@ -301,6 +301,9 @@ func Create(m Meta) (*Session, error) {
 			return nil, err
 		}
 	}
+	if err := os.WriteFile(s.lockPath(), nil, 0o600); err != nil {
+		return nil, err
+	}
 	if err := s.Save(); err != nil {
 		return nil, err
 	}

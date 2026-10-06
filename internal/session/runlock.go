@@ -25,7 +25,7 @@ var held sync.Map
 // ends. The descriptor is not passed on to the agent: Go opens it with
 // O_CLOEXEC.
 func (s *Session) LockRun() (unlock func(), err error) {
-	f, err := os.OpenFile(filepath.Join(s.Dir, "run.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(s.lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -42,3 +42,8 @@ func (s *Session) LockRun() (unlock func(), err error) {
 		_ = f.Close()
 	}, nil
 }
+
+// lockPath is the run lock's file. Create makes it, so a resume that is
+// refused changes nothing in the session; LockRun makes it for a session
+// from before the lock.
+func (s *Session) lockPath() string { return filepath.Join(s.Dir, "run.lock") }
