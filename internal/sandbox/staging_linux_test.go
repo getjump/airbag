@@ -5,6 +5,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,5 +85,51 @@ func TestProviderStartsOnlyAfterTheStaging(t *testing.T) {
 	}
 	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
 		t.Fatal("the provider ran after the staging was interrupted")
+	}
+}
+
+// Interrupted, the copy of the branch returns without waiting for the
+// exporter, whose read of the workspace (FUSE, NFS) can block.
+func TestInterruptedCopyDoesNotWaitForTheExporter(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", filepath.Join(t.TempDir(), "sessions"))
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir(), Backend: "gvisor", Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	exportBranch = func(string, io.Writer, bool) (exportStats, error) {
+		<-release // a read that does not return
+		return exportStats{}, errors.New("released")
+	}
+	defer func() { exportBranch = exportWorkspace }()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	time.AfterFunc(50*time.Millisecond, func() { cancel(interrupted{syscall.SIGINT}) })
+	done := make(chan error, 1)
+	go func() { done <- prepareRuntimeWorkspace(ctx, s) }()
+	select {
+	case err := <-done:
+		if !errors.As(err, new(interrupted)) {
+			t.Fatalf("an interrupted copy: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the interrupted copy waited for a blocked exporter")
+	}
+	if _, err := os.Lstat(s.CloneDir()); !os.IsNotExist(err) {
+		t.Fatalf("an interrupted copy left the clone: %v", err)
+	}
+}
+
+// A signal that reached the provider's own channel before it started is
+// an interruption too: nothing starts.
+func TestPendingCatchesASignalBeforeTheStart(t *testing.T) {
+	sigs := make(chan os.Signal, 1)
+	if err := pending(context.Background(), sigs); err != nil {
+		t.Fatalf("no signal: %v", err)
+	}
+	sigs <- syscall.SIGINT
+	var e interrupted
+	if err := pending(context.Background(), sigs); !errors.As(err, &e) || e.sig != syscall.SIGINT {
+		t.Fatalf("a queued signal: %v", err)
 	}
 }

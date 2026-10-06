@@ -46,6 +46,9 @@ func stage() (ctx context.Context, done func()) {
 		case sig := <-sigs:
 			s, _ := sig.(syscall.Signal)
 			cancel(interrupted{s})
+			// One is enough to stop the staging; a second one, should
+			// that hang, ends airbag as it would have.
+			end()
 		case <-quit:
 		}
 	}()
@@ -61,6 +64,24 @@ func endStaging(ctx context.Context) {
 		end()
 	}
 }
+
+// pending is the staging's interruption, or one that reached the
+// provider's own signals before it started: after the hand-over a signal
+// is in either the staging's channel or the provider's, and neither
+// starts it.
+func pending(ctx context.Context, sigs <-chan os.Signal) error {
+	select {
+	case sig := <-sigs:
+		s, _ := sig.(syscall.Signal)
+		return interrupted{s}
+	default:
+		return staged(ctx)
+	}
+}
+
+// exportBranch makes the archive the branch is copied from; a variable,
+// for the tests.
+var exportBranch = exportWorkspace
 
 // staged is the staging's interruption, once it has come.
 func staged(ctx context.Context) error {

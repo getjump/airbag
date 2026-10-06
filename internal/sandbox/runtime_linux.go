@@ -97,8 +97,9 @@ func prepareRuntimeWorkspace(ctx context.Context, s *session.Session) error {
 	// source symlinks are preserved, never followed into host HOME.
 	reader, writer := io.Pipe()
 	done := make(chan error, 1)
+	export := exportBranch
 	go func() {
-		_, err := exportWorkspace(s.Workspace, writer, false)
+		_, err := export(s.Workspace, writer, false)
 		_ = writer.CloseWithError(err)
 		done <- err
 	}()
@@ -114,6 +115,12 @@ func prepareRuntimeWorkspace(ctx context.Context, s *session.Session) error {
 	_, err := importWorkspace(s.CloneDir(), reader)
 	close(copied)
 	_ = reader.CloseWithError(err)
+	// Interrupted, the exporter is not waited for: a read of the
+	// workspace (FUSE, NFS) can block, and its writes fail from here.
+	if e := staged(ctx); e != nil {
+		_ = os.RemoveAll(s.CloneDir())
+		return e
+	}
 	copyErr := <-done
 	if err != nil || copyErr != nil || staged(ctx) != nil {
 		_ = os.RemoveAll(s.CloneDir())
@@ -335,9 +342,10 @@ func executeProvider(ctx context.Context, binary string, args []string) (int, er
 	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigs)
 	// The provider takes the signals over from the staging, with no gap
-	// between: one that came before is the staging's, and nothing starts.
+	// between: one that came before the start is the staging's, and
+	// nothing starts.
 	endStaging(ctx)
-	if err := staged(ctx); err != nil {
+	if err := pending(ctx, sigs); err != nil {
 		return 1, err
 	}
 	if err := cmd.Start(); err != nil {
