@@ -16,12 +16,36 @@ jobs:
     # tag (Settings > Environments): themselves as required reviewer, and
     # deployment tags limited to v*. A job that names an environment that
     # does not exist yet creates it with no protection at all.
+    # Immutable releases are a setting of their own (Settings > General >
+    # Releases), which this job's token cannot read: the endpoint needs
+    # admin read. The environment holds RELEASE_SETTINGS_TOKEN, a
+    # fine-grained token for this repository with Administration:
+    # read-only and nothing else, used only to read that setting.
     environment: release
     permissions:
       contents: write # create the draft release, upload its assets, publish it
       id-token: write # Sigstore keyless signing, by cosign and actions/attest
       attestations: write # store the build provenance
     steps:
+      # Publishing the draft does not make it immutable; the setting does.
+      # It is read now, before anything is built, and again right before
+      # publishing, so no mutable release goes out; verify checks the
+      # published release itself.
+      - name: immutable releases are on
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          [ -n "$GH_TOKEN" ] || {
+            echo "::error::add RELEASE_SETTINGS_TOKEN to the release environment: a fine-grained token for this repository with Administration: read-only"
+            exit 1
+          }
+          # 404 when the setting is off.
+          enabled=$(gh api "repos/$REPO/immutable-releases" --jq .enabled) || enabled=
+          [ "$enabled" = true ] || {
+            echo "::error::immutable releases are off for $REPO (or the token cannot read the setting); turn them on (Settings > General > Releases) and run the release again"
+            exit 1
+          }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # All of history and origin/main: the tag must be on main, and
@@ -78,6 +102,17 @@ jobs:
           # One attestation for every file checksums.txt lists: the
           # archives, their SBOMs and install.sh.
           subject-checksums: dist/checksums.txt
+      # The setting may have been turned off while the release was built.
+      - name: immutable releases are still on
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          enabled=$(gh api "repos/$REPO/immutable-releases" --jq .enabled) || enabled=
+          [ "$enabled" = true ] || {
+            echo "::error::immutable releases were turned off for $REPO while the release was built; the draft stays unpublished: turn them on and run the release again, which replaces the draft"
+            exit 1
+          }
       - name: publish the draft; the release is immutable from here on
         env:
           GH_TOKEN: ${{ github.token }}

@@ -467,7 +467,7 @@ func TestCanonHost(t *testing.T) {
 			t.Errorf("canonHost(%q) = %q, %q; want %q", c.in, got, why, c.out)
 		}
 	}
-	for _, bad := range []string{"a..b", ".a", "a..", "::1.", "[::1]", "ap\u0130.example"} {
+	for _, bad := range []string{"a..b", ".a", "a..", "::1.", "[::1]", "ap\u0130.example", "a.example.com]", "a.example.com[", "[a.example.com]"} {
 		if _, why := canonHost(bad); why == "" {
 			t.Errorf("canonHost(%q) accepted", bad)
 		}

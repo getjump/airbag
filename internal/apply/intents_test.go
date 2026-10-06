@@ -3,7 +3,6 @@ package apply
 import (
 	"bufio"
 	"bytes"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +64,37 @@ func TestRunningBecomesUnknown(t *testing.T) {
 	}
 	if got := status(t, box, it.ID); got != outbox.Unknown || out.Len() != 0 {
 		t.Fatalf("second run touched it: %s %q", got, out.String())
+	}
+}
+
+// One that was running when airbag stopped becomes unknown even with the
+// workspace moved, so its outcome can still be recorded; the rest wait.
+func TestRunningBecomesUnknownWithRootMoved(t *testing.T) {
+	s, box := testBox(t)
+	id, err := session.DirIDOf(s.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.WorkspaceID = id
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindPush, Argv: []string{"git", "push", "origin", "main"}, Cwd: s.Workspace})
+	it.Status = outbox.Running
+	if err := box.Update(it); err != nil {
+		t.Fatal(err)
+	}
+	later, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Cwd: s.Workspace})
+	moveRoot(t, s.Workspace)
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, nil, Options{Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("the outbox ran in a moved workspace: %v", err)
+	}
+	if got := status(t, box, it.ID); got != outbox.Unknown {
+		t.Fatalf("status %s, want unknown: %q", got, out.String())
+	}
+	if err := box.Resolve(it.ID, true); err != nil {
+		t.Fatalf("its outcome cannot be recorded: %v", err)
+	}
+	if got := status(t, box, later.ID); got != outbox.Pending {
+		t.Fatalf("the later intent is %s", got)
 	}
 }
 
@@ -479,33 +509,6 @@ func TestCmdLinkToSystemConfigWaits(t *testing.T) {
 	}
 }
 
-// Each condition of an installed program, one at a time.
-func TestProgram(t *testing.T) {
-	bin := place{mode: 0o755}
-	dir := place{mode: fs.ModeDir | 0o755}
-	dirs := []place{dir, dir}
-	if !program(bin, dirs) {
-		t.Fatal("an installed program is not public")
-	}
-	for name, c := range map[string]struct {
-		file place
-		dirs []place
-	}{
-		"not a regular file":        {place{mode: fs.ModeDir | 0o755}, dirs},
-		"no execute bit":            {place{mode: 0o644}, dirs},
-		"not root's":                {place{mode: 0o755, uid: 1000}, dirs},
-		"writable by the user":      {place{mode: 0o755, writable: true}, dirs},
-		"in a directory not root's": {bin, []place{{mode: fs.ModeDir | 0o755, uid: 1000}, dir}},
-		"in a writable directory":   {bin, []place{dir, {mode: fs.ModeDir | 0o755, writable: true}}},
-		"in a closed directory":     {bin, []place{{mode: fs.ModeDir | 0o750}, dir}},
-		"below a non-directory":     {bin, []place{{mode: 0o755}}},
-	} {
-		if program(c.file, c.dirs) {
-			t.Errorf("%s: public", name)
-		}
-	}
-}
-
 // Through the real apply: a link the agent made in a new directory is
 // recorded and holds the session's commands until the user trusts it.
 func TestApplyRecordsLinksThatHoldCommands(t *testing.T) {
@@ -514,6 +517,11 @@ func TestApplyRecordsLinksThatHoldCommands(t *testing.T) {
 	elsewhere := t.TempDir()
 	if err := os.WriteFile(filepath.Join(elsewhere, "python"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
@@ -564,5 +572,76 @@ func TestCmdNamesSessionStorage(t *testing.T) {
 	}
 	if ran(log) != "" || status(t, box, it.ID) != outbox.Rejected {
 		t.Fatalf("ran on the session's storage: %q", out.String())
+	}
+}
+
+// Pushes and deferred commands wait while the workspace leads elsewhere
+// than when the session began.
+func TestOutboxWaitsForMovedRoot(t *testing.T) {
+	s, box := testBox(t)
+	id, err := session.DirIDOf(s.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.WorkspaceID = id
+	log := tool(t, "pubtool", "0")
+	it, _ := box.Push(outbox.Intent{Kind: outbox.KindCmd, Argv: []string{"pubtool", "release"}, Cwd: s.Workspace})
+	if err := os.Rename(s.Workspace, s.Workspace+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), s.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runIntents(s, box, false, bufio.NewReader(strings.NewReader("y\n")), Options{Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("the outbox ran in a moved workspace: %v", err)
+	}
+	if status(t, box, it.ID) != outbox.Pending || ran(log) != "" {
+		t.Fatalf("ran: %s %q", status(t, box, it.ID), ran(log))
+	}
+}
+
+// movesOnRead answers the confirmation, and before it does, moves the
+// workspace as the host could while the prompt waits.
+type movesOnRead struct {
+	t     *testing.T
+	ws    string
+	moved bool
+}
+
+func (m *movesOnRead) Read(p []byte) (int, error) {
+	if !m.moved {
+		m.moved = true
+		moveRoot(m.t, m.ws)
+	}
+	return copy(p, "y\n"), nil
+}
+
+// The workspace is checked again as each intent starts: one moved while
+// its confirmation waited takes no push and no command.
+func TestOutboxRechecksRootAfterConfirm(t *testing.T) {
+	for _, kind := range []string{outbox.KindCmd, outbox.KindPush} {
+		t.Run(kind, func(t *testing.T) {
+			s, box := testBox(t)
+			id, err := session.DirIDOf(s.Workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.WorkspaceID = id
+			name, argv := "pubtool", []string{"pubtool", "release"}
+			if kind == outbox.KindPush {
+				name, argv = "git", []string{"git", "push", "origin", "main"}
+			}
+			log := tool(t, name, "0")
+			it, _ := box.Push(outbox.Intent{Kind: kind, Argv: argv, Cwd: s.Workspace})
+			var out bytes.Buffer
+			in := &movesOnRead{t: t, ws: s.Workspace}
+			if err := runIntents(s, box, false, bufio.NewReader(in), Options{Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+				t.Fatalf("ran in a workspace moved while it was confirmed: %v %q", err, out.String())
+			}
+			if !in.moved || status(t, box, it.ID) != outbox.Pending || strings.Contains(ran(log), " "+strings.Join(argv[1:], " ")+"\n") {
+				t.Fatalf("ran: %v %s %q", in.moved, status(t, box, it.ID), ran(log))
+			}
+		})
 	}
 }

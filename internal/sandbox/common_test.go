@@ -94,7 +94,7 @@ func TestClaudeProjectState(t *testing.T) {
 func TestAddClaudeProjectStateOnResume(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	pass, holes := ClaudeProjectState("/home/me/api", "/home/me/api")
-	s, err := session.Create(session.Meta{Workspace: "/home/me/api", Home: t.TempDir(),
+	s, err := session.Create(session.Meta{Workspace: "/home/me/api", WorkspaceID: session.DirID{Real: "/home/me/api"}, Home: t.TempDir(),
 		Passthrough: append(append([]string{}, DefaultPassthrough...), pass...), BranchHoles: holes})
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func countOf(list []string, s string) int {
 func TestAddClaudeProjectStateKeepsBranchedDir(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	pass, holes := ClaudeProjectState("/home/me/api", "/home/me/api")
-	s, err := session.Create(session.Meta{Workspace: "/home/me/api", Home: t.TempDir(),
+	s, err := session.Create(session.Meta{Workspace: "/home/me/api", WorkspaceID: session.DirID{Real: "/home/me/api"}, Home: t.TempDir(),
 		Passthrough: append(append([]string{}, DefaultPassthrough...), pass...), BranchHoles: holes})
 	if err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestAddClaudeProjectStateKeepsBranchedDir(t *testing.T) {
 func TestAddClaudeProjectStateIgnoresEmptyScaffolding(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	pass, holes := ClaudeProjectState("/home/me/api", "/home/me/api")
-	s, err := session.Create(session.Meta{Workspace: "/home/me/api", Home: t.TempDir(),
+	s, err := session.Create(session.Meta{Workspace: "/home/me/api", WorkspaceID: session.DirID{Real: "/home/me/api"}, Home: t.TempDir(),
 		Passthrough: append(append([]string{}, DefaultPassthrough...), pass...), BranchHoles: holes})
 	if err != nil {
 		t.Fatal(err)

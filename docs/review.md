@@ -44,6 +44,32 @@ its version from before the apply stays in the session: `airbag discard` refuses
 to delete it until a later rollback restores it, or you pass `--force`. A push that
 already ran is not undone.
 
+A session records the directories its workspace and a branched `$HOME` were when it
+began; on macOS, which never branches `$HOME`, it records the `$HOME` it keeps the
+agent's state in. If one is another directory now (moved away, with a link or a new
+directory at its path), run, apply, rollback and resume change nothing there and say
+so, and the outbox runs nothing while the workspace is; put the directory back first.
+Apply and rollback leave a `$HOME` that is not branched alone; on Linux nothing writes
+in it at all. On macOS one that could not be recorded (not there, `HOME=/nonexistent`,
+say) keeps the agent's state read-only. What the outbox runs on the host, a push or a
+deferred command you confirm, runs as you, with your environment and `$HOME` as they
+are then, as it would from your own shell. A rollback that finds it so part way stops there and keeps
+what is left in its journal; until `airbag rollback` is run again to finish it, apply
+refuses. A directory is told by its path, inode, device and, where
+the filesystem keeps them, its creation time, inode generation and filesystem ID.
+On NFS or FUSE, which keep neither of the first two, a directory removed and made
+again with the same inode number passes. A filesystem mounted again under a new
+device number passes only where it keeps a creation time and an ID of its own
+(ext4, btrfs, an overlay: a container restarted between the run and the apply). On
+macOS, NFS and FUSE, and on xfs whose device is renumbered, it is refused, since
+nothing tells it from another one: take what you need from `airbag diff`, then
+discard the session. On an overlay airbag copies the workspace's directory up to the
+top layer when the session begins (it sets the directory's times to what they are),
+so it keeps one creation time; a new container from the same image has another. Where
+it cannot (a read-only overlay, or a directory you may not write), `airbag run` refuses
+to begin, since a directory made again there would pass. Sessions made by development builds from before this check
+record nothing and are not checked: discard them.
+
 ## Apply onto a git branch
 
 `apply --branch NAME` leaves your working tree alone and puts the result on a new

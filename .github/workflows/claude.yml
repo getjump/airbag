@@ -9,6 +9,21 @@ on:
 
 permissions: {}
 
+# An ai:implement run holds its issue from claim through publish: a label
+# reapplied while one runs waits, so the second run's labels never land
+# between the first's. Only the owner's label joins the group; any other
+# event gets one of its own, so a run the gates skip never takes a
+# waiting run's place.
+concurrency:
+  group: >-
+    ${{ vars.AGENTS_ENABLED == 'true' && github.event_name == 'issues'
+    && github.event.label.name == 'ai:implement'
+    && github.event.sender.login == github.repository_owner
+    && github.event.sender.type == 'User'
+    && format('claude-implement-{0}', github.event.issue.number)
+    || format('claude-run-{0}', github.run_id) }}
+  cancel-in-progress: false
+
 # Claude Code on the owner's own triggers only; docs/agents.md says how
 # it is gated, why, and how to turn it on. Nothing runs until the
 # repository variable AGENTS_ENABLED is "true".
