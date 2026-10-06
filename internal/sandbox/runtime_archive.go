@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 const (
@@ -166,7 +167,7 @@ func exportWorkspace(root string, output io.Writer, skipSpecial bool) (exportSta
 		}
 		st.entries++
 		if info.Mode().IsRegular() {
-			f, err := source.Open(h.Name)
+			f, err := openRegular(source, h.Name)
 			if err != nil {
 				return err
 			}
@@ -183,4 +184,23 @@ func exportWorkspace(root string, output io.Writer, skipSpecial bool) (exportSta
 		return st, err // no trailer: a partial tar must not read as a whole one
 	}
 	return st, writer.Close()
+}
+
+// openRegular opens a file the walk found regular. Another process may
+// have made it something else since: a FIFO would block a plain open
+// until a writer came, and the copy with it. So the open does not wait,
+// and what it opened must still be a regular file.
+func openRegular(root *os.Root, name string) (*os.File, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		_ = f.Close()
+		if err == nil {
+			err = fmt.Errorf("workspace file %s is no longer a regular file", name)
+		}
+		return nil, err
+	}
+	return f, nil
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestRejectGuestArchiveEscapes(t *testing.T) {
@@ -132,4 +133,45 @@ func TestArchiveKeepsModesPastUmask(t *testing.T) {
 			t.Fatalf("%s: %v, want %v (%v)", name, st.Mode().Perm(), mode, err)
 		}
 	}
+}
+
+// A file the walk found regular and something else has made a FIFO since
+// fails at once instead of blocking the copy.
+func TestOpenRegularDoesNotWaitOnAFIFO(t *testing.T) {
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, "f"), 0o600); err != nil {
+		t.Skipf("no FIFO here: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "r"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		f, err := openRegular(root, "f")
+		if err == nil {
+			_ = f.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a FIFO opened as a regular file")
+		}
+	case <-time.After(5 * time.Second):
+		if w, err := os.OpenFile(filepath.Join(dir, "f"), os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = w.Close()
+		}
+		t.Fatal("the open waited on a FIFO")
+	}
+	f, err := openRegular(root, "r")
+	if err != nil {
+		t.Fatalf("a regular file: %v", err)
+	}
+	_ = f.Close()
 }
