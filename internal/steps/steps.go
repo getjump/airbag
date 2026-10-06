@@ -206,11 +206,17 @@ type record struct {
 	Raw map[int][]byte `json:"changes_raw,omitempty"`
 }
 
-// sameJSON reports whether JSON writes a and b the same.
-func sameJSON(a, b string) bool {
-	x, err1 := json.Marshal(a)
-	y, err2 := json.Marshal(b)
-	return err1 == nil && err2 == nil && string(x) == string(y)
+// spelledAs reports whether JSON, written and read back, turns raw into
+// change: what the record's change is if raw was its bytes. Compared
+// after the round trip, not as written: encoders spell an invalid byte
+// differently (an escape or the character itself).
+func spelledAs(raw, change string) bool {
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return false
+	}
+	var back string
+	return json.Unmarshal(b, &back) == nil && back == change
 }
 
 func stored(st Step) record {
@@ -245,7 +251,7 @@ func Read(s *session.Session) ([]Step, error) {
 		for i, c := range r.Raw {
 			// Only the bytes of the change JSON spelled: a record that
 			// says otherwise keeps what it says.
-			if i >= 0 && i < len(r.Changes) && len(c) > 0 && sameJSON(string(c), r.Changes[i]) {
+			if i >= 0 && i < len(r.Changes) && len(c) > 0 && spelledAs(string(c), r.Changes[i]) {
 				r.Changes[i] = string(c)
 			}
 		}
