@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/session"
@@ -20,6 +21,11 @@ func fakeSession(t *testing.T) *session.Session {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	root := t.TempDir()
 	ws, home := filepath.Join(root, "ws"), filepath.Join(root, "home")
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)
@@ -119,6 +125,11 @@ func TestAttentionUnknownHome(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	root := t.TempDir()
 	ws, home := filepath.Join(root, "ws"), filepath.Join(root, "home")
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)
@@ -320,6 +331,134 @@ func TestReportDroppedRefusals(t *testing.T) {
 	}
 }
 
+// A deferred command's line names --trust-links when the session adds
+// links that lead out of the workspace, since apply holds the command
+// while one is in the real files; a link inside does not.
+func TestReportNamesTrustLinks(t *testing.T) {
+	ws := t.TempDir()
+	s := &session.Session{Meta: session.Meta{ID: "s-1", Workspace: ws}}
+	cmd := outbox.Intent{ID: "i-1", Kind: outbox.KindCmd, Argv: []string{"pubtool", "release"}, Status: outbox.Pending}
+	push := outbox.Intent{ID: "i-2", Kind: outbox.KindPush, Argv: []string{"git", "push"}, Status: outbox.Pending}
+	upper := t.TempDir()
+	link := func(name, target string) Change {
+		if err := os.Symlink(target, filepath.Join(upper, name)); err != nil {
+			t.Fatal(err)
+		}
+		return Change{Layer: "ws", Rel: name, Path: filepath.Join(ws, name), Upper: filepath.Join(upper, name), Kind: Added, Type: fs.ModeSymlink}
+	}
+	out := link("docs", "/etc/app")
+	up := link("parent", "../elsewhere")
+	inner := link("latest", "v1")
+	secret := link("notes.md", ".env")
+	abs := link("abs", filepath.Join(ws, "v2"))
+	gone := Change{Layer: "ws", Rel: "old", Path: filepath.Join(ws, "old"), Kind: Deleted, Type: fs.ModeSymlink}
+	why := func(cs []Change, id string) string {
+		for _, a := range BuildReport(s, cs, nil, []outbox.Intent{cmd, push}, nil).Attention {
+			if a.Target == id {
+				return a.Why
+			}
+		}
+		t.Fatalf("no attention for %s", id)
+		return ""
+	}
+	if w := why([]Change{out, up, inner}, "i-1"); !strings.Contains(w, "airbag apply --trust-links") || !strings.Contains(w, "2 links") {
+		t.Errorf("the command's line does not name --trust-links for 2 links out: %s", w)
+	}
+	if w := why([]Change{secret}, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("a link to a secret file inside the workspace holds the command too: %s", w)
+	}
+	// Inside by name, outside through a link already in the real files.
+	if err := os.Symlink(t.TempDir(), filepath.Join(ws, "cache")); err != nil {
+		t.Fatal(err)
+	}
+	if w := why([]Change{link("publish", "cache/pkg")}, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("a link out through an existing link is not counted: %s", w)
+	}
+	// The .. applies where cache leads, not to the name.
+	if w := why([]Change{link("up", "cache/../secret")}, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("a .. after an existing link is not followed: %s", w)
+	}
+	if w := why([]Change{out}, "i-2"); strings.Contains(w, "trust-links") {
+		t.Errorf("a push names --trust-links, which does not hold it: %s", w)
+	}
+	if w := why([]Change{inner, abs, gone}, "i-1"); strings.Contains(w, "trust-links") {
+		t.Errorf("links inside the workspace, or removed, hold nothing: %s", w)
+	}
+	// A link a partial apply already wrote is no change now, and still
+	// holds the command; one that stays inside does not.
+	if err := os.Symlink("/etc/app", filepath.Join(ws, "applied")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("v1", filepath.Join(ws, "applied-inner")); err != nil {
+		t.Fatal(err)
+	}
+	s.Applied = map[string]time.Time{filepath.Join(ws, "applied"): time.Now(), filepath.Join(ws, "applied-inner"): time.Now()}
+	if w := why(nil, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("an applied link out is not counted: %s", w)
+	}
+	// Changed to lead inside, the applied link still holds the command
+	// until that change is applied; changed to lead out, it counts once.
+	if w := why([]Change{link("applied", "v3")}, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("an applied link out is not counted while its change waits: %s", w)
+	}
+	if w := why([]Change{link("applied-inner", "/etc/other")}, "i-1"); !strings.Contains(w, "2 links") {
+		t.Errorf("an applied link and a change to another path: %s", w)
+	}
+	if err := os.Remove(filepath.Join(upper, "applied")); err != nil {
+		t.Fatal(err)
+	}
+	if w := why([]Change{link("applied", "/etc/third")}, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("a path counts once, as its change: %s", w)
+	}
+	// A link in a folded cache is left out by apply unless --only names
+	// it, so it holds nothing; once applied that way, it does.
+	s.Applied = nil
+	home := t.TempDir()
+	s.Home = home
+	if err := os.MkdirAll(filepath.Join(upper, ".cache", "tool"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cached := link(filepath.Join(".cache", "tool", "link"), "/etc/app")
+	cached.Layer, cached.Path = "home", filepath.Join(home, ".cache", "tool", "link")
+	if !Dropped(cached) {
+		t.Fatal("the cache link is not folded; the case tests nothing")
+	}
+	if w := why([]Change{cached}, "i-1"); strings.Contains(w, "trust-links") {
+		t.Errorf("a link apply leaves out holds the command: %s", w)
+	}
+	if err := os.MkdirAll(filepath.Dir(cached.Path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/app", cached.Path); err != nil {
+		t.Fatal(err)
+	}
+	s.Applied = map[string]time.Time{cached.Path: time.Now()}
+	if w := why(nil, "i-1"); !strings.Contains(w, "1 links") {
+		t.Errorf("a cache link applied with --only is not counted: %s", w)
+	}
+}
+
+// A link to an installed program does not hold a command in apply, so
+// review does not count it either. As root nothing is installed in that
+// sense: root may write everything.
+func TestReportSkipsLinksToInstalledPrograms(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root may write every file")
+	}
+	ws, upper := t.TempDir(), t.TempDir()
+	s := &session.Session{Meta: session.Meta{ID: "s-1", Workspace: ws}}
+	cmd := outbox.Intent{ID: "i-1", Kind: outbox.KindCmd, Argv: []string{"pubtool"}, Status: outbox.Pending}
+	if err := os.Symlink("/bin/sh", filepath.Join(upper, "python")); err != nil {
+		t.Fatal(err)
+	}
+	c := Change{Layer: "ws", Rel: "python", Path: filepath.Join(ws, "python"), Upper: filepath.Join(upper, "python"), Kind: Added, Type: fs.ModeSymlink}
+	for _, a := range BuildReport(s, []Change{c}, nil, []outbox.Intent{cmd}, nil).Attention {
+		if a.Target == "i-1" && strings.Contains(a.Why, "trust-links") {
+			t.Fatalf("a link to /bin/sh holds the command: %s", a.Why)
+		}
+	}
+}
+
 // The clone of a workspace named through a link is compared with where
 // the link leads, so the agent's deletions show; the real files are
 // named by the workspace's path.
@@ -345,5 +484,47 @@ func TestScanTreeThroughLinkedRoot(t *testing.T) {
 	want := []string{Deleted + ":gone.txt:" + filepath.Join(link, "gone.txt"), Added + ":new.txt:" + filepath.Join(link, "new.txt")}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// linkReport is the attention line for a deferred command when the
+// session adds a link named name to target in workspace ws.
+func linkReport(t *testing.T, ws, name, target string) string {
+	t.Helper()
+	upper := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(upper, name)); err != nil {
+		t.Fatal(err)
+	}
+	s := &session.Session{Meta: session.Meta{ID: "s-1", Workspace: ws}}
+	c := Change{Layer: "ws", Rel: name, Path: filepath.Join(ws, name), Upper: filepath.Join(upper, name), Kind: Added, Type: fs.ModeSymlink}
+	cmd := outbox.Intent{ID: "i-1", Kind: outbox.KindCmd, Argv: []string{"pubtool", "release"}, Status: outbox.Pending}
+	for _, a := range BuildReport(s, []Change{c}, nil, []outbox.Intent{cmd}, nil).Attention {
+		if a.Target == cmd.ID {
+			return a.Why
+		}
+	}
+	t.Fatal("no attention for the command")
+	return ""
+}
+
+// An absolute target that names the workspace in another case is inside
+// it where the filesystem ignores case, as on macOS by default: apply
+// compares files, and review does too.
+func TestReportComparesTheWorkspaceByFile(t *testing.T) {
+	ws, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := strings.ToUpper(ws)
+	if other == ws {
+		other = strings.ToLower(ws)
+	}
+	a, errA := os.Stat(ws)
+	b, errB := os.Stat(other)
+	if errA != nil || errB != nil || !os.SameFile(a, b) {
+		t.Skip("the filesystem tells case apart")
+	}
+	if w := linkReport(t, ws, "latest", filepath.Join(other, "v2")); strings.Contains(w, "trust-links") {
+		t.Errorf("a link into the workspace, named in another case, holds the command: %s", w)
 	}
 }

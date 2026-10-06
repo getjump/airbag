@@ -54,13 +54,18 @@ type genEntry struct {
 
 type generation struct {
 	dir      string
+	roots    roots     // checked before each change; not kept in the journal
 	Clone    bool      `json:"clone,omitempty"` // the branch is a full copy, not an upper layer
 	Session  string    `json:"session"`
 	Started  time.Time `json:"started"`
 	Complete bool      `json:"complete"`
 	// Partial: rolled back except Entries, which were left as they were;
 	// their previous versions are kept under saved/.
-	Partial bool       `json:"partial,omitempty"`
+	Partial bool `json:"partial,omitempty"`
+	// Stopped: a rollback stopped part way, a root having changed;
+	// Entries are what it had not reached and what it kept, and the next
+	// rollback finishes it as this one would have.
+	Stopped bool       `json:"stopped,omitempty"`
 	Entries []genEntry `json:"entries"`
 	// Dirs: directories the apply made that a partial rollback could
 	// not remove because they were not empty; the next one tries again.
@@ -74,17 +79,42 @@ func beginGeneration(s *session.Session) (*generation, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
+	gs, err := listGenerations(s)
+	if err != nil {
+		return nil, err
+	}
+	// What a crash left before a journal was first written (.new), and
+	// what a rollback's removal cut short left (.gone), hold nothing
+	// needed. Their removal is best effort: every listing passes them by,
+	// each gets a name of its own, and one that cannot go must not stop
+	// every apply.
+	if es, err := os.ReadDir(root); err == nil {
+		for _, e := range es {
+			if strings.HasSuffix(e.Name(), ".gone") || strings.HasSuffix(e.Name(), ".new") {
+				_ = os.RemoveAll(filepath.Join(root, e.Name()))
+			}
+		}
+	}
 	n := 1
-	if gs, _ := listGenerations(s); len(gs) > 0 {
+	if len(gs) > 0 {
 		n = gs[len(gs)-1].n + 1
 	}
-	g := &generation{dir: filepath.Join(root, strconv.Itoa(n)), Session: s.ID, Started: time.Now(), Clone: s.Clone}
+	// Made under a name listGenerations passes by and renamed to its
+	// number once its journal is written: a numbered directory always has
+	// one, so a numbered directory without one is a journal lost, never a
+	// crash before the first write. A crash leaves only the .new.
+	final := filepath.Join(root, strconv.Itoa(n))
+	g := &generation{dir: fmt.Sprintf("%s.%d.new", final, time.Now().UnixNano()), roots: rootsOf(s), Session: s.ID, Started: time.Now(), Clone: s.Clone}
 	if err := os.MkdirAll(filepath.Join(g.dir, "saved"), 0o700); err != nil {
 		return nil, err
 	}
 	if err := g.save(); err != nil {
 		return nil, err
 	}
+	if err := os.Rename(g.dir, final); err != nil {
+		return nil, err
+	}
+	g.dir = final
 	return g, nil
 }
 
@@ -127,9 +157,12 @@ func listGenerations(s *session.Session) ([]genRef, error) {
 	}
 	var out []genRef
 	for _, e := range es {
-		if n, err := strconv.Atoi(e.Name()); err == nil && e.IsDir() {
-			out = append(out, genRef{n, filepath.Join(generationsDir(s), e.Name())})
+		// Only the names beginGeneration gives: not "03", "+3" or "-1".
+		n, err := strconv.Atoi(e.Name())
+		if err != nil || n < 1 || e.Name() != strconv.Itoa(n) || !e.IsDir() {
+			continue
 		}
+		out = append(out, genRef{n, filepath.Join(generationsDir(s), e.Name())})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].n < out[j].n })
 	return out, nil
@@ -144,23 +177,32 @@ func loadGeneration(dir string) (*generation, error) {
 	return g, json.Unmarshal(b, g)
 }
 
-// interrupted returns an apply of s that did not finish, if any.
-func interrupted(s *session.Session) *generation {
-	gs, _ := listGenerations(s)
+// lastGeneration is the journal of the last apply of s, nil when there
+// is none. One that cannot be read is an error, not none: whether that
+// apply, or a rollback of it, finished is not known.
+func lastGeneration(s *session.Session) (*generation, error) {
+	gs, err := listGenerations(s)
+	if err != nil {
+		return nil, fmt.Errorf("read the undo journals: %w", err)
+	}
 	if len(gs) == 0 {
-		return nil
+		return nil, nil
 	}
-	g, err := loadGeneration(gs[len(gs)-1].dir)
-	if err != nil || g.Complete {
-		return nil
+	dir := gs[len(gs)-1].dir
+	g, err := loadGeneration(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read the undo journal %s: %w", filepath.Join(dir, "journal.json"), err)
 	}
-	return g
+	return g, nil
 }
 
 // apply changes one real path, journal first.
 func (g *generation) apply(c review.Change) error {
 	// Checked before the previous version is moved, and again in
 	// applyOne for its own callers.
+	if err := g.roots.held(c.Layer, c.Path, c.Rel); err != nil {
+		return err
+	}
 	if err := parentsUnlinked(c, nil); err != nil {
 		return err
 	}
@@ -195,11 +237,38 @@ func (g *generation) finish() error {
 	return g.save()
 }
 
+// removeTree removes a rolled-back generation's directory; a test hook.
+var removeTree = os.RemoveAll
+
+// afterRemove is a test hook, called once a rollback entry has removed
+// the agent's version and before it restores the previous one; nil
+// outside tests.
+var afterRemove func(path string)
+
 // rollback undoes the generation's entries, last first. Each real path
 // that still looks as the apply left it gets its previous version back,
 // and the agent's version returns to the session. It reports the paths
 // it had to leave.
 func (g *generation) rollback(out io.Writer) (left int, err error) {
+	// Through a root that is another directory now, the rollback would
+	// remove and restore there. Every entry is checked before anything
+	// moves, when an apply that failed rolls itself back too.
+	for _, e := range g.Entries {
+		if err := g.roots.held(e.Layer, e.Path, e.Rel); err != nil {
+			return len(g.Entries), fmt.Errorf("nothing rolled back: %w; put the directory back, then roll back: your versions from before the apply are kept in %s", err, filepath.Join(g.dir, "saved"))
+		}
+	}
+	// Marked before the first write, so a run that ends any other way (an
+	// error, a crash, Ctrl-C) leaves a stopped rollback too: discard keeps
+	// the versions in saved/, apply refuses. The final save clears it. An
+	// apply that did not finish is refused and kept as it is, so its own
+	// rollback needs no mark, nor the space to write one.
+	if !g.Stopped && g.Complete {
+		g.Stopped = true
+		if err := g.save(); err != nil {
+			return len(g.Entries), fmt.Errorf("nothing rolled back: mark the journal: %w", err)
+		}
+	}
 	dirs := slices.Clone(g.Dirs) // directories the apply created, removed last, deepest first
 	var kept []genEntry
 	keep := func(e genEntry, why string) {
@@ -226,8 +295,38 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		return ""
 	}
 	inside := map[string]int{} // paths left inside each of those directories
+	// The root can change while the rollback runs (while leftWhole walks
+	// a large directory, say), so each entry is checked again before it
+	// moves anything, and the roots before each directory goes. Stopped
+	// there, what is not rolled back yet stays in the journal: the
+	// entries not reached, those kept, and the directories to remove.
+	// unfinished is the journal of what is not rolled back yet: the
+	// entries up to i, those kept, and the directories to remove. An
+	// entry rolled back is out of it: left in, the next rollback would
+	// take a version of the user's it put back for the agent's one, where
+	// the two are the same.
+	unfinished := func(i int) ([]genEntry, []string) {
+		rest := slices.Clone(g.Entries[:i+1])
+		for j := len(kept) - 1; j >= 0; j-- {
+			rest = append(rest, kept[j])
+		}
+		d := slices.Clone(dirs)
+		slices.Sort(d)
+		return rest, slices.Compact(d)
+	}
+	stop := func(i int, err error) (int, error) {
+		g.Entries, g.Dirs = unfinished(i)
+		g.Stopped = true
+		if serr := g.save(); serr != nil {
+			err = errors.Join(err, serr)
+		}
+		return len(g.Entries), fmt.Errorf("rollback stopped: %w; once that is fixed (a directory that moved put back), roll back again: what is not rolled back yet stays in the journal, your versions from before the apply in %s", err, filepath.Join(g.dir, "saved"))
+	}
 	for i := len(g.Entries) - 1; i >= 0; i-- {
 		e := g.Entries[i]
+		if err := g.roots.held(e.Layer, e.Path, e.Rel); err != nil {
+			return stop(i, err)
+		}
 		if d := inWhole(e.Path); d != "" {
 			switch {
 			case !ours(e):
@@ -278,7 +377,13 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		// it are gone, and so are the directories the apply made there.
 		// Whatever is still left was added while the rollback ran, and
 		// is not ours to remove.
+		// Each write below is checked again right before it: fingerprint
+		// and leftWhole can take long on a large file or directory.
+		held := func() error { return g.roots.held(e.Layer, e.Path, e.Rel) }
 		if e.Type == fs.ModeDir && e.Saved != "" {
+			if err := held(); err != nil {
+				return stop(i, err)
+			}
 			if moved {
 				// Checked by leftWhole: its temp files are the apply's.
 				removeTemps(e.Path, g.copyingTo())
@@ -300,8 +405,25 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 			}
 		}
 		if e.After != "" {
+			if err := held(); err != nil {
+				return stop(i, err)
+			}
 			if err := giveBack(e, g.Clone); err != nil {
-				return left, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err)
+				return stop(i, fmt.Errorf("%s: return the agent's version to the session: %w", e.Path, err))
+			}
+			// Journal first, as apply does: from the removal below to the
+			// restore the path holds neither version. Saved as a step that
+			// did not finish, a crash in between leaves the next rollback
+			// to restore the previous version, not to take the path for
+			// one changed after the apply. The journal is what is left to
+			// do, so no entry rolled back before this restore stays in it.
+			if moved {
+				g.Entries[i].After = ""
+				snap := *g
+				snap.Entries, snap.Dirs = unfinished(i)
+				if err := snap.save(); err != nil {
+					return stop(i, fmt.Errorf("%s: write the journal: %w", e.Path, err))
+				}
 			}
 		}
 		// A directory with nothing before it, added or replacing what was
@@ -313,18 +435,32 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 		}
 		// What is at the path now is the agent's (or half of it, or
 		// nothing for a deletion); the user's version was moved away.
+		if err := held(); err != nil {
+			return stop(i, err)
+		}
 		if err := os.RemoveAll(e.Path); err != nil && !gone(err) {
-			return left, err
+			return stop(i, err)
+		}
+		if afterRemove != nil {
+			afterRemove(e.Path)
 		}
 		if moved {
+			// Stopped here, the entry is already a step that did not
+			// finish (above): the next rollback restores what saved/ holds.
+			if err := held(); err != nil {
+				return stop(i, err)
+			}
 			if err := move(e.Saved, e.Path); err != nil {
-				return left, fmt.Errorf("%s: restore: %w", e.Path, err)
+				return stop(i, fmt.Errorf("%s: restore: %w", e.Path, err))
 			}
 		}
 	}
 	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
 	var still []string
 	for _, d := range dirs {
+		if err := g.roots.under(d); err != nil {
+			return stop(-1, err)
+		}
 		if inWhole(d) == "" {
 			removeEmptyDir(d)
 		}
@@ -335,15 +471,71 @@ func (g *generation) rollback(out io.Writer) (left int, err error) {
 	if len(kept) == 0 {
 		// Nothing else is left, so what keeps those directories there
 		// is the user's, and there is no later rollback to try again.
-		return left, os.RemoveAll(g.dir)
+		// The caller removes the journal (settle) once the session says
+		// so: until then it is what tells apply the rollback is not done.
+		// It is saved with nothing left first, so a rollback run again
+		// after a crash in between has nothing to replay: replayed, an
+		// entry rolled back since its last save would take a file the
+		// user made again at its path, the same as the agent's, for the
+		// agent's. For a rollback the user ran, until it is saved the
+		// rollback is not done: the session is left as it is, and apply
+		// still refuses. An apply's own rollback needs no space to write
+		// (one that failed for want of space rolls back all the same): its
+		// session was never applied, and its journal goes at once.
+		g.Entries, g.Dirs = nil, nil
+		if err := g.save(); err != nil && g.Complete {
+			return left, fmt.Errorf("everything is rolled back, but the journal cannot say so yet: %w; once that is fixed, roll back again to finish", err)
+		}
+		return left, nil
 	}
 	// Keep what was left, with its previous versions, so nothing from
 	// before the apply is lost and a later rollback can try again.
 	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
 		kept[i], kept[j] = kept[j], kept[i]
 	}
+	// Stopped stays as it was: a rollback the user ran is marked so
+	// until its caller has saved the session (settle), which a partial
+	// generation alone would not stop apply from running on as applied.
+	// An apply's own rollback was never applied, and is not marked.
 	g.Entries, g.Dirs, g.Complete, g.Partial = kept, still, true, true
 	return left, g.save()
+}
+
+// settle ends a rollback once the session's own state says it is
+// rolled back: a generation rolled back in full goes (remove), one with
+// paths left is no longer marked stopped. Until then apply refuses, and
+// a rollback finishes it again.
+func (g *generation) settle(left int, out io.Writer) error {
+	if left == 0 {
+		g.remove(out)
+		return nil
+	}
+	if !g.Stopped {
+		return nil
+	}
+	g.Stopped = false
+	if err := g.save(); err != nil {
+		return fmt.Errorf("the rollback is done, but its journal still says stopped: %w; airbag rollback clears it", err)
+	}
+	return nil
+}
+
+// remove takes a generation that is rolled back in full out of the
+// numbered ones, then deletes it. Called once the session's own state
+// says so: a crash before leaves the journal, so apply still refuses
+// and a rollback finishes it again. It is renamed first, to a name of
+// its own, so a removal cut short leaves no numbered directory without
+// a journal, nor a name an earlier one could not clear. What is left of
+// it is only warned about: the rollback is done.
+func (g *generation) remove(out io.Writer) {
+	gone := fmt.Sprintf("%s.%d.gone", g.dir, time.Now().UnixNano())
+	if err := os.Rename(g.dir, gone); err != nil {
+		fmt.Fprintf(out, "  warning: the finished rollback's journal %s is left (%v); airbag rollback removes it\n", g.dir, err)
+		return
+	}
+	if err := removeTree(gone); err != nil {
+		fmt.Fprintf(out, "  warning: %s is left (%v); the next apply tries to remove it again\n", gone, err)
+	}
 }
 
 // leftWhole returns the replaced directories, their previous versions
@@ -634,7 +826,7 @@ func HeldVersions(s *session.Session) ([]Held, error) {
 		if err != nil {
 			return nil, err
 		}
-		if g.Complete && !g.Partial {
+		if g.Complete && !g.Partial && !g.Stopped {
 			continue // applied: discarding it keeps the apply, as asked
 		}
 		for _, e := range g.Entries {
@@ -664,21 +856,35 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	g.roots = rootsOf(s)
 	n, partial := len(g.Entries), g.Partial
 	left, err := g.rollback(out)
 	if err != nil {
 		return err
 	}
+	// The session says rolled back before the journal stops saying the
+	// rollback is under way: with the session still applied and the
+	// journal gone or settled, a crash would leave apply to run the
+	// outbox on the rolled-back tree. A rollback that finishes an earlier
+	// partial one sets right a session that crash left applied.
+	// Setting it right resets the baseline too: the save that would
+	// have was lost with the crash.
+	save := !partial
+	if s.Status == session.StatusApplied {
+		s.Status, save = session.StatusStopped, true
+	}
+	if save {
+		s.Baseline = time.Now()
+		if err := s.Save(); err != nil {
+			return err
+		}
+	}
+	if err := g.settle(left, out); err != nil {
+		return err
+	}
 	if partial {
 		fmt.Fprintf(out, "Session %s: %d of the paths left by the last rollback are rolled back now; %d stay as they are.\n", s.ID, n-left, left)
 		return nil
-	}
-	if s.Status == session.StatusApplied {
-		s.Status = session.StatusStopped
-	}
-	s.Baseline = time.Now()
-	if err := s.Save(); err != nil {
-		return err
 	}
 	fmt.Fprintf(out, "Rolled back %d changes of session %s; they are back in the session (airbag review).\n", n-left, s.ID)
 	if left > 0 {

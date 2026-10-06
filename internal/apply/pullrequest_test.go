@@ -379,3 +379,23 @@ func TestServerErrorStaysUnknown(t *testing.T) {
 		t.Fatalf("a 502 is %s, not unknown", status(t, b, it.ID))
 	}
 }
+
+// A workspace moved while the request waited for approval publishes
+// nothing; the request stays pending.
+func TestPublicationRechecksRootAfterConfirm(t *testing.T) {
+	s, b, it := prFixture(t)
+	id, err := session.DirIDOf(s.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.WorkspaceID = id
+	log, _ := mockPR(t, *it.Request.PullRequest, "ok")
+	var out bytes.Buffer
+	in := &movesOnRead{t: t, ws: s.Workspace}
+	if err := runIntents(s, b, false, bufio.NewReader(in), Options{Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("published from a workspace moved while it was approved: %v %q", err, out.String())
+	}
+	if !in.moved || status(t, b, it.ID) != outbox.Pending || ran(log) != "" {
+		t.Fatalf("published: %v %s %q", in.moved, status(t, b, it.ID), ran(log))
+	}
+}

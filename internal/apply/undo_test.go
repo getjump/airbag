@@ -26,6 +26,11 @@ func undoSession(t *testing.T) (*session.Session, *outbox.Box) {
 	t.Helper()
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -130,8 +135,8 @@ func TestApplyIsAllOrNothing(t *testing.T) {
 	if read(t, filepath.Join(ws, "mod.txt")) != "user\n" || read(t, filepath.Join(ws, "del.txt")) != "keep me\n" {
 		t.Fatal("a failed apply left changes behind")
 	}
-	if interrupted(s) != nil {
-		t.Fatal("rolled-back generation still marked as interrupted")
+	if g, err := lastGeneration(s); err != nil || g != nil && !g.Complete {
+		t.Fatalf("rolled-back generation still marked as interrupted: %+v %v", g, err)
 	}
 }
 
@@ -200,6 +205,11 @@ func mustScan(t *testing.T, s *session.Session) []review.Change {
 func TestCloneApplyRollback(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -258,6 +268,11 @@ func appliedReplacedDir(t *testing.T, inner string) (*session.Session, string) {
 	t.Helper()
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -565,6 +580,11 @@ func appliedOverlayReplacedDir(t *testing.T) (*session.Session, string) {
 	t.Helper()
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -745,6 +765,11 @@ func TestRollbackKeepsUserFileNamedLikeTemp(t *testing.T) {
 func TestRollbackKeepsFileInReplacedDirWithoutPrevious(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -835,6 +860,11 @@ func overlayReplacedDir(t *testing.T, real, agent map[string]string) (*session.S
 	t.Helper()
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -1420,6 +1450,11 @@ func TestConflictConfigLinkedIntoWorkspace(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(home, ".claude.json")); err != nil {
 		t.Fatal(err)
 	}
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: home, OverHome: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1480,6 +1515,11 @@ func TestPartialApplyThenRunAgain(t *testing.T) {
 func TestApplyNewDirectoryOfLinks(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1553,6 +1593,11 @@ func TestApplyRefusesLinkedParent(t *testing.T) {
 func TestApplyRefusesLinkedParentBeforeJournal(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := filepath.Join(t.TempDir(), "ws")
+	for _, d := range []string{ws} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1599,5 +1644,1117 @@ func TestApplyRefusesLinkedParentBeforeJournal(t *testing.T) {
 		if data, err := os.ReadFile(keep); err != nil || string(data) != "mine\n" {
 			t.Fatalf("%s: the file the link leads to moved: %q %v", c.Kind, data, err)
 		}
+	}
+}
+
+// moveRoot does what Codex's case describes: the host renames the
+// workspace and puts a link to another directory at its path.
+func moveRoot(t *testing.T, ws string) (elsewhere string) {
+	t.Helper()
+	elsewhere = t.TempDir()
+	if err := os.Rename(ws, ws+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, ws); err != nil {
+		t.Fatal(err)
+	}
+	return elsewhere
+}
+
+func rootSession(t *testing.T, ws string) *session.Session {
+	t.Helper()
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := t.TempDir()
+	wsID, err := session.DirIDOf(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeID, err := session.DirIDOf(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{ws, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: home, WorkspaceID: wsID, HomeID: homeID, Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	return s
+}
+
+// A workspace that leads elsewhere than when the session began takes no
+// change, a new top-level file included: no parent below the root is a
+// link, so only the root itself shows it.
+func TestApplyRefusesMovedRoot(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "new.txt", Path: filepath.Join(ws, "new.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	elsewhere := moveRoot(t, ws)
+	// A file of the same name where the link leads: read as a conflict
+	// if the roots were not checked first.
+	if err := os.WriteFile(filepath.Join(elsewhere, "new.txt"), []byte("theirs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	// Refused before conflicts are read from the other tree, and before
+	// an undo journal is started.
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Out: &out}); err == nil || !strings.HasPrefix(err.Error(), "nothing applied: ") || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("applied through a moved root: %v", err)
+	}
+	if strings.Contains(out.String(), "Conflicts") {
+		t.Fatalf("conflicts read through a moved root: %s", out.String())
+	}
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Branch: "agent", Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("--branch went to a moved root: %v", err)
+	}
+	if gs, _ := listGenerations(s); len(gs) != 0 {
+		t.Fatalf("a refused apply started %d undo journals", len(gs))
+	}
+	g, err := beginGeneration(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.apply(c); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("the generation applied through a moved root: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(elsewhere, "new.txt")); err != nil || string(data) != "theirs\n" {
+		t.Fatalf("the change landed where the link leads: %q %v", data, err)
+	}
+}
+
+// A rollback after the root moved restores nothing there.
+func TestRollbackRefusesMovedRoot(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "new.txt", Path: filepath.Join(ws, "new.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := moveRoot(t, ws)
+	theirs := filepath.Join(elsewhere, "new.txt")
+	if err := os.WriteFile(theirs, []byte("theirs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("rolled back through a moved root: %v", err)
+	}
+	if data, err := os.ReadFile(theirs); err != nil || string(data) != "theirs\n" {
+		t.Fatalf("the rollback removed what the link leads to: %q %v", data, err)
+	}
+}
+
+// A workspace named through a link from the start (/home leading to
+// /var/home, say) applies as usual.
+func TestApplyThroughLinkedRootFromTheStart(t *testing.T) {
+	real := t.TempDir()
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(real, ws); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "new.txt", Path: filepath.Join(ws, "new.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(real, "new.txt")); err != nil || string(data) != "agent\n" {
+		t.Fatalf("not applied: %q %v", data, err)
+	}
+}
+
+// A new directory made where the workspace was, after it was moved away,
+// is not the session's workspace either.
+func TestApplyRefusesReplacedRoot(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "new.txt", Path: filepath.Join(ws, "new.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	if err := os.Rename(ws, ws+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "another directory") {
+		t.Fatalf("applied into a directory made in the workspace's place: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "new.txt")); err == nil {
+		t.Fatal("the change landed in the new directory")
+	}
+}
+
+// An apply that fails after the root moved rolls back nothing through it:
+// the rollback checks every entry first.
+func TestFailedApplyRollbackRefusesMovedRoot(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "new.txt", Path: filepath.Join(ws, "new.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	g, err := beginGeneration(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.apply(c); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := moveRoot(t, ws)
+	theirs := filepath.Join(elsewhere, "new.txt")
+	if err := os.WriteFile(theirs, []byte("theirs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if left, err := g.rollback(&out); err == nil || left != 1 || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("rolled back through a moved root: %d left, %v", left, err)
+	}
+	if data, err := os.ReadFile(theirs); err != nil || string(data) != "theirs\n" {
+		t.Fatalf("the rollback removed what the link leads to: %q %v", data, err)
+	}
+}
+
+// The root of a change is found by its layer, so a $HOME given with a
+// trailing slash is checked like any other.
+func TestApplyRefusesMovedHomeSpelledWithSlash(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: home + "/", OverHome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.HomeID.Real == "" {
+		t.Fatal("Create recorded no root for $HOME")
+	}
+	s.Status = session.StatusStopped
+	upper := filepath.Join(t.TempDir(), ".profile")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "home", Rel: ".profile", Path: filepath.Join(home, ".profile"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	elsewhere := moveRoot(t, home)
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("applied below a moved $HOME: %v", err)
+	}
+	g, err := beginGeneration(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.apply(c); err == nil || !strings.Contains(err.Error(), "leads to") {
+		t.Fatalf("the generation applied below a moved $HOME: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(elsewhere, ".profile")); err == nil {
+		t.Fatal("the change landed where the link leads")
+	}
+}
+
+// A change whose path is not its layer's root joined with its Rel is
+// refused once roots are recorded, and so is a layer the session has no
+// root for.
+func TestHeldNeedsTheLayersRoot(t *testing.T) {
+	ws := t.TempDir()
+	id, err := session.DirIDOf(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := roots{"ws": root{ws, id}}
+	if err := r.held("ws", filepath.Join(ws, "a/b"), "a/b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.held("ws", filepath.Join(t.TempDir(), "a/b"), "a/b"); err == nil {
+		t.Fatal("a path outside the layer's root passed")
+	}
+	for _, rel := range []string{"../x", ".", ""} {
+		if err := r.held("ws", filepath.Join(ws, rel), rel); err == nil {
+			t.Fatalf("a Rel of %q passed", rel)
+		}
+	}
+	if err := r.held("etc", "/etc/x", "x"); err == nil {
+		t.Fatal("a layer with no root passed")
+	}
+	if err := r.held("home", "/home/u/x", "x"); err != nil {
+		t.Fatalf("an unrecorded $HOME is not checked, as in sessions from before: %v", err)
+	}
+}
+
+// replacesRoot moves ws away and makes a new directory in its place, with
+// files of its own, the first time it is written a line naming a path
+// left as is: while the rollback runs.
+type replacesRoot struct {
+	t    *testing.T
+	ws   string
+	done bool
+	bytes.Buffer
+}
+
+func (r *replacesRoot) Write(p []byte) (int, error) {
+	if !r.done && bytes.Contains(p, []byte("left as is")) {
+		r.done = true
+		if err := os.Rename(r.ws, r.ws+".old"); err != nil {
+			r.t.Error(err)
+		}
+		if err := os.Mkdir(r.ws, 0o755); err != nil {
+			r.t.Error(err)
+		}
+		for _, n := range []string{"a.txt", "b.txt"} {
+			if err := os.WriteFile(filepath.Join(r.ws, n), []byte("theirs\n"), 0o644); err != nil {
+				r.t.Error(err)
+			}
+		}
+	}
+	return r.Buffer.Write(p)
+}
+
+// A root replaced while the rollback runs takes nothing from the next
+// entry on: it stops there, and what it did not reach stays in the
+// journal for the rollback once the directory is back.
+func TestRollbackRechecksRootBetweenEntries(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := t.TempDir()
+	var cs []review.Change
+	for _, n := range []string{"a.txt", "b.txt", "c.txt"} {
+		if err := os.WriteFile(filepath.Join(upper, n), []byte("agent\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs = append(cs, review.Change{Layer: "ws", Rel: n, Path: filepath.Join(ws, n), Upper: filepath.Join(upper, n), Kind: review.Added, Mode: 0o644})
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, cs, box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusApplied // as when nothing else stays in the session
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// c.txt, rolled back first, is edited since: the rollback leaves it
+	// and says so, and the root is replaced then.
+	if err := os.WriteFile(filepath.Join(ws, "c.txt"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := &replacesRoot{t: t, ws: ws}
+	if err := Rollback(s, nil, w); err == nil || !strings.Contains(err.Error(), "rollback stopped") {
+		t.Fatalf("the rollback went on in a replaced root: %v\n%s", err, w.String())
+	}
+	for _, n := range []string{"a.txt", "b.txt"} {
+		if got := read(t, filepath.Join(ws, n)); got != "theirs\n" {
+			t.Errorf("%s in the replacement: %q", n, got)
+		}
+		if got := read(t, filepath.Join(ws+".old", n)); got != "agent\n" {
+			t.Errorf("%s in the moved workspace: %q", n, got)
+		}
+	}
+	// Back in place, the rollback takes what it did not reach. Until it
+	// has, apply runs no change and no intent on the half rolled-back
+	// tree.
+	if err := os.RemoveAll(ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(ws+".old", ws); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []Options{{Yes: true, Out: &out}, {Yes: true, Out: &out, Branch: "agent"}} {
+		if err := Apply(s, nil, box, o); err == nil || !strings.Contains(err.Error(), "stopped part way") {
+			t.Fatalf("apply ran after a stopped rollback (branch %q): %v", o.Branch, err)
+		}
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("the rollback once the root is back: %v\n%s", err, out.String())
+	}
+	for _, n := range []string{"a.txt", "b.txt"} {
+		if _, err := os.Lstat(filepath.Join(ws, n)); !os.IsNotExist(err) {
+			t.Errorf("%s is not rolled back: %v", n, err)
+		}
+	}
+	if got := read(t, filepath.Join(ws, "c.txt")); got != "edited\n" {
+		t.Errorf("the edit after the apply: %q", got)
+	}
+	// Finished, it is the rollback the first would have been, not the
+	// retry of a partial one: the session takes its changes again.
+	saved, err := session.Load(s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status == session.StatusApplied || saved.Baseline.IsZero() || strings.Contains(out.String(), "left by the last rollback") {
+		t.Errorf("a stopped rollback, finished, is a partial one: status %s, baseline %v\n%s", saved.Status, saved.Baseline, out.String())
+	}
+}
+
+// Stopped between removing the agent's version and restoring the user's,
+// a rollback keeps the user's version, which discard then guards, and
+// the next one restores it: the path is not taken for a host change.
+func TestRollbackStoppedBeforeRestoreRestoresLater(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "m.txt"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "m.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "m.txt", Path: filepath.Join(ws, "m.txt"), Upper: upper, Kind: review.Modified, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	afterRemove = func(string) {
+		afterRemove = nil
+		if err := os.Rename(ws, ws+".old"); err != nil {
+			t.Error(err)
+		}
+		if err := os.Mkdir(ws, 0o755); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "rollback stopped") {
+		t.Fatalf("the rollback went on in a replaced root: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "m.txt")); !os.IsNotExist(err) {
+		t.Fatalf("restored into the replacement: %v", err)
+	}
+	if held, err := HeldVersions(s); err != nil || len(held) != 1 {
+		t.Fatalf("discard does not guard the kept version: %v %v", held, err)
+	}
+	if err := os.RemoveAll(ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(ws+".old", ws); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("the rollback once the root is back: %v\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
+		t.Errorf("the user's version is not restored: %q\n%s", got, out.String())
+	}
+	if strings.Contains(out.String(), "changed after the apply") {
+		t.Errorf("taken for a host change:\n%s", out.String())
+	}
+}
+
+// An undo journal that cannot be read, or is gone, refuses apply:
+// whether the last apply or a rollback of it finished is not known. What
+// a crash leaves before a journal is first written is passed by.
+func TestApplyRefusesUnreadableJournal(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "a.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "a.txt", Path: filepath.Join(ws, "a.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusApplied
+	gs, err := listGenerations(s)
+	if err != nil || len(gs) != 1 {
+		t.Fatalf("generations: %v %v", gs, err)
+	}
+	journal := filepath.Join(gs[0].dir, "journal.json")
+	good, err := os.ReadFile(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(journal, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []Options{{Yes: true, Out: &out}, {Yes: true, Out: &out, Branch: "agent"}} {
+		if err := Apply(s, nil, box, o); err == nil || !strings.Contains(err.Error(), "undo journal") {
+			t.Fatalf("apply ran with an unreadable journal (branch %q): %v", o.Branch, err)
+		}
+	}
+	// A journal lost is no journal: this apply added a file, so saved/
+	// is empty, and still the apply happened.
+	if err := os.Remove(journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "undo journal") {
+		t.Fatalf("apply ran with the journal of an added-only apply lost: %v", err)
+	}
+	if err := os.WriteFile(journal, good, 0o600); err != nil { //nolint:gosec // the session's own journal, under the test's AIRBAG_HOME
+		t.Fatal(err)
+	}
+	// What a crash leaves before a journal's first write is the .new
+	// directory, which apply, rollback and discard pass by.
+	if err := os.MkdirAll(filepath.Join(generationsDir(s), "2.new", "saved"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatalf("a crash's unfinished generation refuses apply: %v", err)
+	}
+	if _, err := HeldVersions(s); err != nil {
+		t.Fatalf("a crash's unfinished generation refuses discard: %v", err)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("a crash's unfinished generation hides the apply before it from rollback: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "a.txt")); !os.IsNotExist(err) {
+		t.Fatalf("the apply is not rolled back: %v", err)
+	}
+}
+
+// modifiedApplied applies the agent's m.txt over the user's in a new
+// session and returns it, with the outbox it used.
+func modifiedApplied(t *testing.T) (*session.Session, *outbox.Box, string) {
+	t.Helper()
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "m.txt"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "m.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "m.txt", Path: filepath.Join(ws, "m.txt"), Upper: upper, Kind: review.Modified, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = box.Close() })
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	return s, box, ws
+}
+
+// The journal says stopped from before the first write, so a rollback
+// that ends any other way, a crash between two steps say, leaves the
+// saved versions guarded and apply refused.
+func TestRollbackMarksItsJournalFirst(t *testing.T) {
+	s, _, ws := modifiedApplied(t)
+	var midway *generation
+	var held []Held
+	afterRemove = func(string) {
+		afterRemove = nil
+		var err error
+		if midway, err = lastGeneration(s); err != nil {
+			t.Error(err)
+		}
+		if held, err = HeldVersions(s); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if midway == nil || !midway.Stopped || len(held) != 1 {
+		t.Fatalf("mid-rollback the journal is not marked stopped (%+v) or the saved version not guarded (%v)", midway, held)
+	}
+	if read(t, filepath.Join(ws, "m.txt")) != "mine\n" {
+		t.Fatal("not rolled back")
+	}
+	if g, err := lastGeneration(s); err != nil || g != nil {
+		t.Fatalf("a finished rollback left its journal: %+v %v", g, err)
+	}
+}
+
+// A restore that fails stops the rollback like a root check: the journal
+// keeps the entry as a step that did not finish, apply refuses, and the
+// next rollback restores the user's version.
+func TestRollbackFailedRestoreRestoresLater(t *testing.T) {
+	s, box, ws := modifiedApplied(t)
+	g, err := lastGeneration(s)
+	if err != nil || g == nil || len(g.Entries) != 1 {
+		t.Fatalf("journal: %+v %v", g, err)
+	}
+	saved := g.Entries[0].Saved
+	afterRemove = func(string) {
+		afterRemove = nil
+		if err := os.Rename(saved, saved+".away"); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "rollback stopped") {
+		t.Fatalf("a failed restore did not stop the rollback: %v", err)
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "stopped part way") {
+		t.Fatalf("apply ran after a failed restore: %v", err)
+	}
+	if err := os.Rename(saved+".away", saved); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" || strings.Contains(out.String(), "changed after the apply") {
+		t.Fatalf("the user's version is not restored: %q\n%s", got, out.String())
+	}
+}
+
+// An apply that did not finish refuses apply onto a branch too: the
+// pending intents would run on a half-applied tree.
+func TestBranchApplyRefusesAnUnfinishedApply(t *testing.T) {
+	s, box, _ := modifiedApplied(t)
+	g, err := lastGeneration(s)
+	if err != nil || g == nil {
+		t.Fatal(err)
+	}
+	g.Complete = false
+	if err := g.save(); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out, Branch: "agent"}); err == nil || !strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("apply --branch ran after an unfinished apply: %v", err)
+	}
+}
+
+// A rollback cut short between removing the agent's version and putting
+// the user's back (a crash, Ctrl-C) leaves the entry a step that did
+// not finish, so the next rollback restores the user's version rather
+// than leave the path as one changed after the apply.
+func TestRollbackCutShortBeforeRestoreRestoresLater(t *testing.T) {
+	s, box, ws := modifiedApplied(t)
+	afterRemove = func(string) {
+		afterRemove = nil
+		panic("cut short") // nothing after the removal runs, as in a crash
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	var out bytes.Buffer
+	func() {
+		defer func() { _ = recover() }()
+		_ = Rollback(s, nil, &out)
+		t.Fatal("the rollback was not cut short")
+	}()
+	if _, err := os.Lstat(filepath.Join(ws, "m.txt")); !os.IsNotExist(err) {
+		t.Fatalf("not cut short between the removal and the restore: %v", err)
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "stopped part way") {
+		t.Fatalf("apply ran after a rollback cut short: %v", err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" || strings.Contains(out.String(), "changed after the apply") {
+		t.Fatalf("the user's version is not restored: %q\n%s", got, out.String())
+	}
+	if g, err := lastGeneration(s); err != nil || g != nil {
+		t.Fatalf("the finished rollback left its journal: %+v %v", g, err)
+	}
+}
+
+// A finished rollback's directory is renamed out of the numbered ones
+// before it is removed: a removal cut short, with the journal gone and
+// the rest not, leaves no numbered directory without a journal, which
+// would refuse every later apply. The rollback is done all the same:
+// failed, it would leave the session applied, and a second rollback
+// would undo the apply before. The next apply clears what is left.
+func TestRollbackRemovalCutShortLeavesNoLostJournal(t *testing.T) {
+	s, box, ws := modifiedApplied(t)
+	removeTree = func(dir string) error {
+		removeTree = os.RemoveAll
+		if err := os.Remove(filepath.Join(dir, "journal.json")); err != nil {
+			t.Error(err)
+		}
+		return errors.New("cut short")
+	}
+	t.Cleanup(func() { removeTree = os.RemoveAll })
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err != nil || !strings.Contains(out.String(), "warning") {
+		t.Fatalf("a finished rollback whose removal is cut short: %v\n%s", err, out.String())
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied {
+		t.Fatalf("the session is left applied: %+v %v", saved, err)
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
+		t.Fatalf("not rolled back: %q", got)
+	}
+	if g, err := lastGeneration(s); err != nil || g != nil {
+		t.Fatalf("a removal cut short reads as a lost journal: %+v %v", g, err)
+	}
+	if held, err := HeldVersions(s); err != nil || len(held) != 0 {
+		t.Fatalf("discard is refused after a removal cut short: %v %v", held, err)
+	}
+	upper := filepath.Join(t.TempDir(), "n.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "n.txt", Path: filepath.Join(ws, "n.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatalf("apply after a removal cut short: %v", err)
+	}
+	es, err := os.ReadDir(generationsDir(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range es {
+		if strings.HasSuffix(e.Name(), ".gone") {
+			t.Errorf("the next apply left %s", e.Name())
+		}
+	}
+	// One left with this generation's number, the next apply could not
+	// clear it either, does not stop its rollback.
+	if err := os.MkdirAll(filepath.Join(generationsDir(s), "1.gone", "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("a leftover with the same number stops the rollback: %v\n%s", err, out.String())
+	}
+}
+
+// The rollback of an apply that did not finish needs no mark: apply
+// refuses such a generation and discard keeps it as it is. Without one
+// it needs no space to write first, as when the step failed for want
+// of space.
+func TestUnfinishedApplyRollsBackWithoutAJournalWrite(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	upper := filepath.Join(t.TempDir(), "n.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := beginGeneration(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "n.txt", Path: filepath.Join(ws, "n.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	if err := g.apply(c); err != nil {
+		t.Fatal(err)
+	}
+	// No journal can be written from here on.
+	if err := os.Mkdir(filepath.Join(g.dir, "journal.json.tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if _, err := g.rollback(&out); err != nil {
+		t.Fatalf("the rollback of an unfinished apply needs a journal write: %v", err)
+	}
+	if _, err := os.Lstat(c.Path); !os.IsNotExist(err) {
+		t.Fatalf("the added file is still there: %v", err)
+	}
+}
+
+// replaceDir puts a new directory where dir was.
+func replaceDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Rename(dir, dir+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A $HOME that is not branched has no changes to apply, so apply and
+// rollback leave it as it is, whatever it is now: recorded for a run's
+// agent state (macOS), it does not hold up the workspace.
+func TestApplyPassesAnUnbranchedHomeThatMoved(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	if s.HomeID.Real == "" || s.OverHome {
+		t.Fatalf("not an unbranched, recorded $HOME: %+v", s.Meta)
+	}
+	replaceDir(t, s.Home)
+	upper := filepath.Join(t.TempDir(), "n.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "n.txt", Path: filepath.Join(ws, "n.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatalf("an unbranched $HOME that moved holds up apply: %v", err)
+	}
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("an unbranched $HOME that moved holds up rollback: %v", err)
+	}
+	if _, err := os.Lstat(c.Path); !os.IsNotExist(err) {
+		t.Fatalf("not rolled back: %v", err)
+	}
+}
+
+// The directories an apply made are removed once the root they are in
+// is checked, not every root: a branched $HOME that moved does not stop
+// the rollback of what the apply put in the workspace.
+func TestRollbackDirectoriesWaitOnlyOnTheirRoot(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	s.OverHome = true
+	upper := filepath.Join(t.TempDir(), "n.txt")
+	if err := os.WriteFile(upper, []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := review.Change{Layer: "ws", Rel: "d/n.txt", Path: filepath.Join(ws, "d", "n.txt"), Upper: upper, Kind: review.Added, Mode: 0o644}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, []review.Change{c}, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	replaceDir(t, s.Home)
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("a $HOME that moved stops the rollback of the workspace: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "d")); !os.IsNotExist(err) {
+		t.Fatalf("the directory the apply made is left: %v", err)
+	}
+}
+
+// Only the numbers beginGeneration gives name a generation.
+func TestListGenerationsTakesOnlyItsOwnNames(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	for _, name := range []string{"2", "03", "+4", "-1", "0", "5.new", "6.1791234567.gone"} {
+		if err := os.MkdirAll(filepath.Join(generationsDir(s), name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gs, err := listGenerations(s)
+	if err != nil || len(gs) != 1 || gs[0].n != 2 {
+		t.Fatalf("generations: %+v %v", gs, err)
+	}
+}
+
+// A rollback cut short after it put a replaced directory back leaves a
+// journal of what is still to do, not of everything the apply did:
+// otherwise the next rollback would take the user's files there that
+// are the same as the agent's for the agent's, and remove them.
+func TestRollbackCutShortAfterARestoreKeepsTheUsersFiles(t *testing.T) {
+	s, box, src := overlayReplacedDir(t,
+		map[string]string{"a.go": "package a\n", "b.go": "package b\n"},
+		map[string]string{"a.go": "package a\n", "new.go": "package new\n"})
+	// A change rolled back after the directory: it sorts before it.
+	if err := os.WriteFile(filepath.Join(s.WSUpper(), "a.txt"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	first := filepath.Join(filepath.Dir(src), "a.txt")
+	afterRemove = func(p string) {
+		if p == first {
+			afterRemove = nil
+			panic("cut short") // as a crash: nothing after this runs
+		}
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	func() {
+		defer func() { _ = recover() }()
+		_ = Rollback(s, nil, &out)
+		t.Fatal("the rollback was not cut short")
+	}()
+	if got := read(t, filepath.Join(src, "b.go")); got != "package b\n" {
+		t.Fatalf("not cut short after the directory was put back: %q", got)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	for rel, want := range map[string]string{"a.go": "package a\n", "b.go": "package b\n"} {
+		if got := read(t, filepath.Join(src, rel)); got != want {
+			t.Errorf("src/%s = %q after the second rollback, want the user's %q\n%s", rel, got, want, out.String())
+		}
+	}
+}
+
+// The session says rolled back before the journal goes: killed while
+// the journal is removed, it is not left applied with no journal to
+// show the rollback, which would let apply run the outbox on the
+// rolled-back tree.
+func TestRollbackSavesTheSessionBeforeItsJournalGoes(t *testing.T) {
+	s, _, ws := modifiedApplied(t)
+	s.Status = session.StatusApplied // all of it applied: the outbox runs next
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	removeTree = func(string) error {
+		removeTree = os.RemoveAll
+		panic("killed") // as a crash: nothing after this runs
+	}
+	t.Cleanup(func() { removeTree = os.RemoveAll })
+	var out bytes.Buffer
+	func() {
+		defer func() { _ = recover() }()
+		_ = Rollback(s, nil, &out)
+		t.Fatal("the removal was not reached")
+	}()
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
+		t.Fatalf("not rolled back: %q", got)
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied {
+		t.Fatalf("killed while its journal went, the session is left applied: %+v %v", saved, err)
+	}
+}
+
+// A rollback that leaves paths as they are keeps its journal marked
+// stopped until the session is saved: killed in between, apply refuses
+// rather than run the outbox on the half rolled-back tree as applied,
+// and the next rollback sets the session right.
+func TestRollbackLeavingPathsStaysStoppedUntilTheSessionIsSaved(t *testing.T) {
+	s, box, ws := modifiedApplied(t)
+	if err := os.WriteFile(filepath.Join(ws, "m.txt"), []byte("edited after the apply\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusApplied
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// What Rollback does before it saves the session; killed here.
+	g, err := lastGeneration(s)
+	if err != nil || g == nil {
+		t.Fatal(err)
+	}
+	g.roots = rootsOf(s)
+	var out bytes.Buffer
+	if left, err := g.rollback(&out); err != nil || left != 1 {
+		t.Fatalf("left %d: %v\n%s", left, err, out.String())
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "stopped part way") {
+		t.Fatalf("apply ran as applied on a rollback the session does not know of: %v", err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied || saved.Baseline.IsZero() {
+		t.Fatalf("the next rollback left the session applied, or its baseline as it was: %+v %v", saved, err)
+	}
+	if g, err := lastGeneration(s); err != nil || g == nil || g.Stopped || !g.Partial {
+		t.Fatalf("the journal is not settled: %+v %v", g, err)
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "edited after the apply\n" {
+		t.Fatalf("the user's edit is not left as it is: %q", got)
+	}
+}
+
+// A rollback that finished saves its journal with nothing left before
+// the session is saved: killed in between, the rollback run again
+// replays nothing, and a file the user made again since, the same as
+// the agent's added one, stays.
+func TestFinishedRollbackReplaysNothing(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "m.txt"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := rootSession(t, ws)
+	up := t.TempDir()
+	for _, n := range []string{"a.txt", "m.txt"} {
+		if err := os.WriteFile(filepath.Join(up, n), []byte("agent\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// a.txt goes after m.txt's restore, the journal's last save.
+	cs := []review.Change{
+		{Layer: "ws", Rel: "a.txt", Path: filepath.Join(ws, "a.txt"), Upper: filepath.Join(up, "a.txt"), Kind: review.Added, Mode: 0o644},
+		{Layer: "ws", Rel: "m.txt", Path: filepath.Join(ws, "m.txt"), Upper: filepath.Join(up, "m.txt"), Kind: review.Modified, Mode: 0o644},
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, cs, box, Options{Yes: true, Force: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusApplied
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// What Rollback does before it saves the session; killed here.
+	g, err := lastGeneration(s)
+	if err != nil || g == nil {
+		t.Fatal(err)
+	}
+	g.roots = rootsOf(s)
+	if left, err := g.rollback(&out); err != nil || left != 0 {
+		t.Fatalf("left %d: %v\n%s", left, err, out.String())
+	}
+	// The user makes a.txt again, the same as the agent's.
+	if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "a.txt")); got != "agent\n" {
+		t.Fatalf("the rollback run again removed the user's a.txt: %q\n%s", got, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
+		t.Fatalf("m.txt = %q", got)
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied {
+		t.Fatalf("the session is left applied: %+v %v", saved, err)
+	}
+	if g, err := lastGeneration(s); err != nil || g != nil {
+		t.Fatalf("the finished journal is left: %+v %v", g, err)
+	}
+}
+
+// A rollback whose last journal save fails is not done: it stops with
+// the session as it was, so apply still refuses, and the rollback run
+// once the journal can be written finishes it.
+func TestFinishedRollbackNeedsItsLastSave(t *testing.T) {
+	s, box, ws := modifiedApplied(t)
+	s.Status = session.StatusApplied
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	g, err := lastGeneration(s)
+	if err != nil || g == nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(g.dir, "journal.json.tmp")
+	afterRemove = func(string) {
+		afterRemove = nil
+		// From here on no journal can be written.
+		if err := os.Mkdir(blocker, 0o700); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterRemove = nil })
+	var out bytes.Buffer
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "cannot say so yet") {
+		t.Fatalf("a rollback whose journal cannot say it is done went on: %v\n%s", err, out.String())
+	}
+	if got := read(t, filepath.Join(ws, "m.txt")); got != "mine\n" {
+		t.Fatalf("not rolled back: %q", got)
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status != session.StatusApplied {
+		t.Fatalf("the session moved on without the journal: %+v %v", saved, err)
+	}
+	if err := Apply(s, nil, box, Options{Yes: true, Out: &out}); err == nil || !strings.Contains(err.Error(), "stopped part way") {
+		t.Fatalf("apply ran: %v", err)
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status == session.StatusApplied {
+		t.Fatalf("the session is left applied: %+v %v", saved, err)
+	}
+	if g, err := lastGeneration(s); err != nil || g != nil {
+		t.Fatalf("the finished journal is left: %+v %v", g, err)
 	}
 }

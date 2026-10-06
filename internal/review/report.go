@@ -6,12 +6,15 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/getjump/airbag/internal/effects"
+	"github.com/getjump/airbag/internal/links"
+	"github.com/getjump/airbag/internal/secretfs"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/internal/steps"
 	"github.com/getjump/airbag/operation"
@@ -197,6 +200,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			Why: fmt.Sprintf("%d refusals not logged: more than %d a second", dropped[kind], effects.RefuseRate)})
 	}
 	secrets := knownSecrets(s.Workspace)
+	out := linksOut(s, cs)
 	for _, in := range intents {
 		r.Outbox = append(r.Outbox, ReportIntent{ID: in.ID, Kind: in.Kind, Argv: in.Argv, Status: in.Status, Files: in.Files, Request: in.Request, RequestDigest: in.RequestDigest, Result: in.TypedResult()})
 		if (in.Status == outbox.Pending || in.Status == string(operation.Approved)) && intentHasSecret(in, secrets) {
@@ -204,7 +208,11 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 		}
 		switch in.Status {
 		case outbox.Pending, string(operation.Approved):
-			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "`" + outbox.Line(in.Argv) + "` waits for apply"})
+			why := "`" + outbox.Line(in.Argv) + "` waits for apply"
+			if in.Kind == outbox.KindCmd && out > 0 {
+				why += fmt.Sprintf("; %d links this session adds lead out of the workspace, other than to an installed program, or to a secret file, and apply holds it while one does (`airbag apply --trust-links` runs it anyway)", out)
+			}
+			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: why})
 		case outbox.Unknown:
 			r.Attention = append(r.Attention, ReportItem{What: "intent", Target: in.ID, Why: "outcome unknown: " + in.Output +
 				"; once checked, `airbag outbox resolve " + in.ID + " done|failed " + s.ID + "` lets the intents after it run"})
@@ -212,6 +220,88 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	}
 	sort.SliceStable(r.Attention, func(i, j int) bool { return attentionRank(r.Attention[i].What) < attentionRank(r.Attention[j].What) })
 	return r
+}
+
+// linksOut counts the links this session put in the real files, or
+// adds with cs, whose target is outside the workspace or a secret file
+// (notes.md -> .env), as apply decides: a link to an installed program
+// (links.Installed) does not count. Apply holds the session's deferred
+// commands while such a link is in the real files; a link review cannot
+// read counts. A link an earlier, partial apply wrote is no change any
+// more, but still holds them, until a change the session makes to it is
+// applied as well.
+func linksOut(s *session.Session, cs []Change) int {
+	// Inside is decided as apply does, by file: on macOS a target can
+	// name the workspace in another case or through a firmlink. A
+	// workspace review cannot read has nothing inside it.
+	ws, wsErr := os.Stat(s.Workspace)
+	// One component at a time from the link's real directory, as apply
+	// will follow it, through the links already in the real files:
+	// publish -> cache/pkg with cache -> ~/.config, or cache/../secret,
+	// where the .. applies after cache is followed.
+	leads := func(path, text string, err error) bool {
+		if err != nil {
+			return true
+		}
+		dir := "/"
+		if !filepath.IsAbs(text) {
+			dir = resolved(filepath.Dir(path))
+		}
+		// As apply's linksOut decides: nowhere, a secret file, or outside
+		// the workspace other than an installed program.
+		t, ok := links.Follow(dir, text)
+		switch {
+		case !ok, secretfs.IsSecret(strings.ToLower(filepath.Base(t))):
+			return true
+		case wsErr == nil && links.Inside(t, ws):
+			return false
+		}
+		return !links.Installed(t)
+	}
+	n := 0
+	// A path counts once: the change, or else the link in the real files,
+	// which holds the commands until a change to it is applied too.
+	// A link apply leaves out by default (one in a folded cache) reaches
+	// the real files only when --only names it.
+	counted := make(map[string]bool, len(cs))
+	leftOut := LeftOut(cs)
+	for _, c := range cs {
+		if c.Type != fs.ModeSymlink || c.Kind == Deleted || leftOut(c) {
+			continue
+		}
+		text, err := os.Readlink(c.Upper)
+		if leads(c.Path, text, err) {
+			counted[c.Path] = true
+			n++
+		}
+	}
+	for p := range s.Applied {
+		if counted[p] {
+			continue
+		}
+		if fi, err := os.Lstat(p); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+			continue
+		}
+		text, err := os.Readlink(p)
+		if leads(p, text, err) {
+			n++
+		}
+	}
+	return n
+}
+
+// resolved is p with the links in its longest existing part followed.
+func resolved(p string) string {
+	rest := ""
+	for d := p; ; d = filepath.Dir(d) {
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			return filepath.Join(r, rest)
+		}
+		if filepath.Dir(d) == d {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(d), rest)
+	}
 }
 
 func attentionRank(what string) int {

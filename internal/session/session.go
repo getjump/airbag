@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -37,14 +38,19 @@ type Meta struct {
 	Ended            time.Time `json:"ended,omitzero"`
 	Workspace        string    `json:"workspace"`
 	Home             string    `json:"home"`
-	OverHome         bool      `json:"over_home"`
-	UID              int       `json:"uid"`
-	GID              int       `json:"gid"`
-	Argv             []string  `json:"argv"`
-	Cwd              string    `json:"cwd"`
-	Status           string    `json:"status"`
-	ExitCode         int       `json:"exit_code"`
-	Allow            []string  `json:"allow"`
+	// WorkspaceID and HomeID: the directories Workspace and Home were
+	// when the session began. Apply writes nothing below one that is
+	// another directory now.
+	WorkspaceID DirID    `json:"workspace_id,omitzero"`
+	HomeID      DirID    `json:"home_id,omitzero"`
+	OverHome    bool     `json:"over_home"`
+	UID         int      `json:"uid"`
+	GID         int      `json:"gid"`
+	Argv        []string `json:"argv"`
+	Cwd         string   `json:"cwd"`
+	Status      string   `json:"status"`
+	ExitCode    int      `json:"exit_code"`
+	Allow       []string `json:"allow"`
 	// Paths under $HOME that bypass the branch (agent state, logs).
 	Passthrough []string `json:"passthrough"`
 	// BranchHoles: paths under a Passthrough directory that stay in the
@@ -103,6 +109,120 @@ type Meta struct {
 	Applied map[string]time.Time `json:"applied,omitempty"`
 }
 
+// DirID is a directory as a session found it: its path with links
+// resolved, its device and inode, its creation time and inode
+// generation where the filesystem records them, and the filesystem's ID
+// from statfs where it gives one (0 for each where it does not). Path
+// and inode tell it from a link or another directory at the same path;
+// the creation time and the generation tell it from a new directory
+// given a removed one's inode, which ext4 does at once. The device may
+// change only when the creation time and the filesystem ID both say it
+// is the same directory: the same filesystem mounted again (a WSL disk,
+// a btrfs subvolume, an overlay) gets a new device number but keeps its
+// ID, while another filesystem mounted at the path, whose root can share
+// the inode, or a btrfs snapshot, which keeps the inode and the creation
+// time, has another ID. A recorded ID must match whatever the device: a
+// device formatted again keeps its number. Where a filesystem records
+// neither a creation time nor a generation (NFS, FUSE), a directory
+// removed and made again with the same inode number is not told apart.
+// On an overlay the root is copied up before it is recorded (settle),
+// so its creation time is the top layer's, which it keeps.
+type DirID struct {
+	Real string `json:"real"`
+	Dev  uint64 `json:"dev"`
+	Ino  uint64 `json:"ino"`
+	Born int64  `json:"born,omitempty"`
+	Gen  uint64 `json:"gen,omitempty"`
+	FS   uint64 `json:"fs,omitempty"`
+}
+
+// RecordDirID is DirIDOf for a root a session begins with: a directory
+// on an overlay is copied up first (settle). A root that cannot be (a
+// read-only overlay, or one the user may not write), or that settle
+// cannot tell is on an overlay or not, is refused: the first write below would
+// change its creation time, an overlay records no generation, and
+// without either a directory made again in its place, with the same
+// inode number, would pass for it.
+func RecordDirID(p string) (DirID, error) {
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return DirID{}, err
+	}
+	if err := settle(real); err != nil {
+		return DirID{}, fmt.Errorf("%s: %w", p, err)
+	}
+	return DirIDOf(p)
+}
+
+// DirIDOf is the directory p names now.
+func DirIDOf(p string) (DirID, error) {
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return DirID{}, err
+	}
+	fi, err := os.Stat(real)
+	if err != nil {
+		return DirID{}, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return DirID{}, fmt.Errorf("%s: no device and inode", p)
+	}
+	return DirID{Real: real, Dev: u64(st.Dev), Ino: u64(st.Ino), Born: born(real, st), Gen: gen(real), FS: fsID(real)}, nil
+}
+
+// Check refuses p when it is not the directory id was taken of: it
+// leads elsewhere now, or another directory was made at its path.
+func (id DirID) Check(p string) error {
+	got, err := DirIDOf(p)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%s, a root of the session: %w", p, err)
+	case got.Real != id.Real:
+		return fmt.Errorf("%s leads to %s now, not to %s as when the session began", p, got.Real, id.Real)
+	case got.Ino != id.Ino || id.Born != 0 && got.Born != id.Born || id.Gen != 0 && got.Gen != id.Gen:
+		return fmt.Errorf("%s is another directory than when the session began: that one was moved or removed, or the filesystem gives new inode numbers on each mount (FAT, sshfs without use_ino)", p)
+	case id.FS != 0 && got.FS != id.FS,
+		got.Dev != id.Dev && (id.Born == 0 || id.FS == 0):
+		return fmt.Errorf("%s is on another filesystem than when the session began: another one, or a snapshot of this one, is mounted there, "+
+			"or this one was mounted again and records nothing that tells it is the same (macOS, NFS, FUSE; "+
+			"xfs when its device is renumbered); "+
+			"in that last case airbag cannot tell, so take what you need from airbag diff, then discard the session", p)
+	}
+	return nil
+}
+
+// CheckRoots checks the session's workspace and $HOME against what it
+// recorded when it began; a session from before roots were recorded
+// has none to check.
+func (s *Session) CheckRoots() error {
+	for _, r := range []struct {
+		path string
+		id   DirID
+	}{{s.Workspace, s.WorkspaceID}, {s.Home, s.HomeID}} {
+		if r.id.Real == "" {
+			continue
+		}
+		if err := r.id.Check(r.path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// HomeUnrecorded reports a $HOME the session records nothing for: one
+// not branched, and not there (or not readable) when it began, or on
+// Linux, where nothing writes in it. Nothing tells what is there now
+// from what was, so run makes and opens nothing there. A session from
+// before roots were recorded has no workspace recorded either, and
+// keeps what it did then.
+func (s *Session) HomeUnrecorded() bool {
+	return s.Home != "" && s.HomeID.Real == "" && s.WorkspaceID.Real != ""
+}
+
+// u64 widens a stat field, whose type differs between Linux and macOS.
+func u64[T int32 | uint32 | int64 | uint64](v T) uint64 { return uint64(v) }
+
 type Credential struct {
 	Name        string   `json:"name"`
 	Hosts       []string `json:"hosts"`
@@ -139,6 +259,34 @@ func Create(m Meta) (*Session, error) {
 		if p != "" && within(root, p) {
 			return nil, fmt.Errorf("session root %s is inside %s; set AIRBAG_HOME elsewhere", root, p)
 		}
+	}
+	// Where the workspace and $HOME lead now; apply, run and resume
+	// refuse them once they are other directories. The workspace, and a
+	// $HOME that is branched, must be recorded, or the session is
+	// refused. A $HOME that is not branched is written only on macOS
+	// (Clone), for agent state: it is recorded where it can be, and one
+	// that is not (not there, HOME=/nonexistent, say) gets nothing made or
+	// written there (HomeUnrecorded). On Linux nothing writes in it, so
+	// nothing is recorded or checked.
+	for _, r := range []struct {
+		path string
+		id   *DirID
+	}{{m.Workspace, &m.WorkspaceID}, {m.Home, &m.HomeID}} {
+		if r.path == "" || r.id.Real != "" {
+			continue
+		}
+		unbranched := r.id == &m.HomeID && !m.OverHome
+		if unbranched && !m.Clone {
+			continue
+		}
+		id, err := RecordDirID(r.path)
+		if err != nil && unbranched {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		*r.id = id
 	}
 	m.ID = newID()
 	m.Created = time.Now()
@@ -325,6 +473,11 @@ func ResumeChecked(id, workspace string, validate func(*Session) error) (*Sessio
 		return nil, fmt.Errorf("session %s is running", s.ID)
 	case s.Status != StatusStopped:
 		return nil, fmt.Errorf("session %s is %s; only a stopped session can be resumed", s.ID, s.Status)
+	}
+	// A run on a moved root would branch another tree, and its
+	// passthrough paths would write where the root leads now.
+	if err := s.CheckRoots(); err != nil {
+		return nil, fmt.Errorf("%w; put the directory back to resume session %s", err, s.ID)
 	}
 	if validate != nil {
 		if err := validate(s); err != nil {

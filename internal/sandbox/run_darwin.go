@@ -45,6 +45,12 @@ func Init(string, bool) {
 }
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
+	// The roots are checked again right before the clone and the
+	// profile: since the session was created or resumed, either could
+	// have become another directory.
+	if err := s.CheckRoots(); err != nil {
+		return 1, fmt.Errorf("%w; session %s was not started", err, s.ID)
+	}
 	if _, err := os.Stat("/usr/bin/sandbox-exec"); err != nil {
 		return 1, errors.New("sandbox-exec not found: airbag needs macOS's Seatbelt")
 	}
