@@ -47,6 +47,9 @@ type Allowlist []string
 // checked by AllowsPort.
 func (a Allowlist) Allows(host string) bool {
 	host = creds.CanonHost(host)
+	if !creds.IsName(host) {
+		return false
+	}
 	for _, p := range a {
 		if h, _, err := net.SplitHostPort(p); err == nil {
 			p = h
@@ -248,6 +251,10 @@ func canonHost(h string) (string, string) {
 		return "", ""
 	case !isASCII(h):
 		return "", "host names must be ASCII; write an international name in its xn-- form"
+	case strings.ContainsAny(h, "[]"):
+		// Brackets go only around an IPv6 literal, which the URL or
+		// SplitHostPort has taken off by now.
+		return "", "brackets in a host name"
 	case strings.Contains(h, ":"):
 		a, err := netip.ParseAddr(h)
 		if err != nil {
