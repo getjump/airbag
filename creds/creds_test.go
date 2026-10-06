@@ -143,6 +143,34 @@ func TestForCanonical(t *testing.T) {
 	}
 }
 
+// A credential goes to no host written with stray brackets, or with a
+// name in brackets, with a port or without; one on an IP literal still
+// goes to it in brackets.
+func TestForBrackets(t *testing.T) {
+	s := Set{&Live{Name: "g", Hosts: []string{"*.example.com", "::1"}, Value: "realvalue-1234567890", Placeholder: "fakevalue-0987654321"}}
+	for hp, want := range map[string]bool{
+		"a.example.com": true, "a.example.com:443": true,
+		"a.example.com[": false, "a.example.com]": false, "[a.example.com]": false, "[a.example.com]:443": false,
+		".EXAmple.Com[": false, "[::1]": true, "[::1]:443": true, "[0:0::1]": true, "[]": false,
+	} {
+		if got := s.For(hp) != nil; got != want {
+			t.Errorf("For(%q) = %v, want %v", hp, got, want)
+		}
+	}
+	for in, want := range map[string][2]string{
+		"[::1]":               {"::1", "443"},
+		"[::1]:8443":          {"::1", "8443"},
+		"[a.example.com]":     {"[a.example.com]", "443"},
+		"[a.example.com]:443": {"[a.example.com]", "443"},
+		"a.example.com[":      {"a.example.com[", "443"},
+		"git.corp:8443":       {"git.corp", "8443"},
+	} {
+		if h, p := SplitHost(in); h != want[0] || p != want[1] {
+			t.Errorf("SplitHost(%q) = %q, %q; want %q, %q", in, h, p, want[0], want[1])
+		}
+	}
+}
+
 // Brackets go only as the pair around an IP literal: stray ones stay
 // part of the name, so no wildcard entry covers it.
 func TestCanonHostBrackets(t *testing.T) {

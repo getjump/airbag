@@ -14,7 +14,7 @@ import (
 // covers a.example.com, never example.com or notexample.com. An exact
 // entry matches only that host. Case and a trailing dot do not matter.
 func FuzzAllowlist(f *testing.F) {
-	for _, h := range []string{"example.com", "a.example.com", "notexample.com", "A.Example.com.", "x.a.example.com", ".example.com", "api.github.com", ".EXAmple.Com[", "[a.example.com]", "[api.github.com]"} {
+	for _, h := range []string{"example.com", "a.example.com", "notexample.com", "A.Example.com.", "x.a.example.com", ".example.com", "api.github.com", ".EXAmple.Com[", "[a.example.com]", "[api.github.com]", "].eXAmple.Com"} {
 		f.Add(h)
 	}
 	f.Fuzz(func(t *testing.T, host string) {
@@ -23,7 +23,9 @@ func FuzzAllowlist(f *testing.F) {
 			return // a host is one token; Fields-level garbage is not a host
 		}
 		gotW := Allowlist{"*.example.com"}.Allows(host)
-		wantW := strings.HasSuffix(norm, ".example.com")
+		// A bracket goes only around an IP literal: in a name it names
+		// no host.
+		wantW := strings.HasSuffix(norm, ".example.com") && !strings.ContainsAny(host, "[]")
 		if gotW != wantW {
 			t.Fatalf("wildcard Allows(%q) = %v, want %v", host, gotW, wantW)
 		}
