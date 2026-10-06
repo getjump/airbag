@@ -55,6 +55,9 @@ func (c Change) IsDir() bool { return c.Type == fs.ModeDir }
 // the directory writes all of the agent's version.
 func Scan(s *session.Session) ([]Change, error) {
 	if s.Clone {
+		if err := s.RuntimeBranchError(); err != nil {
+			return nil, err
+		}
 		out, err := ScanTree("ws", s.Workspace, s.CloneDir())
 		if err != nil {
 			return nil, err
@@ -117,9 +120,12 @@ func Scan(s *session.Session) ([]Change, error) {
 					c.Kind = Modified
 				}
 			default:
+				// A FIFO, socket or device keeps its type: no reader opens
+				// it as a file.
+				c.Type = info.Mode().Type()
 				c.Kind = Added
 				if lerr == nil {
-					if lst.Mode().IsRegular() && lst.Mode().Perm() == c.Mode && sameContent(c.Path, p) {
+					if info.Mode().IsRegular() && lst.Mode().IsRegular() && lst.Mode().Perm() == c.Mode && sameContent(c.Path, p) {
 						return nil // touched, not changed
 					}
 					c.Kind = Modified
@@ -352,8 +358,10 @@ func knownSecrets(ws string) []string {
 }
 
 func containsSecret(path string, secrets []string) bool {
-	st, err := os.Stat(path)
-	if err != nil || st.Size() > 5<<20 {
+	// A FIFO in the branch would hold the read: only a regular file is
+	// read, and it is not a link to follow.
+	st, err := os.Lstat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > 5<<20 {
 		return false
 	}
 	b, err := os.ReadFile(path)

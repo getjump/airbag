@@ -1,0 +1,44 @@
+[
+  {
+    "backend": "gvisor",
+    "status": "passed",
+    "run_seconds": 9.40082029500013,
+    "checks": {
+      "credential_used_and_response_masked": true,
+      "direct_egress_denied": true,
+      "external_policy_denied_allowed_host": true,
+      "host_canary_hidden": true,
+      "host_token_hidden": true,
+      "offline_go_build": true,
+      "original_write_denied": true,
+      "placeholder_present": true,
+      "user_namespace_denied": true
+    },
+    "cold_build_seconds": 8.077503,
+    "host_source_unchanged_before_apply": true,
+    "resume_passed": true,
+    "explicit_apply_passed": true,
+    "host_observed_credential_requests": 2
+  },
+  {
+    "backend": "microvm",
+    "status": "passed",
+    "run_seconds": 10.140735520999897,
+    "checks": {
+      "credential_used_and_response_masked": true,
+      "direct_egress_denied": true,
+      "external_policy_denied_allowed_host": true,
+      "host_canary_hidden": true,
+      "host_token_hidden": true,
+      "offline_go_build": true,
+      "original_write_denied": true,
+      "placeholder_present": true,
+      "user_namespace_denied": true
+    },
+    "cold_build_seconds": 5.885258,
+    "host_source_unchanged_before_apply": true,
+    "resume_passed": true,
+    "explicit_apply_passed": true,
+    "host_observed_credential_requests": 2
+  }
+]

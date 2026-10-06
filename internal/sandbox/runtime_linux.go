@@ -3,143 +3,662 @@
 package sandbox
 
 import (
+	"bytes"
+	"context"
+	"debug/elf"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
-	"github.com/getjump/airbag/internal/effects"
-	"github.com/getjump/airbag/internal/policy"
-	"github.com/getjump/airbag/internal/runtimepolicy"
+	"github.com/getjump/airbag/internal/agents"
+	"github.com/getjump/airbag/internal/control"
+	"github.com/getjump/airbag/internal/netcap"
 	"github.com/getjump/airbag/internal/session"
+	"golang.org/x/sys/unix"
 )
 
-// runtimeFD is the private runtime channel in the sandbox's PID 1. Fd 3
-// is the tty control channel, or /dev/null without a tty (run.go).
-const runtimeFD = 4
+const guestConfigPath = "/run/airbag/config.json"
 
-// runtimeOn reports whether the session uses one of the opt-in runtime
-// options. Without them there is no runtime channel and no fd 4, as
-// before these options existed.
-func runtimeOn(s *session.Session) bool {
-	return s.FilePolicy || s.ExecPolicy || s.RuntimeProfile
+type guestConfig struct {
+	Backend              string   `json:"backend"`
+	Strict               bool     `json:"strict,omitempty"`
+	GeneratedRecoveryDir bool     `json:"generated_recovery_dir,omitempty"`
+	Argv                 []string `json:"argv"`
+	Env                  []string `json:"env"`
+	Cwd                  string   `json:"cwd"`
+	Workspace            string   `json:"workspace"`
+	UID                  int      `json:"uid"`
+	GID                  int      `json:"gid"`
 }
 
-func socketPair() (*os.File, *os.File, error) {
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		return nil, nil, err
+func optionalHostReady(backend, workspace string) error {
+	if _, err := unix.IoctlGetTermios(int(os.Stdin.Fd()), unix.TCGETS); err == nil {
+		return fmt.Errorf("%s currently supports noninteractive stdin only; use native for a terminal", backend)
 	}
-	return os.NewFile(uintptr(fds[0]), "supervisor"), os.NewFile(uintptr(fds[1]), "sandbox"), nil
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	image, err := elf.Open(self)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = image.Close() }()
+	for _, program := range image.Progs {
+		if program.Type == elf.PT_INTERP {
+			return fmt.Errorf("optional runtimes require a static Airbag binary; build with CGO_ENABLED=0")
+		}
+	}
+	if _, err := rootfsCopier(workspace); err != nil {
+		return err
+	}
+	if backend == "microvm" {
+		if _, err := hostTool("mkfs.ext4", workspace); err != nil {
+			return fmt.Errorf("microvm requires mkfs.ext4: %w", err)
+		}
+	}
+	if !filepath.IsAbs(session.Root()) {
+		return fmt.Errorf("optional runtime requires an absolute AIRBAG_HOME")
+	}
+	if len(session.Root()+"/s-abcdef/run/proxy.sock") >= 108 {
+		return fmt.Errorf("optional runtime session root is too long for Unix sockets; choose a shorter AIRBAG_HOME")
+	}
+	return nil
 }
 
-func runtimeClient(profile *runtimepolicy.Profile) (*runtimepolicy.Client, error) {
-	unix.CloseOnExec(runtimeFD)
-	f := os.NewFile(runtimeFD, "runtime-policy")
-	c, err := net.FileConn(f)
-	_ = f.Close() // FileConn holds its own dup
-	if err != nil {
-		return nil, err
+// exportBranch makes the archive the branch is copied from; a variable,
+// for the tests.
+var exportBranch = exportWorkspace
+
+func prepareRuntimeWorkspace(ctx context.Context, s *session.Session) error {
+	if _, err := os.Lstat(s.CloneDir()); err == nil {
+		// A resumed session keeps its branch, if it is one: a copy that
+		// did not finish, or an older airbag's, is not resumed.
+		return s.RuntimeBranchError()
 	}
-	return runtimepolicy.NewClientWithProfile(c, profile), nil
+	// A branch copied again (resume after it was lost) is not complete
+	// until this copy is.
+	if s.RuntimeCopied {
+		s.RuntimeCopied = false
+		if err := s.Save(); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(s.CloneDir(), 0o700); err != nil {
+		return err
+	}
+	// A pipe avoids a second full intermediate archive. Import confines paths;
+	// source symlinks are preserved, never followed into host HOME.
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	export := exportBranch
+	go func() {
+		_, err := export(s.Workspace, writer, false)
+		_ = writer.CloseWithError(err)
+		done <- err
+	}()
+	// Interrupted, the copy stops where it is.
+	copied := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = reader.CloseWithError(context.Cause(ctx))
+		case <-copied:
+		}
+	}()
+	_, err := importWorkspace(s.CloneDir(), reader)
+	close(copied)
+	_ = reader.CloseWithError(err)
+	// Only a copy that went through waits for the exporter, which has
+	// closed its end by then. One that failed or was interrupted does not:
+	// the exporter's read of the workspace (FUSE, NFS) can block, its
+	// writes fail from here, and the pipe has carried its own error.
+	if err == nil && staged(ctx) == nil {
+		err = <-done
+	}
+	if err != nil || staged(ctx) != nil {
+		_ = os.RemoveAll(s.CloneDir())
+		return stagedOr(ctx, err)
+	}
+	s.RuntimeCopied = true
+	return s.Save()
 }
 
-// runtimeHost serves the runtime channel: PID 1's file and exec checks
-// go through the gate and into the effect log before they are allowed.
-type runtimeHost struct {
-	conn        net.Conn
-	child       *os.File // the sandbox's end, fd 4 in PID 1
-	placeholder *os.File // fd 3 when there is no tty
-	audit       *effects.BufferedAudit
-	opts        runtimepolicy.Options
-	done        chan error
-	finished    bool
-	err         error
+// providerEnv is all the environment runsc, Firecracker and the tools that
+// stage their images get: none of airbag's own, credentials included.
+func providerEnv() []string {
+	path := os.Getenv("PATH")
+	if path == "" {
+		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	}
+	return []string{"PATH=" + path}
 }
 
-func startRuntime(s *session.Session, gate *policy.Gate, log *effects.Log) (*runtimeHost, error) {
-	host, child, err := socketPair()
+func runOptional(ctx context.Context, s *session.Session, ctl *control.Server) (int, error) {
+	if err := staged(ctx); err != nil {
+		return 1, err
+	}
+	dir := filepath.Join(s.Dir, "runtime")
+	// Nothing agent-writable is used as provider configuration or executable.
+	if err := os.RemoveAll(dir); err != nil {
+		return 1, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return 1, err
+	}
+	// The microVM's images keep a copy of the branch: none of it outlives
+	// the run. runGVisor deletes its container first. The agent's
+	// environment, --pass-env values included, is not staged here at all
+	// (OfferGuestEnv), since a run cut short leaves this directory.
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "airbag: warning: the runtime directory is left: %v\n", err)
+		}
+	}()
+	root := filepath.Join(dir, "rootfs")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return 1, err
+	}
+	cp, err := rootfsCopier(s.Workspace)
 	if err != nil {
-		return nil, err
+		return 1, err
 	}
-	conn, err := net.FileConn(host)
-	_ = host.Close() // FileConn holds its own dup
+	cmd := exec.CommandContext(ctx, cp, "-a", "--reflink=auto", "--", s.Runtime.RootFS+"/.", root) //nolint:gosec // rootfsCopier's cp; operator-supplied trusted rootfs, separate from workspace
+	cmd.Args[0] = "cp"                                                                             // a multi-call coreutils picks the program by name
+	cmd.Env = providerEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return 1, stagedOr(ctx, fmt.Errorf("stage rootfs: %w: %s", err, out))
+	}
+	r, err := os.OpenRoot(root)
 	if err != nil {
-		_ = child.Close()
-		return nil, err
+		return 1, err
 	}
-	placeholder, err := os.Open(os.DevNull)
+	defer func() { _ = r.Close() }()
+	for _, path := range []string{"run/airbag/bin", "run/airbag/sockets", "dev", "proc", "sys", "tmp", "home/agent", s.CloneDir()[1:]} {
+		if err := r.MkdirAll(path, 0o755); err != nil {
+			return 1, err
+		}
+	}
+	for _, path := range []string{agents.ClaudeManagedSettingsDir[1:], filepath.Dir(agents.CodexRequirementsPath)[1:]} {
+		if err := r.MkdirAll(path, 0o755); err != nil {
+			return 1, err
+		}
+	}
+	if err := r.WriteFile(agents.ClaudeManagedSettingsDir[1:]+"/90-airbag.json", agents.ClaudeManagedSettings(), 0o444); err != nil {
+		return 1, err
+	}
+	if _, err := r.Stat(agents.CodexRequirementsPath[1:]); os.IsNotExist(err) {
+		if err := r.WriteFile(agents.CodexRequirementsPath[1:], agents.CodexRequirements(), 0o444); err != nil {
+			return 1, err
+		}
+	}
+	self, err := os.Executable()
 	if err != nil {
-		_ = conn.Close()
-		_ = child.Close()
-		return nil, err
+		return 1, err
 	}
-	rt := &runtimeHost{conn: conn, child: child, placeholder: placeholder, done: make(chan error, 1)}
-	if s.RuntimeAudit == "buffered" {
-		rt.audit = effects.NewBufferedAudit(log, effects.BufferOptions{})
-		rt.opts.Audit = rt.audit
+	binary, err := os.ReadFile(self)
+	if err != nil {
+		return 1, err
 	}
-	if s.RuntimeProfile {
-		rt.opts.Profile = &runtimepolicy.Profile{}
+	if err := r.WriteFile("run/airbag/bin/airbag", binary, 0o755); err != nil {
+		return 1, err
 	}
-	go func() { rt.done <- runtimepolicy.ServeWithOptions(conn, gate, log, rt.opts) }()
-	return rt, nil
+	for _, name := range shimNames(s) {
+		_ = r.Remove("run/airbag/bin/" + name)
+		if err := r.Symlink("airbag", "run/airbag/bin/"+name); err != nil {
+			return 1, err
+		}
+	}
+	bundle := ""
+	for _, cert := range []struct{ src, dst string }{{s.CACert(), "ca.pem"}, {s.CABundle(), "ca-bundle.pem"}} {
+		if b, err := os.ReadFile(cert.src); err == nil {
+			if err := r.WriteFile("run/airbag/"+cert.dst, b, 0o644); err != nil {
+				return 1, err
+			}
+			if cert.dst == "ca-bundle.pem" {
+				bundle = "/run/airbag/" + cert.dst
+			}
+		}
+	}
+	extra := credEnv(s, "/run/airbag/ca.pem", bundle)
+	for k, v := range map[string]string{"HOME": "/home/agent", "PATH": "/run/airbag/bin:/usr/local/bin:/usr/bin:/bin", "TMPDIR": "/tmp", "AIRBAG_HOME": "", "AIRBAG_WORKSPACE": s.CloneDir(), "AIRBAG_CONTROL": "/run/airbag/ctl.sock", "AIRBAG_SHIM_DIR": "/run/airbag/bin"} {
+		extra[k] = v
+	}
+	uid, gid := s.UID, s.GID
+	if s.Backend == "microvm" && uid == 0 {
+		uid, gid = 1000, 1000
+	}
+	cwd := s.CloneDir()
+	if rel, ok := cwdIn(s.Workspace, s.Cwd); ok {
+		cwd = filepath.Join(cwd, rel)
+	}
+	cfg := guestConfig{Backend: s.Backend, Strict: s.Strict, Argv: s.Argv, Env: agentEnvFor(s, ProxyAddr, "/run/airbag/bin", "/tmp", extra), Cwd: cwd, Workspace: s.CloneDir(), UID: uid, GID: gid}
+	if s.Backend == "microvm" {
+		_, err := os.Lstat(filepath.Join(s.CloneDir(), "lost+found"))
+		cfg.GeneratedRecoveryDir = os.IsNotExist(err)
+	}
+	ctl.OfferGuestEnv(cfg.Env)
+	cfg.Env = nil
+	if err := writeJSONFile(r, "run/airbag/config.json", cfg); err != nil {
+		return 1, err
+	}
+	if err := r.Chmod("run/airbag/config.json", 0o444); err != nil {
+		return 1, err
+	}
+	if s.Backend == "microvm" {
+		if err := r.Symlink("sockets/ctl.sock", "run/airbag/ctl.sock"); err != nil {
+			return 1, err
+		}
+	}
+	if err := staged(ctx); err != nil {
+		return 1, err
+	}
+	if s.Backend == "gvisor" {
+		return runGVisor(ctx, s, dir, root)
+	}
+	return runMicroVM(ctx, s, dir, root)
 }
 
-// finish stops the producer before it drains the buffered audit, so a
-// failed flush shows in the result. It runs once; later calls return
-// the first result.
-func (rt *runtimeHost) finish(s *session.Session) error {
-	if rt.finished {
-		return rt.err
+func writeJSONFile(root *os.Root, path string, value any) error {
+	b, err := json.Marshal(value)
+	if err != nil {
+		return err
 	}
-	rt.finished = true
-	_ = rt.child.Close()
-	_ = rt.placeholder.Close()
-	var errs []error
+	return root.WriteFile(path, b, 0o600)
+}
+
+func runGVisor(ctx context.Context, s *session.Session, dir, root string) (code int, err error) {
+	mounts := []map[string]any{
+		{"destination": "/proc", "type": "proc", "source": "proc"},
+		{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
+		{"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "nodev", "mode=1777"}},
+		{"destination": "/home/agent", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "nodev", "mode=1777"}},
+		{"destination": s.CloneDir(), "type": "bind", "source": s.CloneDir(), "options": []string{"bind", "rw", "nosuid", "nodev"}},
+	}
+	for src, dst := range map[string]string{s.ProxySock(): "/run/airbag/proxy.sock", s.ControlSock(): "/run/airbag/ctl.sock"} {
+		mounts = append(mounts, map[string]any{"destination": dst, "type": "bind", "source": src, "options": []string{"bind", "ro", "nosuid", "nodev"}})
+	}
+	// Rootless runsc maps the host owner of the exported files to namespace UID
+	// zero. Use that virtual identity with no capabilities; it has no host-root
+	// identity and cannot gain one through no_new_privs or user namespaces.
+	caps := map[string][]string{"bounding": {}, "effective": {}, "inheritable": {}, "permitted": {}, "ambient": {}}
+	config := map[string]any{
+		"ociVersion": "1.0.2", "root": map[string]any{"path": root, "readonly": true},
+		"process": map[string]any{"terminal": false, "user": map[string]int{"uid": 0, "gid": 0}, "args": []string{"/run/airbag/bin/airbag", GuestArg}, "env": []string{"PATH=/run/airbag/bin:/usr/bin:/bin"}, "cwd": "/", "noNewPrivileges": true, "capabilities": caps},
+		"mounts":  mounts,
+		"linux": map[string]any{"namespaces": []map[string]string{{"type": "pid"}, {"type": "ipc"}, {"type": "uts"}, {"type": "mount"}, {"type": "network"}},
+			"devices": []map[string]any{
+				{"path": "/dev/null", "type": "c", "major": 1, "minor": 3, "fileMode": 438, "uid": 0, "gid": 0},
+				{"path": "/dev/zero", "type": "c", "major": 1, "minor": 5, "fileMode": 438, "uid": 0, "gid": 0},
+				{"path": "/dev/random", "type": "c", "major": 1, "minor": 8, "fileMode": 438, "uid": 0, "gid": 0},
+				{"path": "/dev/urandom", "type": "c", "major": 1, "minor": 9, "fileMode": 438, "uid": 0, "gid": 0},
+			},
+			// runsc loads this only with --oci-seccomp (below), and its
+			// errno is always EPERM. clone3 is refused in the guest instead
+			// (guestFilter), with the ENOSYS glibc needs to fall back to clone.
+			"seccomp": map[string]any{"defaultAction": "SCMP_ACT_ALLOW", "syscalls": []map[string]any{
+				{"names": []string{"unshare", "setns"}, "action": "SCMP_ACT_ERRNO", "errnoRet": 1},
+				{"names": []string{"clone"}, "action": "SCMP_ACT_ERRNO", "errnoRet": 1, "args": []map[string]any{{"index": 0, "value": syscall.CLONE_NEWUSER, "valueTwo": syscall.CLONE_NEWUSER, "op": "SCMP_CMP_MASKED_EQ"}}},
+			}},
+		},
+	}
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		return 1, err
+	}
+	err = writeJSONFile(r, "config.json", config)
+	_ = r.Close()
+	if err != nil {
+		return 1, err
+	}
+	common := []string{"--root=" + filepath.Join(dir, "state"), "--rootless=" + strconv.FormatBool(os.Getuid() != 0)}
+	// A sandbox that was not removed, or its state, is a failed run: what
+	// it left can stand in the way of resume and discard.
+	defer func() {
+		if e := runscDelete(s.Runtime.Binary, append(common, "delete", "--force", s.ID), 30*time.Second); e != nil {
+			err = errors.Join(err, e)
+		}
+		// Run as root, runsc leaves --network=none's namespace mounted in
+		// its state directory, which resume and discard then cannot remove.
+		_ = unix.Unmount(filepath.Join(dir, "state", "null-netns"), unix.MNT_DETACH|unix.UMOUNT_NOFOLLOW)
+	}()
+	args := append(append([]string{}, common...), "--platform=systrap", "--oci-seccomp", "--network=none", "--host-uds=open", "--file-access=shared", "--overlay2=none", "run", "--bundle="+dir, s.ID)
+	return executeProvider(ctx, s.Runtime.Binary, args)
+}
+
+// notifyProvider registers the provider's signals; a variable, for the
+// tests.
+var notifyProvider = signal.Notify
+
+// runscDelete removes the run's sandbox, and gives up after limit: the
+// run's signals stay caught until it has returned, so a delete that hung
+// would hold airbag up until a SIGKILL. --force takes a sandbox that is
+// gone already as removed.
+func runscDelete(binary string, args []string, limit time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, args...) //nolint:gosec // trusted runsc, fixed runtime operation
+	cmd.Env = providerEnv()
+	cmd.WaitDelay = time.Second // a process it left holding the output
+	out := &head{n: 4096}       // what it says, however much it writes
+	cmd.Stdout, cmd.Stderr = out, out
+	err := cmd.Run()
+	switch {
+	case ctx.Err() != nil:
+		return fmt.Errorf("runsc delete did not end within %s; its sandbox may be left", limit)
+	case err != nil:
+		return fmt.Errorf("runsc delete: %w: %s", err, bytes.TrimSpace(out.b))
+	}
+	return nil
+}
+
+// head keeps the first n bytes written to it and drops the rest.
+type head struct {
+	b []byte
+	n int
+}
+
+func (h *head) Write(p []byte) (int, error) {
+	if room := h.n - len(h.b); room > 0 {
+		h.b = append(h.b, p[:min(len(p), room)]...)
+	}
+	return len(p), nil
+}
+
+func executeProvider(ctx context.Context, binary string, args []string) (int, error) {
+	cmd := exec.CommandContext(context.Background(), binary, args...) //nolint:gosec // explicitly selected trusted runtime, not a guest-supplied executable
+	cmd.Env = providerEnv()
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	// As the native runner does: a signal not taken here ends airbag
+	// itself (SIGQUIT, Ctrl-\, would), Pdeathsig kills the provider, and
+	// the session stays marked running with no stop or cleanup.
+	sigs := make(chan os.Signal, 8)
+	notifyProvider(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
+	defer keepCaught(ctx, sigs)
+	// The provider takes the signals over from the staging, with no gap
+	// between: its own are registered first, so none is lost. One that
+	// came before the check below starts nothing; one between the check
+	// and the start reaches the provider as soon as it has started, as one
+	// just after would.
+	endStaging(ctx)
+	if err := pending(ctx, sigs); err != nil {
+		return 1, err
+	}
+	if err := cmd.Start(); err != nil {
+		return 1, err
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case sig := <-sigs:
+				_ = cmd.Process.Signal(sig)
+			}
+		}
+	}()
+	err := cmd.Wait()
+	if code, ok := exitStatus(err); ok {
+		return code, nil
+	}
+	return 0, err
+}
+
+// exitStatus is how a command that ran ended, as native reports it: its
+// exit code, or 128 plus the signal that ended it. ok is false for an
+// error other than the command's own end.
+func exitStatus(err error) (code int, ok bool) {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return 0, false
+	}
+	if ws, isWait := exit.Sys().(syscall.WaitStatus); isWait && ws.Signaled() {
+		return 128 + int(ws.Signal()), true
+	}
+	return exit.ExitCode(), true
+}
+
+// rootfsCopier is the cp that stages a runtime's root filesystem: a
+// program of this machine (hostTool), and GNU's, which knows -a and
+// --reflink. NixOS has no /bin/cp, and BusyBox's refuses --reflink, so
+// this is found on PATH and checked before a session exists.
+func rootfsCopier(workspace string) (string, error) {
+	cp, err := hostTool("cp", workspace)
+	if err != nil {
+		return "", fmt.Errorf("optional runtimes stage their root filesystem with cp: %w", err)
+	}
+	cmd := exec.CommandContext(context.Background(), cp, "--version") //nolint:gosec // hostTool's cp
+	cmd.Args[0] = "cp"
+	cmd.Env = providerEnv()
+	out, err := cmd.Output()
+	if err != nil || !bytes.Contains(out, []byte("GNU coreutils")) {
+		return "", fmt.Errorf("optional runtimes stage their root filesystem with GNU cp (coreutils); %s is another", cp)
+	}
+	return cp, nil
+}
+
+func ext4Image(ctx context.Context, mkfs, source, path string, size int64) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	err = f.Truncate(size)
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	// hostTool resolved the link, and mke2fs picks the filesystem by the
+	// name it is run as: called by its own, it makes ext2. Name ext4
+	// both ways.
+	cmd := exec.CommandContext(ctx, mkfs, "-q", "-F", "-t", "ext4", "-d", source, path) //nolint:gosec // hostTool's mkfs.ext4, on host-owned session data; no untrusted image parsing
+	cmd.Args[0] = "mkfs.ext4"
+	cmd.Env = providerEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("make guest image: %w: %s", err, out)
+	}
+	return nil
+}
+
+func runMicroVM(ctx context.Context, s *session.Session, dir, root string) (int, error) {
+	// An export a killed run left behind holds disk the images need.
+	if err := os.RemoveAll(exportStage(s)); err != nil {
+		return 1, err
+	}
+	rootImage, workImage := filepath.Join(dir, "root.ext4"), filepath.Join(dir, "work.ext4")
+	mkfs, err := hostTool("mkfs.ext4", s.Workspace)
+	if err != nil {
+		return 1, fmt.Errorf("microvm requires mkfs.ext4: %w", err)
+	}
+	if err := ext4Image(ctx, mkfs, root, rootImage, 2<<30); err != nil {
+		return 1, err
+	}
+	if err := ext4Image(ctx, mkfs, s.CloneDir(), workImage, 10<<30); err != nil {
+		return 1, err
+	}
+	sock := filepath.Join(s.Dir, "v.sock")
+	// Firecracker does not unlink its listening socket on clean shutdown. The
+	// previous provider has exited before a stopped session can be resumed.
+	if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
+		return 1, err
+	}
+	defer func() { _ = os.Remove(sock) }()
+	var listeners []net.Listener
+	defer func() {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+	}()
+	for port, r := range map[int]struct {
+		target string
+		limits relayLimits
+	}{4000: {s.ProxySock(), proxyRelay}, 4001: {s.ControlSock(), controlRelay}} {
+		path := sock + "_" + strconv.Itoa(port)
+		_ = os.Remove(path)
+		l, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", path)
+		if err != nil {
+			return 1, err
+		}
+		listeners = append(listeners, l)
+		go serveRelay(l, r.limits, func() (net.Conn, error) {
+			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(context.Background(), "unix", r.target)
+		})
+	}
+	// The result stream is not attestation (runtime_export.go). One
+	// connection is taken; the branch changes only for a complete export.
+	exportPath := sock + "_4002"
+	_ = os.Remove(exportPath)
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", exportPath)
+	if err != nil {
+		return 1, err
+	}
+	l = netcap.Limit(l, 1)
+	listeners = append(listeners, l)
+	im := startImport(l, exportStage(s))
+	config := map[string]any{
+		"boot-source":    map[string]any{"kernel_image_path": s.Runtime.Kernel, "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/run/airbag/bin/airbag " + GuestArg},
+		"drives":         []map[string]any{{"drive_id": "rootfs", "path_on_host": rootImage, "is_root_device": true, "is_read_only": true}, {"drive_id": "work", "path_on_host": workImage, "is_root_device": false, "is_read_only": false}},
+		"machine-config": map[string]int{"vcpu_count": 1, "mem_size_mib": 2048},
+		"vsock":          map[string]any{"guest_cid": 3, "uds_path": sock},
+	}
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		return 1, err
+	}
+	err = writeJSONFile(r, "firecracker.json", config)
+	_ = r.Close()
+	if err != nil {
+		return 1, err
+	}
+	code, err := executeProvider(ctx, s.Runtime.Binary, []string{"--no-api", "--config-file", filepath.Join(dir, "firecracker.json")})
+	if err != nil || code != 0 {
+		return vmmFailed(im, code, err)
+	}
 	select {
-	case err := <-rt.done:
+	case result := <-im.result:
+		return publishExport(s, result)
+	case <-time.After(10 * time.Second):
+		im.abandon()
+		return publishExport(s, exportResult{code: 1, err: errors.New("the guest ended without a workspace export")})
+	}
+}
+
+func exportStage(s *session.Session) string { return filepath.Join(s.Dir, "ws", "export") }
+
+// cwdIn is cwd relative to workspace, both taken as the directories they
+// name: git gives the workspace resolved, while Getwd can keep a link the
+// shell went through (/link/repo/sub for /real/repo/sub). A cwd that
+// leads out of the workspace, through a link in it too, is not in it.
+func cwdIn(workspace, cwd string) (string, bool) {
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return p
+	}
+	ws, dir := resolve(workspace), resolve(cwd)
+	if !pathWithin(dir, ws) {
+		return "", false
+	}
+	rel, err := filepath.Rel(ws, dir)
+	return rel, err == nil
+}
+
+// vmmFailed ends a run whose Firecracker failed: the agent's own status
+// comes in the guest's result, so a VMM that exits nonzero, its config
+// or kernel refused or the VMM itself crashed, is a provider failure,
+// never an agent that ran and ended. Any export it left is abandoned.
+func vmmFailed(im *importer, code int, err error) (int, error) {
+	im.abandon()
+	if err == nil {
+		err = fmt.Errorf("firecracker exited with status %d before the guest's result; the branch is kept as it was", code)
+	}
+	return code, err
+}
+
+// importer takes the guest's one export connection into stage.
+type importer struct {
+	l      net.Listener
+	stage  string
+	conns  chan net.Conn
+	result chan exportResult
+}
+
+func startImport(l net.Listener, stage string) *importer {
+	im := &importer{l: l, stage: stage, conns: make(chan net.Conn, 1), result: make(chan exportResult, 1)}
+	go func() {
+		conn, err := l.Accept()
 		if err != nil {
-			errs = append(errs, fmt.Errorf("runtime controller: %w", err))
+			im.result <- exportResult{code: 1, err: err}
+			return
 		}
-	case <-time.After(30 * time.Second):
-		_ = rt.conn.Close()
-		errs = append(errs, errors.New("runtime controller shutdown timeout"))
-		<-rt.done
+		im.conns <- conn
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
+		_ = os.RemoveAll(stage)
+		if err := os.MkdirAll(stage, 0o700); err != nil {
+			im.result <- exportResult{code: 1, err: err}
+			return
+		}
+		im.result <- receiveExport(conn, stage)
+	}()
+	return im
+}
+
+// abandon ends an export that will not complete, the provider having
+// failed or the guest gone quiet: it stops the importer, waits until it
+// lets go of the stage, and removes what it wrote, which may be up to
+// the export limit.
+func (im *importer) abandon() {
+	_ = im.l.Close()
+	select {
+	case conn := <-im.conns:
+		_ = conn.Close()
+		<-im.result
+	case <-im.result:
 	}
-	if rt.audit != nil {
-		if err := rt.audit.Close(); err != nil {
-			errs = append(errs, err)
-		}
+	_ = os.RemoveAll(im.stage)
+}
+
+// publishExport makes a complete export the session's branch. Anything
+// else keeps the branch as it was and fails the run.
+func publishExport(s *session.Session, r exportResult) (int, error) {
+	if r.err != nil {
+		_ = os.RemoveAll(exportStage(s))
+		return 1, fmt.Errorf("guest export: %w; the branch is kept as it was", r.err)
 	}
-	if rt.opts.Profile != nil {
-		mode := s.RuntimeAudit
-		if mode == "" {
-			mode = "durable"
+	if r.skippedCount > 0 {
+		names := make([]string, len(r.skipped))
+		for i, n := range r.skipped {
+			names[i] = strconv.Quote(n) // named by the guest
 		}
-		profile := struct {
-			Run       int                           `json:"run"`
-			AuditMode string                        `json:"audit_mode"`
-			Runtime   runtimepolicy.ProfileSnapshot `json:"runtime"`
-			Buffered  *effects.BufferStats          `json:"buffered,omitempty"`
-		}{Run: s.Runs, AuditMode: mode, Runtime: rt.opts.Profile.Snapshot()}
-		if rt.audit != nil {
-			stats := rt.audit.Stats()
-			profile.Buffered = &stats
-		}
-		data, err := json.MarshalIndent(profile, "", "  ")
-		if err == nil {
-			err = os.WriteFile(filepath.Join(s.Dir, fmt.Sprintf("runtime-profile-%d.json", s.Runs)), append(data, '\n'), 0o600)
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("write runtime profile: %w", err))
-		}
+		fmt.Fprintf(os.Stderr, "airbag: warning: %d sockets, FIFOs or devices were left out of the branch: %s\n",
+			r.skippedCount, strings.Join(names, ", "))
 	}
-	rt.err = errors.Join(errs...)
-	return rt.err
+	backup := filepath.Join(s.Dir, "ws", "previous")
+	_ = os.RemoveAll(backup)
+	if err := os.Rename(s.CloneDir(), backup); err != nil {
+		return 1, err
+	}
+	if err := os.Rename(exportStage(s), s.CloneDir()); err != nil {
+		_ = os.Rename(backup, s.CloneDir())
+		return 1, err
+	}
+	_ = os.RemoveAll(backup)
+	return r.code, nil
 }

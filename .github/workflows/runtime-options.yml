@@ -1,0 +1,86 @@
+name: optional runtime policy integration
+on:
+  pull_request:
+    paths:
+      - 'internal/sandbox/**'
+      - 'internal/session/**'
+      - 'cmd/airbag/**'
+      - 'test/runtime*'
+      - 'test/runtimecheck/**'
+      - '.github/workflows/runtime-options.yml'
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: runtime-options-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    # Only this repository's own experimental branches; no privileged setup
+    # in fork PRs and no repository secrets passed to workloads.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      LAB_DIR: /var/lib/airbag-runtime-options
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: prepare static binaries and host facilities
+        run: |
+          sudo mkdir -p "$LAB_DIR"
+          sudo chown "$(id -u):$(id -g)" "$LAB_DIR"
+          mkdir "$LAB_DIR/tools"
+          CGO_ENABLED=0 go build -o "$LAB_DIR/tools/probe" ./test/runtimecheck
+          CGO_ENABLED=0 go build -o "$LAB_DIR/tools/airbag" ./cmd/airbag
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo chmod 666 /dev/kvm
+      - name: pinned gVisor and Firecracker artifacts
+        working-directory: /var/lib/airbag-runtime-options/tools
+        run: |
+          curl -fSL --retry 3 -o gvisor.tar.bz2 \
+            https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64/gvisor.tar.bz2
+          echo 'c8d3a9fd4d4c4f5b8ff213caa4517356be128d18659ec4cde37828fe797f61a9725a602a846c81a8ed19c057a996515d31c081eba343ed4613a89951ba32ed59  gvisor.tar.bz2' | sha512sum -c -
+          tar -xjf gvisor.tar.bz2
+          curl -fSL --retry 3 -o firecracker.tgz \
+            https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz
+          echo '06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558  firecracker.tgz' | sha256sum -c -
+          tar -xzf firecracker.tgz
+          cp release-v1.17.0-x86_64/firecracker-v1.17.0-x86_64 firecracker
+          curl -fSL --retry 3 -o vmlinux \
+            https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155
+          echo 'e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2  vmlinux' | sha256sum -c -
+          {
+            ./runsc --version
+            ./firecracker --version
+            go version
+            uname -a
+            sha256sum probe airbag vmlinux
+          } > versions.txt
+      - name: real policy, credential, egress, outbox, review, resume and apply
+        run: |
+          python3 test/runtime-options.py \
+            --go-root "$(go env GOROOT)" \
+            --probe "$LAB_DIR/tools/probe" --airbag "$LAB_DIR/tools/airbag" \
+            --runsc "$LAB_DIR/tools/runsc" --firecracker "$LAB_DIR/tools/firecracker" \
+            --kernel "$LAB_DIR/tools/vmlinux" --output "$LAB_DIR/results"
+      - name: preserve results and failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-options-results
+          path: |
+            /var/lib/airbag-runtime-options/tools/versions.txt
+            /var/lib/airbag-runtime-options/results/results.json
+            /var/lib/airbag-runtime-options/results/negative-controls.json
+            /var/lib/airbag-runtime-options/results/*/*.log
+            /var/lib/airbag-runtime-options/results/*/review.json
+          if-no-files-found: error
