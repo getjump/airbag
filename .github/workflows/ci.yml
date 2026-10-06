@@ -207,6 +207,10 @@ jobs:
         run: |
           airbag doctor
           for t in test/e2e.sh test/agent-state-e2e.sh test/linked-workspace-e2e.sh test/killed-run-e2e.sh; do echo "== $t"; sh "$t"; done
+      - name: Claude macOS regression
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.291
+          sh test/claude-mac-e2e.sh
 
   lint:
     if: github.event_name != 'schedule'
