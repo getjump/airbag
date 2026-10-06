@@ -67,13 +67,9 @@ func (t *Tracker) snapshot() map[string]entry {
 		if err != nil {
 			continue
 		}
-		walk(r, func(rel string, d fs.DirEntry) {
-			if d.IsDir() {
+		walk(r, func(rel string, info fs.FileInfo) {
+			if info.IsDir() {
 				return
-			}
-			info, err := d.Info()
-			if err != nil {
-				return // gone since it was listed: nothing to attribute
 			}
 			e := entry{mtime: info.ModTime().UnixNano(), size: info.Size()}
 			if st, ok := info.Sys().(*syscall.Stat_t); ok && info.Mode()&fs.ModeCharDevice != 0 && st.Rdev == 0 {
@@ -93,9 +89,11 @@ func (t *Tracker) snapshot() map[string]entry {
 // directory is opened through r, so one swapped for a link out of the
 // tree is an error here, not a walk of the host. Names go to the OS as
 // they are: fs.WalkDir leaves out a directory whose name is not UTF-8,
-// and everything under it. What cannot be listed is left out, since steps
-// only attribute changes.
-func walk(r *os.Root, visit func(rel string, d fs.DirEntry)) {
+// and everything under it. Each entry's type comes from lstat, not from
+// readdir, which gives none on some filesystems. What cannot be listed,
+// or is gone by the time it is looked at, is left out, since steps only
+// attribute changes.
+func walk(r *os.Root, visit func(rel string, info fs.FileInfo)) {
 	n := 0
 	dirs := []string{"."}
 	for len(dirs) > 0 {
@@ -112,9 +110,13 @@ func walk(r *os.Root, visit func(rel string, d fs.DirEntry)) {
 					_ = f.Close()
 					return
 				}
+				info, err := d.Info()
+				if err != nil {
+					continue
+				}
 				rel := filepath.Join(dir, d.Name())
-				visit(rel, d)
-				if d.IsDir() {
+				visit(rel, info)
+				if info.IsDir() {
 					dirs = append(dirs, rel)
 				}
 			}
@@ -190,21 +192,21 @@ func path(s *session.Session) string { return filepath.Join(s.Dir, "steps.jsonl"
 
 // record is a step as steps.jsonl keeps it. JSON strings hold UTF-8 only:
 // a name that is not would come back with U+FFFD for its bytes, and two
-// names could read as one. A step with such a change keeps every change's
-// bytes beside it as well.
+// names could read as one. Such a change keeps its bytes beside it as
+// well, by its index in Changes.
 type record struct {
 	Step
-	Raw [][]byte `json:"changes_raw,omitempty"`
+	Raw map[int][]byte `json:"changes_raw,omitempty"`
 }
 
 func stored(st Step) record {
 	r := record{Step: st}
-	for _, c := range st.Changes {
+	for i, c := range st.Changes {
 		if !utf8.ValidString(c) {
-			for _, c := range st.Changes {
-				r.Raw = append(r.Raw, []byte(c))
+			if r.Raw == nil {
+				r.Raw = map[int][]byte{}
 			}
-			break
+			r.Raw[i] = []byte(c)
 		}
 	}
 	return r
@@ -226,8 +228,8 @@ func Read(s *session.Session) ([]Step, error) {
 		if json.Unmarshal(sc.Bytes(), &r) != nil {
 			continue
 		}
-		if len(r.Raw) == len(r.Changes) {
-			for i, c := range r.Raw {
+		for i, c := range r.Raw {
+			if i >= 0 && i < len(r.Changes) {
 				r.Changes[i] = string(c)
 			}
 		}

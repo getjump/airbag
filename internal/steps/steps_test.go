@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -77,6 +78,30 @@ func TestStepsSeeNamesThatAreNotUTF8(t *testing.T) {
 	}
 }
 
+// Only a change that is not UTF-8 keeps its bytes beside it: a step of
+// many ordinary changes and one such stays about the size it was.
+func TestStoredKeepsOnlyTheBytesJSONWouldLose(t *testing.T) {
+	st := Step{Changes: []string{"+ws:a", "~ws:bad\xff", "-ws:c"}}
+	r := stored(st)
+	if len(r.Raw) != 1 || string(r.Raw[1]) != "~ws:bad\xff" {
+		t.Fatalf("raw bytes kept: %v", r.Raw)
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back record
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Raw) != 1 || string(back.Raw[1]) != "~ws:bad\xff" {
+		t.Fatalf("raw bytes read back: %v", back.Raw)
+	}
+	if r := stored(Step{Changes: []string{"+ws:a"}}); r.Raw != nil {
+		t.Fatalf("raw bytes kept for a step of UTF-8 names: %v", r.Raw)
+	}
+}
+
 // Directories count toward the cap: a tree of empty ones is not walked
 // past it.
 func TestWalkCountsDirectories(t *testing.T) {
@@ -95,7 +120,7 @@ func TestWalkCountsDirectories(t *testing.T) {
 	}
 	defer func() { _ = r.Close() }()
 	n := 0
-	walk(r, func(string, fs.DirEntry) { n++ })
+	walk(r, func(string, fs.FileInfo) { n++ })
 	if n != maxEntries {
 		t.Fatalf("walked %d entries, want the cap of %d", n, maxEntries)
 	}
