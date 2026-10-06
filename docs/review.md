@@ -44,7 +44,8 @@ its version from before the apply stays in the session: `airbag discard` refuses
 to delete it until a later rollback restores it, or you pass `--force`. A push that
 already ran is not undone. A rollback waits for a run of the session that is still
 going, from the moment `run --session` takes the session, and the session is not
-resumed while a rollback works on it; a run that was killed does not hold it up. It puts the agent's versions back
+resumed while a rollback works on it; a run that was killed does not hold it up (on macOS, its
+agent does while it runs), and the rollback marks its session stopped. It puts the agent's versions back
 inside the session's branch and nowhere else. If the agent made a directory on the way there,
 or the branch itself, a link out of the branch (in a run resumed after a partial
 apply, say), the rollback stops at that path and keeps your versions from before

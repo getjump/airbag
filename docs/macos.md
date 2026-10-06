@@ -158,7 +158,7 @@ $ ./airbag review              # then apply, apply --branch NAME, or discard
 | Shims, outbox, mirror, policies, review, apply, rollback, `--branch`, `--session` | yes | the same code |
 | Agent hooks (steps per tool call) | managed settings in a private `/etc` | not installed: managed settings need root on macOS |
 | Terminal | a pseudo-terminal of its own, TIOCSTI filtered | the agent shares your terminal |
-| An airbag killed under the agent | the agent's pid namespace goes with it | the agent keeps running: its pid is recorded, and rollback and `--session` refuse until it exits; a process it left running in the background is not tracked |
+| An airbag killed under the agent | the agent's pid namespace goes with it | the agent keeps running, and holds the session's run lock, which airbag passes to it: a rollback waits until the agent exits, and until a process it left running that keeps the descriptor does (one that closes it is not waited for) |
 
 Because the prototype has no branch of `$HOME`, the narrowing that keeps agent
 state out of the real files on Linux cannot be expressed in full by the Seatbelt

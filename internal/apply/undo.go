@@ -695,14 +695,10 @@ func gone(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
-// runLive reports a run of s that is still going: its agent is alive (on
-// macOS it can outlive airbag), or its host services answer on the
-// control socket. Only a socket that refuses, or none, is a run that
-// ended; one that does not answer in time may be busy.
+// runLive reports a run of s that is still going: its host services
+// answer on the control socket. Only a socket that refuses, or none, is a
+// run that ended; one that does not answer in time may be busy.
 func runLive(s *session.Session) bool {
-	if _, alive := s.AgentAlive(); alive {
-		return true
-	}
 	c, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "unix", s.ControlSock())
 	switch {
 	case err == nil:
@@ -712,11 +708,6 @@ func runLive(s *session.Session) bool {
 		return false
 	}
 	return true
-}
-
-func agentAlive(s *session.Session) bool {
-	_, alive := s.AgentAlive()
-	return alive
 }
 
 // branchesOf is where each layer's changes live in s.
@@ -1031,20 +1022,21 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	// rollback, read a version it puts back before the run's own guards
 	// cover it, and the run and the rollback would each save the session
 	// over the other. A run holds the session's run lock from before it
-	// marks the session running; the control socket answers for a run of
-	// an airbag that took none. A running mark that a killed run left
-	// (the lock free, nothing answering) holds nothing up: rollback is
-	// the way back to the user's versions. The lock held, no run starts
-	// under the rollback.
+	// marks the session running (on macOS its agent holds it too, and
+	// can outlive airbag); the control socket answers for a run of an
+	// airbag that took none. A running mark that a killed run left (the
+	// lock free, nothing answering) holds nothing up: rollback is the way
+	// back to the user's versions. The lock held, no run starts under the
+	// rollback.
 	unlock, err := s.LockRun()
-	if errors.Is(err, session.ErrInUse) || err == nil && (s.Status == session.StatusRunning && runLive(s) || agentAlive(s)) {
-		if unlock != nil {
-			unlock()
-		}
-		return fmt.Errorf("session %s is running; roll back once its run has ended", s.ID)
-	}
-	if err != nil {
+	if errors.Is(err, session.ErrInUse) {
+		return fmt.Errorf("session %s is running, or a process its run left is (on macOS one can outlive airbag), or another rollback is; roll back once it has ended", s.ID)
+	} else if err != nil {
 		return err
+	}
+	if s.Status == session.StatusRunning && runLive(s) {
+		unlock()
+		return fmt.Errorf("session %s is running; roll back once its run has ended", s.ID)
 	}
 	defer unlock()
 	gs, err := listGenerations(s)
@@ -1074,8 +1066,11 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	// partial one sets right a session that crash left applied.
 	// Setting it right resets the baseline too: the save that would
 	// have was lost with the crash.
+	// A running mark the checks above found dead (a run killed after a
+	// partial apply) goes as well: kept, it would hold run --session,
+	// apply and discard off for good.
 	save := !partial
-	if s.Status == session.StatusApplied {
+	if s.Status == session.StatusApplied || s.Status == session.StatusRunning {
 		s.Status, save = session.StatusStopped, true
 	}
 	if save {

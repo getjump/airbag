@@ -85,39 +85,46 @@ func TestRunLockHelper(t *testing.T) {
 	time.Sleep(time.Minute)
 }
 
-// On macOS the agent outlives an airbag killed under it, and so does no
-// lock or socket of the run: its recorded pid holds a resume back while
-// it lives.
-func TestResumeWaitsForTheLastRunsAgent(t *testing.T) {
+// A process the lock is passed to holds it: the lock lasts past the
+// descriptor of the process that took it, as the macOS agent's does past
+// an airbag killed under it, until that process ends too.
+func TestRunLockLastsInAProcessItIsPassedTo(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
-	ws := t.TempDir()
-	s, err := Create(Meta{Workspace: ws, Home: t.TempDir()})
+	s, err := Create(Meta{Workspace: t.TempDir(), Home: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.Status = StatusStopped
-	if err := s.Save(); err != nil {
+	if s.RunLockFile() != nil {
+		t.Fatal("a lock this process does not hold")
+	}
+	unlock, err := s.LockRun()
+	if err != nil {
 		t.Fatal(err)
 	}
-	agent := exec.CommandContext(t.Context(), "sleep", "30")
-	if err := agent.Start(); err != nil {
+	f := s.RunLockFile()
+	if f == nil {
+		t.Fatal("the lock this process holds is not there")
+	}
+	if _, err := f.Write([]byte("x")); err == nil {
+		t.Fatal("the lock's descriptor writes")
+	}
+	child := exec.CommandContext(t.Context(), "sleep", "30")
+	child.ExtraFiles = []*os.File{f}
+	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.NoteAgent(agent.Process.Pid); err != nil {
-		t.Fatal(err)
+	unlock()
+	if s.RunLockFile() != nil {
+		t.Fatal("a lock let go is still there")
 	}
-	if pid, alive := s.AgentAlive(); !alive || pid != agent.Process.Pid {
-		t.Fatalf("the running agent reads as gone: %d %t", pid, alive)
+	if _, err := s.LockRun(); !errors.Is(err, ErrInUse) {
+		t.Fatalf("the lock the child holds was free: %v", err)
 	}
-	if _, err := Resume(s.ID, ws); err == nil || !strings.Contains(err.Error(), "still running") {
-		t.Fatalf("resumed beside the last run's agent: %v", err)
+	_ = child.Process.Kill()
+	_ = child.Wait()
+	again, err := s.LockRun()
+	if err != nil {
+		t.Fatalf("the lock was not let go with the child: %v", err)
 	}
-	_ = agent.Process.Kill()
-	_ = agent.Wait()
-	if _, alive := s.AgentAlive(); alive {
-		t.Fatal("an agent that exited reads as alive")
-	}
-	if _, err := Resume(s.ID, ws); err != nil {
-		t.Fatalf("the resume once the agent is gone: %v", err)
-	}
+	again()
 }

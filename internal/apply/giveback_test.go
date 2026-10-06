@@ -296,6 +296,11 @@ func TestRollbackWaitsOnlyForALiveRun(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(ws, "f")); !os.IsNotExist(err) {
 		t.Fatalf("not rolled back: %v", err)
 	}
+	// The dead running mark goes with the rollback: kept, it would hold
+	// run --session, apply and discard off.
+	if saved, err := session.Load(s.Dir); err != nil || saved.Status != session.StatusStopped {
+		t.Fatalf("the session after the rollback: %v, %v", saved, err)
+	}
 }
 
 // A run holds the session's run lock from before it marks the session
@@ -345,18 +350,11 @@ func TestRollbackWaitsForTheRunLock(t *testing.T) {
 	again()
 }
 
-// A recorded agent that is still running (on macOS it outlives an airbag
-// killed under it, with the lock and the socket gone) holds the rollback
-// off too.
-func TestRollbackWaitsForALiveAgent(t *testing.T) {
-	// A short root: a unix socket path has room for about 100 bytes, and
-	// one longer reads as a run that may be live.
-	root, err := os.MkdirTemp("/tmp", "rb")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	t.Setenv("AIRBAG_HOME", root)
+// On macOS the agent holds the run lock it was passed, and nothing ends
+// it with airbag: after airbag is killed, a rollback waits for the agent
+// (or a process of its that keeps the descriptor), not only for airbag.
+func TestRollbackWaitsForAnAgentThatOutlivesItsRun(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
 	ws := t.TempDir()
 	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
 	if err != nil {
@@ -375,16 +373,27 @@ func TestRollbackWaitsForALiveAgent(t *testing.T) {
 	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
 		t.Fatal(err, out.String())
 	}
-	s.Status = session.StatusRunning
+	// A resumed run takes the lock and passes it to its agent; then
+	// airbag is killed, which lets go of its own descriptor.
+	run, err := session.Load(s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := run.LockRun()
+	if err != nil {
+		t.Fatal(err)
+	}
 	agent := exec.CommandContext(t.Context(), "sleep", "30")
+	agent.ExtraFiles = []*os.File{run.RunLockFile()}
 	if err := agent.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.NoteAgent(agent.Process.Pid); err != nil {
-		t.Fatal(err)
+	unlock()
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "outlive airbag") {
+		t.Fatalf("rolled back beside the agent: %v", err)
 	}
-	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "running") {
-		t.Fatalf("rolled back under a live agent: %v", err)
+	if got := read(t, filepath.Join(ws, "f")); got != "agent\n" {
+		t.Fatalf("the refused rollback changed the file: %q", got)
 	}
 	_ = agent.Process.Kill()
 	_ = agent.Wait()

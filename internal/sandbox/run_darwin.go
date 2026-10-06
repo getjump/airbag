@@ -127,17 +127,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	// Ctrl-C belongs to the agent, which shares the terminal here.
 	swallow(os.Interrupt, syscall.SIGQUIT)
 	defer signal.Reset(os.Interrupt, syscall.SIGQUIT)
-	// No parent-death signal here: killed, airbag leaves the agent
-	// running, so its pid is recorded for rollback and resume to wait on.
-	if err = cmd.Start(); err == nil {
-		forget, noteErr := s.NoteAgent(cmd.Process.Pid)
-		err = cmd.Wait()
-		if noteErr == nil {
-			forget()
-		} else {
-			fmt.Fprintf(os.Stderr, "airbag: warning: the agent's pid is not recorded: %v\n", noteErr)
-		}
-	}
+	err = startAgent(s, cmd).Run()
 	code := 0
 	var ee *exec.ExitError
 	switch {
@@ -150,6 +140,18 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	s.ExitCode = code
 	s.Ended = time.Now()
 	return code, s.Save()
+}
+
+// startAgent passes the session's run lock to the agent. Nothing ends the
+// agent with airbag on macOS: killed, airbag would leave it writing in
+// the clone with the lock let go, and a rollback could start beside it.
+// Held by the agent from before it runs anything, the lock lasts as long
+// as the agent does, or a process of its that keeps the descriptor.
+func startAgent(s *session.Session, cmd *exec.Cmd) *exec.Cmd {
+	if lock := s.RunLockFile(); lock != nil {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, lock)
+	}
+	return cmd
 }
 
 // cloneWorkspace makes the branch on the first run: an APFS clone is

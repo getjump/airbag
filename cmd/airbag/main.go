@@ -342,6 +342,11 @@ func cmdRun(args []string) (int, error) {
 		if err != nil {
 			return 1, err
 		}
+		// A new run holds its session's run lock as a resumed one does,
+		// until this process ends; on macOS the agent holds it too.
+		if _, err := s.LockRun(); err != nil {
+			return 1, fmt.Errorf("session %s: take its run lock: %w", s.ID, err)
+		}
 	}
 	// The default boundary adds no line to run's output; one asked for, or
 	// egress outside the proxy, is stated.

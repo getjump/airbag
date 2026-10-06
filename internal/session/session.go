@@ -483,7 +483,7 @@ func ResumeChecked(id, workspace string, validate func(*Session) error) (*Sessio
 	// below lets it go.
 	unlock, err := s.LockRun()
 	if errors.Is(err, ErrInUse) {
-		return nil, fmt.Errorf("session %s is in use by another airbag process (a rollback, say); resume it once that has ended", s.ID)
+		return nil, fmt.Errorf("session %s is in use by another airbag process (a rollback, say) or, on macOS, a process its last run left running; resume it once that has ended", s.ID)
 	} else if err != nil {
 		return nil, err
 	}
@@ -493,11 +493,6 @@ func ResumeChecked(id, workspace string, validate func(*Session) error) (*Sessio
 			unlock()
 		}
 	}()
-	// The agent of the last run, on macOS, can outlive an airbag killed
-	// under it: a second one would run beside it on the same branch.
-	if pid, alive := s.AgentAlive(); alive {
-		return nil, fmt.Errorf("session %s: the agent of its last run (pid %d) is still running; stop it, then resume", s.ID, pid)
-	}
 	// A run on a moved root would branch another tree, and its
 	// passthrough paths would write where the root leads now.
 	if err := s.CheckRoots(); err != nil {
