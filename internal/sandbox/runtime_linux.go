@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/getjump/airbag/internal/agents"
+	"github.com/getjump/airbag/internal/control"
 	"github.com/getjump/airbag/internal/netcap"
 	"github.com/getjump/airbag/internal/session"
 	"golang.org/x/sys/unix"
@@ -122,7 +123,7 @@ func providerEnv() []string {
 	return []string{"PATH=" + path}
 }
 
-func runOptional(s *session.Session) (int, error) {
+func runOptional(s *session.Session, ctl *control.Server) (int, error) {
 	dir := filepath.Join(s.Dir, "runtime")
 	// Nothing agent-writable is used as provider configuration or executable.
 	if err := os.RemoveAll(dir); err != nil {
@@ -131,9 +132,10 @@ func runOptional(s *session.Session) (int, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return 1, err
 	}
-	// The staged rootfs keeps the agent's environment, --pass-env values
-	// included, and the microVM's images a copy of it and of the branch:
-	// none of it outlives the run. runGVisor deletes its container first.
+	// The microVM's images keep a copy of the branch: none of it outlives
+	// the run. runGVisor deletes its container first. The agent's
+	// environment, --pass-env values included, is not staged here at all
+	// (OfferGuestEnv), since a run cut short leaves this directory.
 	defer func() {
 		if err := os.RemoveAll(dir); err != nil {
 			fmt.Fprintf(os.Stderr, "airbag: warning: the runtime directory is left: %v\n", err)
@@ -221,6 +223,8 @@ func runOptional(s *session.Session) (int, error) {
 		_, err := os.Lstat(filepath.Join(s.CloneDir(), "lost+found"))
 		cfg.GeneratedRecoveryDir = os.IsNotExist(err)
 	}
+	ctl.OfferGuestEnv(cfg.Env)
+	cfg.Env = nil
 	if err := writeJSONFile(r, "run/airbag/config.json", cfg); err != nil {
 		return 1, err
 	}

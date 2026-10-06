@@ -19,6 +19,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/getjump/airbag/internal/control"
 	"golang.org/x/sys/unix"
 )
 
@@ -42,6 +43,8 @@ func Guest(args []string) int {
 		return 125
 	}
 	if len(args) == 1 && args[0] == "exec" {
+		// guestAgent started this process with the agent's environment.
+		c.Env = os.Environ()
 		return guestExec(c)
 	}
 	// The helper holds the relays, as native's PID 1 does, and is made
@@ -54,6 +57,11 @@ func Guest(args []string) int {
 	vm := c.Backend == "microvm"
 	code := 125
 	setupErr := guestSetup(c, vm)
+	if setupErr == nil {
+		// The host hands the agent's environment over only now, through
+		// the control channel; the rootfs never holds it.
+		c.Env, setupErr = control.GuestEnv(control.SocketInSandbox)
+	}
 	if setupErr != nil {
 		fmt.Fprintln(os.Stderr, "airbag guest setup:", setupErr)
 	} else {

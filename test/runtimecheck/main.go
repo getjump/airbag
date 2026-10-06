@@ -59,6 +59,31 @@ func run() error {
 	checks["clone3_unavailable"] = errno == unix.ENOSYS
 	checks["host_token_hidden"] = os.Getenv("BOUND_SOURCE_TOKEN") == ""
 	checks["placeholder_present"] = os.Getenv("CHECK_TOKEN") != "" && os.Getenv("CHECK_TOKEN") != "benign-runtime-bound-token"
+	// The agent's environment reaches it over the control channel: the
+	// staged guest config, which a run cut short leaves on the host's
+	// disk, holds none of it, and the channel hands it out only once.
+	staged, err := os.ReadFile("/run/airbag/config.json")
+	if err != nil {
+		return err
+	}
+	var guest struct{ Env []string }
+	if err := json.Unmarshal(staged, &guest); err != nil {
+		return err
+	}
+	checks["environment_not_staged"] = len(guest.Env) == 0 && os.Getenv("CHECK_TOKEN") != "" && !strings.Contains(string(staged), os.Getenv("CHECK_TOKEN"))
+	ctl := http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", "/run/airbag/ctl.sock")
+	}}}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://airbag/guest/env", http.NoBody)
+	if err != nil {
+		return err
+	}
+	resp, err := ctl.Do(req)
+	if err != nil {
+		return fmt.Errorf("control channel: %w", err)
+	}
+	_ = resp.Body.Close()
+	checks["environment_taken_once"] = resp.StatusCode == http.StatusGone
 	proxy, err := url.Parse(os.Getenv("HTTPS_PROXY"))
 	if err != nil {
 		return err
@@ -74,12 +99,12 @@ func run() error {
 	transport := &http.Transport{Proxy: http.ProxyURL(proxy), TLSClientConfig: tlsConfig(roots)}
 	defer transport.CloseIdleConnections()
 	client := http.Client{Transport: transport, Timeout: 15 * time.Second}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, c.TLSURL, nil)
+	req, err = http.NewRequestWithContext(context.Background(), http.MethodGet, c.TLSURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("CHECK_TOKEN"))
-	resp, err := client.Do(req)
+	resp, err = client.Do(req)
 	if err != nil {
 		return fmt.Errorf("credential proxy: %w", err)
 	}

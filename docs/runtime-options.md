@@ -98,7 +98,17 @@ Firecracker's own seccomp filters still apply. `airbag capabilities` lists this.
 
 Preflight also checks static Airbag, socket path length and the microVM image tool.
 Agent managed hook configuration is installed into the readonly guest image,
-preserving existing Codex requirements.
+preserving existing Codex requirements. Under gVisor the review attributes the
+workspace changes to the tool calls that made them, as native does. A microVM's
+branch changes on the host only when its export is taken after the run, so its
+review shows every change but no tool call's.
+
+The agent's environment, with its API keys and the values `--pass-env` keeps,
+is never written to the staged rootfs or a microVM image. The guest's helper
+takes it once from the host over the control channel before it starts the
+agent, and a later request gets nothing. A run cut short by SIGKILL or a crash
+can leave the staged rootfs under the session, but not the environment. Such a
+session stays marked running, as a native one cut short does.
 
 This adapter supports noninteractive commands and rejects terminal stdin; PTY/resize/job control are not
 provided. Each microVM run starts fresh HOME/tmp and exports only workspace;

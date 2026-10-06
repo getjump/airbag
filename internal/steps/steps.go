@@ -52,7 +52,9 @@ func NewTracker(s *session.Session) *Tracker {
 
 func (t *Tracker) snapshot() map[string]entry {
 	out := map[string]entry{}
-	layers := map[string]string{"ws": t.s.WSUpper()}
+	// A clone holds the whole workspace, not only what changed: a file
+	// gone from it is a deletion, as a whiteout is in an upper layer.
+	layers := map[string]string{"ws": t.s.WSBranch()}
 	if t.s.OverHome {
 		layers["home"] = t.s.HomeUpper()
 	}

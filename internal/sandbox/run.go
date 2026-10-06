@@ -44,7 +44,7 @@ func stopFailed(s *session.Session, code int, err error) (int, error) {
 }
 
 func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, error) {
-	optional := s.Backend != "" && s.Backend != "native"
+	optional := s.Optional()
 	fail := func(err error) (int, error) {
 		if optional {
 			return stopFailed(s, 1, err)
@@ -90,7 +90,7 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	defer func() { _ = host.Close() }()
 
 	if optional {
-		code, err := runOptional(s)
+		code, err := runOptional(s, host.ctl)
 		if err != nil {
 			return stopFailed(s, code, err)
 		}

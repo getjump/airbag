@@ -46,7 +46,8 @@ type Server struct {
 	// Root is the workspace as the agent sees it: its own path on
 	// Linux, the clone on macOS. Files a deferred command names must
 	// be inside it.
-	Root string
+	Root  string
+	guest guestEnv
 }
 
 func (s *Server) HTTPServer() *http.Server {
@@ -56,6 +57,7 @@ func (s *Server) HTTPServer() *http.Server {
 	mux.HandleFunc("POST /hook/{agent}/{event}", s.hook)
 	mux.HandleFunc("POST /exec", s.exec)
 	mux.HandleFunc("POST /taint", s.taint)
+	mux.HandleFunc("POST /guest/env", s.takeGuestEnv)
 	// The agent can open connections here, and each one held is a
 	// goroutine and a file descriptor on the host side: at most
 	// MaxConns are open at once, a request must arrive whole within a

@@ -222,9 +222,13 @@ func (s *Session) CheckRoots() error {
 	return nil
 }
 
+// Optional reports a session of an optional runtime (gVisor, a
+// microVM). An empty Backend is a native session from before the option.
+func (m Meta) Optional() bool { return m.Backend != "" && m.Backend != "native" }
+
 // HomeUnrecorded reports a $HOME the session records nothing for: one
 // not branched, and not there (or not readable) when it began, or on
-// Linux, where nothing writes in it. Nothing tells what is there now
+// Linux and in an optional runtime, where nothing writes in it. Nothing tells what is there now
 // from what was, so run makes and opens nothing there. A session from
 // before roots were recorded has no workspace recorded either, and
 // keeps what it did then.
@@ -289,7 +293,7 @@ func Create(m Meta) (*Session, error) {
 			continue
 		}
 		unbranched := r.id == &m.HomeID && !m.OverHome
-		if unbranched && (!m.Clone || m.Backend != "" && m.Backend != "native") {
+		if unbranched && (!m.Clone || m.Optional()) {
 			continue
 		}
 		id, err := RecordDirID(r.path)
@@ -336,7 +340,7 @@ func (s *Session) CloneDir() string            { return filepath.Join(s.Dir, "ws
 // with the real files, such a branch shows every file it lacks as deleted,
 // and apply would remove them. Discard still works.
 func (s *Session) RuntimeBranchError() error {
-	if s.Backend == "" || s.Backend == "native" {
+	if !s.Optional() {
 		return nil
 	}
 	if !s.RuntimeCopied {
