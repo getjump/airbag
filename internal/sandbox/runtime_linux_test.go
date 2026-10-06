@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -158,6 +159,28 @@ func TestFailedRunscDeleteFailsTheRun(t *testing.T) {
 	}
 	if err := runscDelete("/bin/true", nil, time.Second); err != nil {
 		t.Fatalf("a delete that went through: %v", err)
+	}
+}
+
+// What a failing runsc delete says is kept to its first 4 KiB while it
+// runs: a delete that floods its output does not grow airbag with it.
+func TestRunscDeleteOutputIsCapped(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	err = runscDelete(sh, []string{"-c", "head -c 67108864 /dev/zero | tr '\\0' x >&2; exit 3"}, 30*time.Second)
+	runtime.ReadMemStats(&after)
+	if err == nil {
+		t.Fatal("a delete that failed returned no error")
+	}
+	if len(err.Error()) > 4500 {
+		t.Fatalf("a flooding delete: %d bytes of error", len(err.Error()))
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 16<<20 {
+		t.Fatalf("collecting 64 MiB of output took %d bytes", grew)
 	}
 }
 

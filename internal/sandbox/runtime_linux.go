@@ -350,14 +350,29 @@ func runscDelete(binary string, args []string, limit time.Duration) error {
 	cmd := exec.CommandContext(ctx, binary, args...) //nolint:gosec // trusted runsc, fixed runtime operation
 	cmd.Env = providerEnv()
 	cmd.WaitDelay = time.Second // a process it left holding the output
-	out, err := cmd.CombinedOutput()
+	out := &head{n: 4096}       // what it says, however much it writes
+	cmd.Stdout, cmd.Stderr = out, out
+	err := cmd.Run()
 	switch {
 	case ctx.Err() != nil:
 		return fmt.Errorf("runsc delete did not end within %s; its sandbox may be left", limit)
 	case err != nil:
-		return fmt.Errorf("runsc delete: %w: %s", err, bytes.TrimSpace(out[:min(len(out), 4096)]))
+		return fmt.Errorf("runsc delete: %w: %s", err, bytes.TrimSpace(out.b))
 	}
 	return nil
+}
+
+// head keeps the first n bytes written to it and drops the rest.
+type head struct {
+	b []byte
+	n int
+}
+
+func (h *head) Write(p []byte) (int, error) {
+	if room := h.n - len(h.b); room > 0 {
+		h.b = append(h.b, p[:min(len(p), room)]...)
+	}
+	return len(p), nil
 }
 
 func executeProvider(ctx context.Context, binary string, args []string) (int, error) {
