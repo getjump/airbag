@@ -17,6 +17,7 @@ package tty
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -190,10 +191,24 @@ func (f *fixture) checkWrote(name string) {
 	case err == nil:
 		f.t.Errorf("%s reached the real workspace", name)
 	default:
-		out, err := f.command(f.airbag, "review").CombinedOutput()
-		if err != nil || !strings.Contains(string(out), "+"+name) {
-			f.t.Errorf("airbag review does not list +%s: %v\n%s", name, err, out)
+		out, err := f.command(f.airbag, "review", "--json").CombinedOutput()
+		if err != nil {
+			f.t.Errorf("airbag review failed: %v\n%s", err, out)
+			return
 		}
+		var report struct {
+			Changes []struct{ Path, Kind, Layer string }
+		}
+		if err := json.Unmarshal(out, &report); err != nil {
+			f.t.Errorf("decode airbag review: %v\n%s", err, out)
+			return
+		}
+		for _, change := range report.Changes {
+			if change.Path == name && change.Kind == "added" && change.Layer == "ws" {
+				return
+			}
+		}
+		f.t.Errorf("airbag review changes = %v, want added workspace file %q", report.Changes, name)
 	}
 }
 

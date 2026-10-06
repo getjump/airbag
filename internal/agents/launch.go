@@ -46,6 +46,9 @@ func LaunchArgs(name string, args []string) (Launch, error) {
 	}
 	run := flags
 	run = append(run, "--", name, "--no-daemon", "--dangerously-bypass-approvals-and-sandbox")
+	if !IsSplitLaunch(id) {
+		run = append(run, "-c", "allow_login_shell=false")
+	}
 	if at < len(args) {
 		run = append(run, args[at+1:]...)
 	}
@@ -88,7 +91,7 @@ func PrepareLaunch(in PrepareLaunchIn) error {
 		if !fi.IsDir() {
 			return errors.New("private agent state is not a directory")
 		}
-		return nil
+		return prepareLaunchConfig(in.State)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("check private agent state: %w", err)
 	}
@@ -121,6 +124,35 @@ func PrepareLaunch(in PrepareLaunchIn) error {
 		if err := os.WriteFile(filepath.Join(in.State, "auth.json"), auth, 0o600); err != nil {
 			return fmt.Errorf("seed private agent login: %w", err)
 		}
+	}
+	return prepareLaunchConfig(in.State)
+}
+
+func prepareLaunchConfig(state string) error {
+	path := filepath.Join(state, "config.toml")
+	if _, err := os.Lstat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check private agent defaults: %w", err)
+	}
+	f, err := os.CreateTemp(state, ".config-")
+	if err != nil {
+		return fmt.Errorf("create private agent defaults: %w", err)
+	}
+	defer func() { _ = os.Remove(f.Name()) }()
+	if _, err := f.WriteString("allow_login_shell = false\n"); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write private agent defaults: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync private agent defaults: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close private agent defaults: %w", err)
+	}
+	if err := os.Link(f.Name(), path); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("publish private agent defaults: %w", err)
 	}
 	return nil
 }

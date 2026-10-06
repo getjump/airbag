@@ -2,6 +2,7 @@ package agents
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -46,6 +47,8 @@ func TestBindSplitRPC(t *testing.T) {
 		`{"id":1,"method":"command/exec","params":{}}`,
 		`{"id":1,"method":"thread/resume","params":{"path":"/host"}}`,
 		`{"id":1,"method":"thread/start","params":{"config":{"notify":["sh"]}}}`,
+		`{"id":1,"method":"thread/start","params":{"config":{"allow_login_shell":true}}}`,
+		`{"id":1,"method":"turn/start","params":{"config":{"allow_login_shell":"false"}}}`,
 		`{"id":1,"method":"new/unknown","params":{}}`,
 		`{"method":"thread/start","params":{}}`,
 		`{`,
@@ -54,12 +57,23 @@ func TestBindSplitRPC(t *testing.T) {
 			t.Fatalf("unsafe RPC %s accepted as %s", raw, got)
 		}
 	}
+	for _, method := range []string{"thread/start", "turn/start"} {
+		raw := []byte(`{"id":1,"method":"` + method + `","params":{"config":{"allow_login_shell":false}}}`)
+		if got, err := BindSplitRPC(in, raw); err != nil {
+			t.Fatalf("nonlogin RPC %s = %s, %v; want accepted", raw, got, err)
+		}
+	}
 }
 
 func FuzzBindSplitRPC(f *testing.F) {
 	f.Add(`{"id":1,"method":"thread/start","params":{}}`)
 	f.Add(`{"id":2,"method":"turn/start","params":{"cwd":"/other"}}`)
 	f.Add(`{"id":3,"method":"config/read","params":{"cwd":"/host"}}`)
+	f.Add(`{"id":4,"method":"thread/start","params":{"config":{"allow_login_shell":false}}}`)
+	f.Add(`{"id":5,"method":"thread/start","params":{"config":{"allow_login_shell":true}}}`)
+	f.Add(`{"id":6,"method":"thread/start","Params":{"config":{"allow_login_shell":true}}}`)
+	f.Add(`{"id":7,"method":"thread/start","params":{"Config":{"allow_login_shell":true}}}`)
+	f.Add(`{"id":8,"method":"thread/start","params":{"Cwd":"/host","Environments":[{"cwd":"/host"}]}}`)
 	f.Fuzz(func(t *testing.T, raw string) {
 		got, err := BindSplitRPC(SplitBinding{Neutral: "/control/cwd", Clone: "/clone"}, []byte(raw))
 		if err != nil {
@@ -68,27 +82,30 @@ func FuzzBindSplitRPC(f *testing.F) {
 		if !json.Valid(got) {
 			t.Fatalf("invalid forwarded RPC: %s", got)
 		}
-		var msg struct {
-			Method string
-			Params struct {
-				Cwd          string
-				Environments []struct {
-					EnvironmentID, Cwd    string
-					RuntimeWorkspaceRoots []string
-				}
-				RuntimeWorkspaceRoots []string
-			}
-		}
+		var msg map[string]any
 		if err := json.Unmarshal(got, &msg); err != nil {
 			t.Fatal(err)
 		}
-		switch msg.Method {
+		method, _ := msg["method"].(string)
+		params, _ := msg["params"].(map[string]any)
+		switch method {
 		case "thread/start", "turn/start":
-			if msg.Params.Cwd != "/control/cwd" || len(msg.Params.Environments) != 1 || msg.Params.Environments[0].EnvironmentID != "airbag" || msg.Params.Environments[0].Cwd != "/clone" || len(msg.Params.RuntimeWorkspaceRoots) != 1 || msg.Params.RuntimeWorkspaceRoots[0] != "/control/cwd" || len(msg.Params.Environments[0].RuntimeWorkspaceRoots) != 1 || msg.Params.Environments[0].RuntimeWorkspaceRoots[0] != "/clone" {
+			config, _ := params["config"].(map[string]any)
+			if value, ok := config["allow_login_shell"]; ok && value != false {
+				t.Fatalf("login shell config forwarded: %s", got)
+			}
+			environments, _ := params["environments"].([]any)
+			if len(environments) != 1 {
+				t.Fatalf("worker environment escaped: %s", got)
+			}
+			environment, _ := environments[0].(map[string]any)
+			hostRoots, _ := params["runtimeWorkspaceRoots"].([]any)
+			workerRoots, _ := environment["runtimeWorkspaceRoots"].([]any)
+			if params["cwd"] != "/control/cwd" || environment["environmentId"] != "airbag" || environment["cwd"] != "/clone" || len(hostRoots) != 1 || hostRoots[0] != "/control/cwd" || len(workerRoots) != 1 || workerRoots[0] != "/clone" {
 				t.Fatalf("binding escaped: %s", got)
 			}
 		case "config/read":
-			if msg.Params.Cwd != "/control/cwd" {
+			if params["cwd"] != "/control/cwd" {
 				t.Fatalf("host config cwd escaped: %s", got)
 			}
 		case "thread/resume", "thread/fork", "command/exec", "fs/readFile":
@@ -100,7 +117,7 @@ func FuzzBindSplitRPC(f *testing.F) {
 
 func TestSplitCommandsRefuseUnboundModes(t *testing.T) {
 	base := []string{"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"}
-	for _, args := range [][]string{{"resume"}, {"fork"}, {"--remote", "unix://host"}, {"-c", "notify=[\"sh\"]"}, {"-c", "features.hooks=true"}} {
+	for _, args := range [][]string{{"resume"}, {"fork"}, {"--remote", "unix://host"}, {"-c", "notify=[\"sh\"]"}, {"-c", "features.hooks=true"}, {"-c", "allow_login_shell=true"}} {
 		if _, err := SplitCommands(SplitCommandsIn{Argv: append(append([]string{}, base...), args...)}); err == nil {
 			t.Fatalf("arguments %v accepted", args)
 		}
@@ -112,6 +129,9 @@ func TestSplitCommandsRefuseUnboundModes(t *testing.T) {
 	want := "include_local = false\ndefault = \"airbag\"\n[[environments]]\nid = \"airbag\"\nprogram = \"/airbag\"\nargs = [\"__airbag_exec_connect\", \"/control/exec.sock\"]\n"
 	if got.Registry != want {
 		t.Fatalf("registry = %q, want %q", got.Registry, want)
+	}
+	if at := slices.Index(got.Server, "allow_login_shell=false"); at < 1 || got.Server[at-1] != "-c" {
+		t.Fatalf("server argv = %v, want forced allow_login_shell=false", got.Server)
 	}
 }
 

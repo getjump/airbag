@@ -17,8 +17,11 @@ set -eu
 [ "$1" = --no-daemon ]
 [ "$2" = --dangerously-bypass-approvals-and-sandbox ]
 shift 2
+[ "$1" = -c ]
+[ "$2" = allow_login_shell=false ]
+shift 2
 [ "$CODEX_HOME" != "$SOURCE_HOME" ]
-[ ! -e "$CODEX_HOME/config.toml" ]
+[ "$(cat "$CODEX_HOME/config.toml")" = 'allow_login_shell = false' ]
 if [ "$1" = first ]; then
     [ "$(cat "$CODEX_HOME/auth.json")" = host-login ]
     printf 'session-login\n' > "$CODEX_HOME/auth.json"

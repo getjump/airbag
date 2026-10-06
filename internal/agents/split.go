@@ -79,6 +79,9 @@ func BindSplitRPC(in SplitBinding, raw []byte) ([]byte, error) {
 		}
 		if config, ok := params["config"].(map[string]any); ok {
 			for key := range config {
+				if key == "allow_login_shell" && config[key] == false {
+					continue
+				}
 				if !splitConfigKey(key) {
 					return nil, fmt.Errorf("split execution refuses config key %q", key)
 				}
@@ -168,7 +171,7 @@ func SplitCommands(in SplitCommandsIn) (SplitCommandsOut, error) {
 		return SplitCommandsOut{}, err
 	}
 	server := append([]string{in.Binary, "app-server", "--listen", "stdio://"}, config...)
-	for _, value := range []string{"features.hooks=false", "features.plugins=false", "features.apps=false", "notify=[]", "mcp_servers={}", "approval_policy=\"never\"", "sandbox_mode=\"danger-full-access\""} {
+	for _, value := range []string{"allow_login_shell=false", "features.hooks=false", "features.plugins=false", "features.apps=false", "notify=[]", "mcp_servers={}", "approval_policy=\"never\"", "sandbox_mode=\"danger-full-access\""} {
 		server = append(server, "-c", value)
 	}
 	return SplitCommandsOut{

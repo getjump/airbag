@@ -51,6 +51,13 @@ version is in the [README](../README.md#what-you-get).
   and never run again. Other commands wait there when `defer:` names them
   ([deferred commands](policies.md#deferred-commands)).
 
+Codex model shell tools use nonlogin shells by default in the macOS named
+launcher and in airbag's Linux managed settings, preserving the shim PATH
+instead of sourcing login profiles that may reset it. On Linux, an existing
+host `/etc/codex/requirements.toml` is kept and airbag does not install its
+settings over it. User TUI `!` commands and explicitly nested login shells
+are outside this setting; shims are not the sandbox boundary.
+
 ## Credentials and secrets
 
 - **No credentials.** `~/.ssh`, `~/.aws`, `gh`, `docker`, `kube` and similar are

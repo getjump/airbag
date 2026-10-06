@@ -15,7 +15,10 @@ discard() { "$AIRBAG" discard --yes >/dev/null 2>&1 || true; }
 # Build the syscall probe for the native ABI and, best effort, for the
 # i386 compat ABI (a pure-Go cross build, no C toolchain needed).
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$T/kernprobe" ./test/kernprobe) || fail "build kernprobe"
-CGO_ENABLED=0 GOARCH=386 go build -C "$REPO" -o "$T/kernprobe386" ./test/kernprobe 2>/dev/null || true
+case $(uname -m) in
+x86_64 | i?86) CGO_ENABLED=0 GOARCH=386 go build -C "$REPO" -o "$T/kernprobe386" ./test/kernprobe 2>/dev/null || true ;;
+*) echo 'SKIP: i386 compat ABI requires an x86 kernel' ;;
+esac
 
 mkdir "$T/proj" && cd "$T/proj"
 git init -q -b main && git config user.email e2e@example.com && git config user.name e2e

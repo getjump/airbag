@@ -77,7 +77,7 @@ jobs:
       - name: agent CLIs
         # The e2e tests drive the real Claude Code and Codex CLIs against
         # test/mockapi; without them claude-e2e and codex-e2e skip.
-        run: npm install -g @anthropic-ai/claude-code@2.1.289 @openai/codex@0.160.0
+        run: npm install -g @anthropic-ai/claude-code@2.1.289 @openai/codex@0.160.1
       - name: end-to-end tests
         # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor;
         # airbag doctor prints the profile a user would install, CI lifts it.
@@ -215,6 +215,7 @@ jobs:
         run: |
           npm install -g @openai/codex@0.160.1
           sh test/codex-daemon-e2e.sh
+          sh test/codex-exec-e2e.sh
           sh test/codex-split-e2e.sh
 
   lint:

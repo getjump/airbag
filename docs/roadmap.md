@@ -25,6 +25,8 @@ The macOS `airbag codex yolo` launcher now keeps Codex state in the session
 through `CODEX_HOME`, with only the file-based login copied on the first
 run. Generic runs and Claude Code still use the prototype's original
 state rules. Reviewing and applying private agent settings remains deferred.
+The named launcher defaults model shell tools to nonlogin shells to preserve
+the shim PATH; split execution enforces that setting.
 
 The opt-in `--execution=split` launcher now binds new Codex 0.160.1 TUI
 conversations to a private executor. Resume/fork, more versions and crash
