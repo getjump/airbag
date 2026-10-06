@@ -66,8 +66,14 @@ func TestStepsSeeNamesThatAreNotUTF8(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := tr.Record("Bash", "edit", "call-1")
-	if want := []string{"+ws:bad\xff/f"}; !slices.Equal(st.Changes, want) {
+	want := []string{"+ws:bad\xff/f"}
+	if !slices.Equal(st.Changes, want) {
 		t.Fatalf("step changes %q, want %q", st.Changes, want)
+	}
+	// As recorded, not as JSON would spell it.
+	sts, err := Read(s)
+	if err != nil || len(sts) != 1 || !slices.Equal(sts[0].Changes, want) {
+		t.Fatalf("read back: %+v, %v", sts, err)
 	}
 }
 

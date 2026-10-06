@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/getjump/airbag/internal/session"
 )
@@ -176,7 +177,7 @@ func (t *Tracker) record(tool, summary, id string, onlyIfChanged bool) Step {
 	st := Step{N: t.n, Time: time.Now(), Tool: tool, Summary: summary, ID: id, Changes: ch}
 	// The record is best effort, like the attribution it serves: a step
 	// that is not written still shows its changes in the review.
-	if b, err := json.Marshal(st); err == nil {
+	if b, err := json.Marshal(stored(st)); err == nil {
 		if f, err := os.OpenFile(path(t.s), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
 			_, _ = f.Write(append(b, '\n'))
 			_ = f.Close()
@@ -186,6 +187,28 @@ func (t *Tracker) record(tool, summary, id string, onlyIfChanged bool) Step {
 }
 
 func path(s *session.Session) string { return filepath.Join(s.Dir, "steps.jsonl") }
+
+// record is a step as steps.jsonl keeps it. JSON strings hold UTF-8 only:
+// a name that is not would come back with U+FFFD for its bytes, and two
+// names could read as one. A step with such a change keeps every change's
+// bytes beside it as well.
+type record struct {
+	Step
+	Raw [][]byte `json:"changes_raw,omitempty"`
+}
+
+func stored(st Step) record {
+	r := record{Step: st}
+	for _, c := range st.Changes {
+		if !utf8.ValidString(c) {
+			for _, c := range st.Changes {
+				r.Raw = append(r.Raw, []byte(c))
+			}
+			break
+		}
+	}
+	return r
+}
 
 func Read(s *session.Session) ([]Step, error) {
 	f, err := os.Open(path(s))
@@ -199,10 +222,16 @@ func Read(s *session.Session) ([]Step, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 4<<20)
 	for sc.Scan() {
-		var st Step
-		if json.Unmarshal(sc.Bytes(), &st) == nil {
-			out = append(out, st)
+		var r record
+		if json.Unmarshal(sc.Bytes(), &r) != nil {
+			continue
 		}
+		if len(r.Raw) == len(r.Changes) {
+			for i, c := range r.Raw {
+				r.Changes[i] = string(c)
+			}
+		}
+		out = append(out, r.Step)
 	}
 	return out, sc.Err()
 }
