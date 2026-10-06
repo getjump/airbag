@@ -729,14 +729,16 @@ func giveBack(e genEntry, clone bool, branch string) error {
 	if branch == "" || rel == "." || !filepath.IsLocal(rel) {
 		return fmt.Errorf("%s: no place in the session's branch %q", e.Rel, branch)
 	}
-	if clone && e.Kind == review.Deleted {
-		return nil // absent from the clone is what a deletion is
-	}
+	// The branch is checked even where nothing is written: a rollback of
+	// deletions only stops at a branch that is a link as well.
 	r, err := openBranch(branch)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = r.Close() }()
+	if clone && e.Kind == review.Deleted {
+		return nil // absent from the clone is what a deletion is
+	}
 	switch _, err := r.Lstat(rel); {
 	case err == nil:
 		// Still there: the change was never forgotten, or, for a

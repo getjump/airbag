@@ -245,6 +245,60 @@ func TestGiveBackKeepsWhatAppearedSince(t *testing.T) {
 	}
 }
 
+// A rollback of deletions only writes nothing in a clone, and stops at a
+// clone that is a link all the same, keeping your versions in the session.
+func TestRollbackOfADeletionRefusesABranchThatIsALink(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(filepath.Join(ws, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for rel, body := range map[string]string{"a/b.txt": "user\n", "other.txt": "user\n"} {
+		if err := os.WriteFile(filepath.Join(ws, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir(), Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	// The agent deleted a/b.txt in its clone and changed other.txt.
+	clone := s.CloneDir()
+	if err := os.MkdirAll(filepath.Join(clone, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(clone, "other.txt"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Only: []string{"a/b.txt"}, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "a", "b.txt")); !os.IsNotExist(err) {
+		t.Fatalf("the deletion was not applied: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.Rename(clone, clone+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, clone); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("rollback of a deletion through a branch that is a link: %v\n%s", err, out.String())
+	}
+	if held, err := HeldVersions(s); err != nil || len(held) == 0 {
+		t.Fatalf("the stopped rollback kept nothing in the session: %v, %v", held, err)
+	}
+}
+
 // A live run holds the rollback off: its agent could change the branch
 // under it, and the two would save the session over each other. A
 // running mark a killed run left, with nothing answering on its control
