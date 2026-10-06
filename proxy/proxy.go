@@ -112,6 +112,9 @@ type Proxy struct {
 	// admitting runs as admit starts, when set: a test acts there, after
 	// a connection's checks and before it is registered.
 	admitting func()
+	// now is the clock flows measure quiet by, when set: a test's, which
+	// moves when the test sees bytes arrive, not as a busy runner pauses.
+	now func() time.Time
 }
 
 // admit registers a connection the agent opens through the proxy,
@@ -137,7 +140,7 @@ func (p *Proxy) admit(w http.ResponseWriter, host, target string) (f *flow, done
 		answer(w, "airbag: this session has "+strconv.Itoa(n)+" connections open through the proxy, the most it may; close some and retry", http.StatusServiceUnavailable)
 		return nil, nil
 	}
-	f = newFlow(lim.Idle, lim.Drain)
+	f = newFlow(lim.Idle, lim.Drain, p.now)
 	f.host, f.target = host, target
 	p.flows[f] = true
 	p.mu.Unlock()
@@ -543,6 +546,7 @@ func (p *Proxy) refuse(w http.ResponseWriter, target, host string, err error) bo
 // connect opens a tunnel. It is registered (f) before the dial, so a
 // cut while it dials closes it too.
 func (p *Proxy) connect(w http.ResponseWriter, r *http.Request, host string, f *flow) {
+	f.begin() // before the dial: an upstream proxy that never answers CONNECT is quiet
 	up, err := p.dial(r.Context(), f, r.Host, !p.Allow.explicitIP(host))
 	if errors.Is(err, errStopped) {
 		answer(w, "airbag: the connection to "+host+" was cut", http.StatusForbidden)
@@ -676,6 +680,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, host string, f *
 		tr = &http.Transport{Proxy: http.ProxyURL(pu), DialContext: f.dialer((&net.Dialer{Timeout: 15 * time.Second}).DialContext)}
 	}
 	defer tr.CloseIdleConnections()
+	// Not before the holds: until begin only a cut stops the flow, so their
+	// answer, cut, is true. From here a quiet upstream or client stops it
+	// too, and the request fails.
+	f.begin()
 	resp, err := tr.RoundTrip(out)
 	if err != nil {
 		stopped()
