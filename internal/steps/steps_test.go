@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,5 +46,51 @@ func TestStepsInAClone(t *testing.T) {
 	}
 	if st := tr.Record("Bash", "noop", "call-2"); len(st.Changes) != 0 {
 		t.Fatalf("a call that changed nothing: %q", st.Changes)
+	}
+}
+
+// A name that is not UTF-8 is still a name on Linux: the changes under
+// such a directory are the step's like any others.
+func TestStepsSeeNamesThatAreNotUTF8(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Backend: "gvisor", Clone: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := NewTracker(s)
+	dir := filepath.Join(s.CloneDir(), "bad\xff")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Skipf("this filesystem takes no such name: %v", err) // APFS
+	}
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("agent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := tr.Record("Bash", "edit", "call-1")
+	if want := []string{"+ws:bad\xff/f"}; !slices.Equal(st.Changes, want) {
+		t.Fatalf("step changes %q, want %q", st.Changes, want)
+	}
+}
+
+// Directories count toward the cap: a tree of empty ones is not walked
+// past it.
+func TestWalkCountsDirectories(t *testing.T) {
+	old := maxEntries
+	maxEntries = 10
+	t.Cleanup(func() { maxEntries = old })
+	root := t.TempDir()
+	for i := range 50 {
+		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("d%02d", i), "sub"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	n := 0
+	walk(r, func(string, fs.DirEntry) { n++ })
+	if n != maxEntries {
+		t.Fatalf("walked %d entries, want the cap of %d", n, maxEntries)
 	}
 }

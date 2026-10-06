@@ -179,7 +179,9 @@ func outsideTrees(p string, roots []string, depth int) error {
 		return nil // nothing there at all; a link to nothing is refused below
 	}
 	real, err := filepath.EvalSymlinks(p)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%s is a link to nothing", p)
+	} else if err != nil {
 		return err
 	}
 	for _, root := range roots {

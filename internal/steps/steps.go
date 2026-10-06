@@ -32,8 +32,8 @@ type entry struct {
 	gone        bool // whiteout
 }
 
-// maxEntries bounds one snapshot of a layer.
-const maxEntries = 1 << 20
+// maxEntries bounds one snapshot of a layer (a variable for the tests).
+var maxEntries = 1 << 20
 
 type Tracker struct {
 	mu   sync.Mutex
@@ -62,37 +62,67 @@ func (t *Tracker) snapshot() map[string]entry {
 		layers["home"] = t.s.HomeUpper()
 	}
 	for name, root := range layers {
-		// The agent writes this tree while the walk runs. Walked through
-		// an os.Root, a directory it swaps for a link out of the tree is
-		// an error here, not a walk of the host.
 		r, err := os.OpenRoot(root)
 		if err != nil {
 			continue
 		}
-		n := 0
-		_ = fs.WalkDir(r.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return nil //nolint:nilerr // steps only attribute changes; the review still shows an entry left out here
-			}
-			// A tree of millions of files stops the count, not the
-			// agent's tool call: the review still shows every change.
-			if n++; n > maxEntries {
-				return fs.SkipAll
+		walk(r, func(rel string, d fs.DirEntry) {
+			if d.IsDir() {
+				return
 			}
 			info, err := d.Info()
 			if err != nil {
-				return nil //nolint:nilerr // gone since the walk listed it: nothing to attribute
+				return // gone since it was listed: nothing to attribute
 			}
 			e := entry{mtime: info.ModTime().UnixNano(), size: info.Size()}
 			if st, ok := info.Sys().(*syscall.Stat_t); ok && info.Mode()&fs.ModeCharDevice != 0 && st.Rdev == 0 {
 				e.gone = true
 			}
-			out[name+":"+filepath.FromSlash(rel)] = e
-			return nil
+			out[name+":"+rel] = e
 		})
 		_ = r.Close()
 	}
 	return out
+}
+
+// walk visits the entries of the tree under r, directories included, up
+// to maxEntries of them: a tree of millions of files or empty directories
+// stops the count, not the agent's tool call, and the review still shows
+// every change. The agent writes the tree while the walk runs. Each
+// directory is opened through r, so one swapped for a link out of the
+// tree is an error here, not a walk of the host. Names go to the OS as
+// they are: fs.WalkDir leaves out a directory whose name is not UTF-8,
+// and everything under it. What cannot be listed is left out, since steps
+// only attribute changes.
+func walk(r *os.Root, visit func(rel string, d fs.DirEntry)) {
+	n := 0
+	dirs := []string{"."}
+	for len(dirs) > 0 {
+		dir := dirs[len(dirs)-1]
+		dirs = dirs[:len(dirs)-1]
+		f, err := r.Open(dir)
+		if err != nil {
+			continue
+		}
+		for {
+			ents, err := f.ReadDir(1024)
+			for _, d := range ents {
+				if n++; n > maxEntries {
+					_ = f.Close()
+					return
+				}
+				rel := filepath.Join(dir, d.Name())
+				visit(rel, d)
+				if d.IsDir() {
+					dirs = append(dirs, rel)
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+		_ = f.Close()
+	}
 }
 
 // Record closes a step: everything that changed since the last one.

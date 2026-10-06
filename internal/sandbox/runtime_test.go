@@ -229,10 +229,14 @@ func TestGVisorSidecarsComeFromOutside(t *testing.T) {
 			}
 		})
 	}
-	// Sidecars of its own, outside both, pass this check.
+	// No sidecars at all, and sidecars of its own outside both, pass this
+	// check.
 	bin := filepath.Join(t.TempDir(), "runsc")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := PreflightRuntime(b, session.RuntimeConfig{RootFS: rootfs, Binary: bin}, workspace, false, false, 0, &policy.Policy{}); err != nil && strings.Contains(err.Error(), "sidecars") {
+		t.Fatalf("a runsc with no sidecars refused: %v", err)
 	}
 	if err := os.Mkdir(filepath.Join(filepath.Dir(bin), "gvisor-bin"), 0o755); err != nil {
 		t.Fatal(err)
