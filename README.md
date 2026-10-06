@@ -46,6 +46,10 @@ not imported. Pass Codex arguments after `--`, for example
 service outside the network proxy; `--allow-trustd=false` keeps it blocked.
 See [the macOS launcher](docs/macos.md#codex-launcher).
 
+The launcher defaults model shell tools to nonlogin shells to keep login
+profiles from resetting the shim PATH. Linux managed Codex settings enforce
+the same setting when airbag installs them. See [the outbox](docs/agent.md#outbox).
+
 `airbag codex yolo --execution=split` opts into a private coordinator and a
 sandboxed remote executor. It requires Codex 0.160.1 and supports new TUI
 conversations only. See [split execution](docs/macos.md#experimental-split-execution)

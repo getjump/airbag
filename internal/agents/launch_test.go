@@ -17,8 +17,9 @@ func TestLaunchArgs(t *testing.T) {
 		want []string
 		fail bool
 	}{
-		{"default", []string{"yolo"}, []string{"--", "codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"}, false},
-		{"arguments", []string{"yolo", "--session", "last", "--allow-trustd=false", "--", "resume", "--last", "-m", "model"}, []string{"--session", "last", "--allow-trustd=false", "--", "codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "resume", "--last", "-m", "model"}, false},
+		{"default", []string{"yolo"}, []string{"--", "codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "-c", "allow_login_shell=false"}, false},
+		{"explicit login override", []string{"yolo", "--", "-c", "allow_login_shell=true"}, []string{"--", "codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "-c", "allow_login_shell=false", "-c", "allow_login_shell=true"}, false},
+		{"arguments", []string{"yolo", "--session", "last", "--allow-trustd=false", "--", "resume", "--last", "-m", "model"}, []string{"--session", "last", "--allow-trustd=false", "--", "codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "-c", "allow_login_shell=false", "resume", "--last", "-m", "model"}, false},
 		{"missing mode", nil, nil, true},
 		{"unknown mode", []string{"full"}, nil, true},
 	} {

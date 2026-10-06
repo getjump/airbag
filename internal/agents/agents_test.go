@@ -24,7 +24,7 @@ func TestShellCommand(t *testing.T) {
 
 func TestCodexRequirements(t *testing.T) {
 	s := string(CodexRequirements())
-	for _, want := range []string{"hooks = true", "[[hooks.PreToolUse]]", `command = "/run/airbag/bin/airbag hook codex PostToolUse"`} {
+	for _, want := range []string{"allow_login_shell = false", "hooks = true", "[[hooks.PreToolUse]]", `command = "/run/airbag/bin/airbag hook codex PostToolUse"`} {
 		if !strings.Contains(s, want) {
 			t.Errorf("requirements lack %q:\n%s", want, s)
 		}

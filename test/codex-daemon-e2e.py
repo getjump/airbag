@@ -64,10 +64,16 @@ def main(mode="sandbox"):
         project.mkdir()
         (project / 'README.md').write_text('original\n')
         (home / 'canary.txt').write_text('original\n')
-        env = dict(os.environ, HOME=str(home), CODEX_HOME=str(source), AIRBAG_HOME=sessions, OPENAI_API_KEY='sk-mock', TERM='xterm-256color')
+        (home / '.bash_profile').write_text('PATH=/usr/bin:/bin:/usr/sbin:/sbin\nexport PATH\n')
+        env = dict(os.environ, HOME=str(home), SHELL='/bin/bash', CODEX_HOME=str(source), AIRBAG_HOME=sessions, OPENAI_API_KEY='sk-mock', TERM='xterm-256color')
         env.pop('AIRBAG_SESSION', None)
         for args in [['init', '-q', '-b', 'main'], ['config', 'user.email', 'e2e@example.com'], ['config', 'user.name', 'e2e'], ['add', 'README.md'], ['commit', '-qm', 'init']]:
             subprocess.run(['git', *args], cwd=project, env=env, check=True)
+        remote = root / 'remote.git'
+        subprocess.run(['git', 'init', '-q', '--bare', str(remote)], env=env, check=True)
+        subprocess.run(['git', 'remote', 'add', 'origin', str(remote)], cwd=project, env=env, check=True)
+        subprocess.run(['git', 'push', '-q', 'origin', 'main'], cwd=project, env=env, check=True)
+        original_head = subprocess.check_output(['git', '--git-dir', str(remote), 'rev-parse', 'main'], env=env)
         binary = source / 'packages/app-server-daemon/current/bin/codex'
         binary.parent.mkdir(parents=True)
         binary.symlink_to(codex)
@@ -94,7 +100,7 @@ def main(mode="sandbox"):
             mock = root / 'mockapi'
             subprocess.run(['go', 'build', '-o', str(mock), './test/mockapi'], cwd=repo, check=True)
             script = root / 'calls.json'
-            task = 'rm README.md; echo from-codex > codex.txt'
+            task = "rm README.md; echo from-codex > codex.txt; git add -A && git commit -qm 'mock work' && git push origin main"
             if mode == 'split':
                 task = 'if cat "$CODEX_HOME/../control/state/environments.toml" >/dev/null 2>&1; then exit 91; fi; if (echo corrupt > "$HOME/canary.txt") 2>/dev/null; then exit 92; fi; ' + task
             background = mode.startswith('split-crash') or mode == 'split-eof'
@@ -184,11 +190,14 @@ def main(mode="sandbox"):
             assert (project / 'README.md').read_text() == 'original\n'
             assert not (project / 'codex.txt').exists()
             assert (home / 'canary.txt').read_text() == 'original\n'
+            assert subprocess.check_output(['git', '--git-dir', str(remote), 'rev-parse', 'main'], env=env) == original_head, 'host remote changed'
             if not background:
                 report = subprocess.run([airbag, 'review', '--json'], cwd=project, env=env, capture_output=True, text=True, check=True)
                 changes = json.loads(report.stdout)['changes']
                 assert any(c['path'] == 'README.md' and c['kind'] == 'deleted' for c in changes), changes
                 assert any(c['path'] == 'codex.txt' and c['kind'] == 'added' for c in changes), changes
+                intents = json.loads(report.stdout)['outbox']
+                assert len(intents) == 1 and intents[0]['argv'] == ['git', 'push', 'origin', 'main'] and intents[0]['status'] == 'pending', f'git push bypassed outbox: {intents}'
             with socket.socket(socket.AF_UNIX) as connection:
                 connection.connect(str(control_socket))
             os.kill(daemon['pid'], 0)

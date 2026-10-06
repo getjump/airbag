@@ -46,6 +46,9 @@ func LaunchArgs(name string, args []string) (Launch, error) {
 	}
 	run := flags
 	run = append(run, "--", name, "--no-daemon", "--dangerously-bypass-approvals-and-sandbox")
+	if !IsSplitLaunch(id) {
+		run = append(run, "-c", "allow_login_shell=false")
+	}
 	if at < len(args) {
 		run = append(run, args[at+1:]...)
 	}
