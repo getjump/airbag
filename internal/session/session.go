@@ -474,6 +474,22 @@ func ResumeChecked(id, workspace string, validate func(*Session) error) (*Sessio
 	case s.Status != StatusStopped:
 		return nil, fmt.Errorf("session %s is %s; only a stopped session can be resumed", s.ID, s.Status)
 	}
+	// Taken before the session says running and held while this process
+	// runs it: a rollback cannot start in the time before the run's host
+	// services answer, nor this run under a rollback. A resume refused
+	// below lets it go.
+	unlock, err := s.LockRun()
+	if errors.Is(err, ErrInUse) {
+		return nil, fmt.Errorf("session %s is in use by another airbag process (a rollback, say); resume it once that has ended", s.ID)
+	} else if err != nil {
+		return nil, err
+	}
+	resumed := false
+	defer func() {
+		if !resumed {
+			unlock()
+		}
+	}()
 	// A run on a moved root would branch another tree, and its
 	// passthrough paths would write where the root leads now.
 	if err := s.CheckRoots(); err != nil {
@@ -503,6 +519,7 @@ func ResumeChecked(id, workspace string, validate func(*Session) error) (*Sessio
 	if err := s.Save(); err != nil {
 		return nil, err
 	}
+	resumed = true
 	return s, nil
 }
 

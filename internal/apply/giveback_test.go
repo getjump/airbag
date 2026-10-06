@@ -296,3 +296,50 @@ func TestRollbackWaitsOnlyForALiveRun(t *testing.T) {
 		t.Fatalf("not rolled back: %v", err)
 	}
 }
+
+// A run holds the session's run lock from before it marks the session
+// running, so a rollback started before its host services answer waits
+// for it too.
+func TestRollbackWaitsForTheRunLock(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	ws := t.TempDir()
+	s, err := session.Create(session.Meta{Workspace: ws, Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.WSUpper(), "f"), []byte("agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.Status = session.StatusStopped
+	box, err := outbox.Open(s.EffectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = box.Close() }()
+	var out bytes.Buffer
+	if err := Apply(s, mustScan(t, s), box, Options{Yes: true, Out: &out}); err != nil {
+		t.Fatal(err, out.String())
+	}
+	run, err := session.Load(s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := run.LockRun()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(s, nil, &out); err == nil || !strings.Contains(err.Error(), "running") {
+		t.Fatalf("rolled back while a run held the lock: %v", err)
+	}
+	unlock()
+	out.Reset()
+	if err := Rollback(s, nil, &out); err != nil {
+		t.Fatalf("the rollback once the run let go: %v\n%s", err, out.String())
+	}
+	// The rollback let go of the lock when it ended.
+	again, err := run.LockRun()
+	if err != nil {
+		t.Fatalf("the rollback kept the run lock: %v", err)
+	}
+	again()
+}

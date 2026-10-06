@@ -1021,12 +1021,23 @@ func Rollback(s *session.Session, done []string, out io.Writer) error {
 	// During a live run the agent could change its branch under the
 	// rollback, read a version it puts back before the run's own guards
 	// cover it, and the run and the rollback would each save the session
-	// over the other. A running mark that a killed run left (nothing
-	// answers on its control socket) holds nothing up: rollback is the
-	// way back to the user's versions.
-	if s.Status == session.StatusRunning && runLive(s) {
+	// over the other. A run holds the session's run lock from before it
+	// marks the session running; the control socket answers for a run of
+	// an airbag that took none. A running mark that a killed run left
+	// (the lock free, nothing answering) holds nothing up: rollback is
+	// the way back to the user's versions. The lock held, no run starts
+	// under the rollback.
+	unlock, err := s.LockRun()
+	if errors.Is(err, session.ErrInUse) || err == nil && s.Status == session.StatusRunning && runLive(s) {
+		if unlock != nil {
+			unlock()
+		}
 		return fmt.Errorf("session %s is running; roll back once its run has ended", s.ID)
 	}
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	gs, err := listGenerations(s)
 	if err != nil {
 		return err
