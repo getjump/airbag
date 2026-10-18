@@ -43,8 +43,9 @@ On macOS, `airbag codex yolo` starts Codex with a private server and state
 directory. It copies only the file-based login from `CODEX_HOME` (or
 `~/.codex`); home settings, required MCP servers and host transcripts are
 not imported. Pass Codex arguments after `--`, for example
-`airbag codex yolo -- -m MODEL`. This launcher enables the macOS TLS trust
-service outside the network proxy; `--allow-trustd=false` keeps it blocked.
+`airbag codex yolo -- -m MODEL`. The macOS TLS trust service stays blocked,
+as in `airbag run`; `--allow-trustd` opens it, outside the network proxy, for
+a TLS client that fails without it.
 See [the macOS launcher](docs/macos.md#codex-launcher).
 
 Requirements, `go install` and Nix: [Install](#install).

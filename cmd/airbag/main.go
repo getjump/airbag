@@ -193,7 +193,9 @@ func cmdRunLauncher(args []string, launcher string) (int, error) {
 		return 1, errors.New("already inside an airbag session")
 	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	trustd := fs.Bool("allow-trustd", launcher != "", "macOS: allow the system TLS trust service, outside the network proxy")
+	// Off for launchers too: trustd makes requests outside the proxy, the
+	// effect log and the secret label, so the user opts in to that path.
+	trustd := fs.Bool("allow-trustd", false, "macOS: allow the system TLS trust service, outside the network proxy")
 	backend := fs.String("backend", "native", "execution backend: native, gvisor or microvm")
 	rootfs := fs.String("runtime-rootfs", "", "trusted root filesystem directory for an optional backend")
 	runtimeBin := fs.String("runtime-bin", "", "operator-supplied runsc or Firecracker executable")

@@ -117,8 +117,8 @@ So the clone stays the branch: an NFS overlay needs a server that keeps file
 handles valid for a tree that size and that git can write to, which the probe's
 does not. The prototype's profile leaves `trustd` out, so a Go program in the
 sandbox that uses the platform verifier (any with a go line before 1.27, or
-with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset) cannot verify TLS; generic runs keep it blocked unless `--allow-trustd` is requested. The
-named Codex launcher enables it, with the exception recorded below.
+with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset) cannot verify TLS; runs keep it blocked unless `--allow-trustd` is requested. The
+named Codex launcher does too, with the exception recorded below.
 
 ### Order
 
@@ -182,7 +182,7 @@ replaced, so a `!` command and the Bash tool do not need writes to host temp.
 $ airbag codex yolo
 $ airbag codex yolo --allow api.example.com -- -m MODEL
 $ airbag codex yolo --session last -- resume --last
-$ airbag codex yolo --allow-trustd=false
+$ airbag codex yolo --allow-trustd
 ```
 
 The named launcher currently requires macOS. It starts Codex with
@@ -202,14 +202,15 @@ survives `--session` runs and is deleted by discard; it is never applied to
 HOME. Use both `--session last` and Codex `resume --last` to resume the same
 workspace branch and conversation.
 
-This launcher enables `--allow-trustd` for native TLS verification. The
-session records `allowlist-proxy+trustd` egress (plus any TCP forwards).
-The system trust service can make certificate-related requests outside
-airbag's allowlist proxy, which opens a potential exfiltration path.
-`--allow-trustd=false` disables that access; TLS clients using the platform
-verifier may then fail. Generic `airbag run` keeps trustd blocked unless
-explicitly enabled. The option only grants the trust service, not a Codex
-daemon socket or unrestricted TCP access.
+The launcher keeps the system trust service blocked, as `airbag run` does.
+A TLS client that verifies certificates with the platform verifier may then
+fail; `--allow-trustd` grants the service. The trust service can make
+certificate-related requests outside airbag's allowlist proxy, which opens a
+potential exfiltration path, so it is opt-in. A session with it records
+`allowlist-proxy+trustd` egress (plus any TCP forwards), and a resume keeps
+the recorded choice unless `--allow-trustd` is given again. The option only
+grants the trust service, not a Codex daemon socket or unrestricted TCP
+access.
 
 Because the prototype has no branch of `$HOME`, the narrowing that keeps agent
 state out of the real files on Linux cannot be expressed in full by the Seatbelt

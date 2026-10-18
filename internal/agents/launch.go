@@ -103,13 +103,24 @@ func PrepareLaunch(in PrepareLaunchIn) error {
 			return errors.New("auth.json exceeds 1 MiB")
 		}
 	}
-	if err := os.Mkdir(in.State, 0o700); err != nil {
+	// The state is built beside its final path and renamed into place: an
+	// existing directory is never seeded again, so a seed cut short there
+	// would leave every later run of the session logged out.
+	tmp, err := os.MkdirTemp(filepath.Dir(in.State), ".agent-state-")
+	if err != nil {
 		return fmt.Errorf("create private agent state: %w", err)
 	}
+	defer func() { _ = os.RemoveAll(tmp) }()
 	if f != nil {
-		if err := os.WriteFile(filepath.Join(in.State, "auth.json"), auth, 0o600); err != nil {
+		if err := writeLogin(filepath.Join(tmp, "auth.json"), auth, 0o600); err != nil {
 			return fmt.Errorf("seed private agent login: %w", err)
 		}
 	}
+	if err := os.Rename(tmp, in.State); err != nil {
+		return fmt.Errorf("create private agent state: %w", err)
+	}
 	return nil
 }
+
+// writeLogin is replaced in tests to cut a seed short.
+var writeLogin = os.WriteFile
