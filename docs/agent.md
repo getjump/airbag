@@ -53,9 +53,12 @@ version is in the [README](../README.md#what-you-get).
 
 Codex model shell tools use nonlogin shells by default in the macOS named
 launcher and in airbag's Linux managed settings, preserving the shim PATH
-instead of sourcing login profiles that may reset it. On Linux, an existing
-host `/etc/codex/requirements.toml` is kept and airbag does not install its
-settings over it. User TUI `!` commands and explicitly nested login shells
+instead of sourcing login profiles that may reset it (`test/codex-login-shell-e2e.sh`
+checks it on Linux with a profile that does). Other startup files, such as
+`~/.zshenv` or `BASH_ENV`, still apply. On Linux, an existing host
+`/etc/codex/requirements.toml` is kept and airbag does not install its
+settings over it: then neither the hooks nor the nonlogin shell setting
+apply, and airbag prints a warning that says so. User TUI `!` commands and explicitly nested login shells
 are outside this setting; shims are not the sandbox boundary.
 
 ## Credentials and secrets

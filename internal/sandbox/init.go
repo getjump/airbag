@@ -40,6 +40,11 @@ const (
 
 var airbagBinInside = shim.BinDir + "/airbag"
 
+// codexRequirementsKept: managed Codex requirements airbag did not write
+// carry neither its hooks nor allow_login_shell = false, so a login profile
+// that rebuilds PATH can put a real git ahead of the shims.
+const codexRequirementsKept = "airbag: warning: %s exists and is kept: Codex hooks are not installed and login shells stay allowed, so a login profile can put a real git ahead of airbag's shims\n"
+
 // Init runs as PID 1 in the new namespaces, as root of the new user
 // namespace (mapped to the real user). With tty, its stdio is the
 // agent's pseudo-terminal and fd 3 the stop/continue channel (tty.go).
@@ -438,10 +443,11 @@ func agentConfig(s *session.Session) error {
 		return err
 	}
 	// Codex: only when the host has no managed requirements of its own,
-	// which airbag would otherwise replace.
+	// which airbag would otherwise replace. Then neither the hooks nor the
+	// nonlogin shell setting apply, and the warning says what that costs.
 	req := agents.CodexRequirementsPath
 	if _, err := os.Stat(req); err == nil {
-		fmt.Fprintf(os.Stderr, "airbag: note: %s exists on this host; Codex hooks are not installed\n", req)
+		fmt.Fprintf(os.Stderr, codexRequirementsKept, req)
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(req), 0o755); err != nil { //nolint:gosec // /etc in the sandbox: the agent reads its requirements here

@@ -197,10 +197,15 @@ func runOptional(ctx context.Context, s *session.Session, ctl *control.Server) (
 	if err := r.WriteFile(agents.ClaudeManagedSettingsDir[1:]+"/90-airbag.json", agents.ClaudeManagedSettings(), 0o444); err != nil {
 		return 1, err
 	}
-	if _, err := r.Stat(agents.CodexRequirementsPath[1:]); os.IsNotExist(err) {
+	switch _, err := r.Stat(agents.CodexRequirementsPath[1:]); {
+	case os.IsNotExist(err):
 		if err := r.WriteFile(agents.CodexRequirementsPath[1:], agents.CodexRequirements(), 0o444); err != nil {
 			return 1, err
 		}
+	case err == nil:
+		fmt.Fprintf(os.Stderr, codexRequirementsKept, "the runtime image's "+agents.CodexRequirementsPath)
+	default:
+		return 1, err
 	}
 	self, err := os.Executable()
 	if err != nil {

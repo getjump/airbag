@@ -194,11 +194,11 @@ version; older versions must support `--no-daemon`.
 The launcher also defaults `allow_login_shell=false` in CLI arguments and
 a new private `config.toml`. Codex 0.160.1 drops pre-subcommand `-c` values
 when more `-c` values follow the subcommand; the private default also covers
-`exec` with later provider flags. Existing private config files are kept.
-For an older session whose config lacks this default, pass
-`exec -c allow_login_shell=false` before the other exec options. Model shell tools
-inherit the session's shim PATH instead of running login profiles that can
-replace it and bypass the git outbox. An explicit later
+`exec` with later provider flags. The private config is checked on every
+run: a missing key is added in front of the existing content, and any other
+setting of `allow_login_shell` refuses the run. Model shell tools then do not
+run login profiles that can replace the shim PATH and bypass the git outbox;
+other startup files, such as `~/.zshenv` or `BASH_ENV`, still apply. An explicit later
 `-c allow_login_shell=true` overrides this default in the ordinary launcher.
 This setting covers model shell tools, not the TUI's user `!` commands or
 an explicitly nested login shell. Split execution forces it to false and
