@@ -137,8 +137,21 @@ a host policy denial on an allowlisted host, deferred outbox commands, offline G
 compilation, review, resume without isolation downgrade, and explicit file apply.
 Raw timings/logs are artifacts, including failures. Timings measure this small
 integration fixture; they are not comparable to the earlier vendored Airbag
-build experiment. Unit tests exercise hostile exports and unsupported profiles;
-regular CI continues native end-to-end, race, lint and Darwin cross-build checks.
+build experiment.
+
+The same workflow then runs `test/runtime-takehome.py`: a developer clones a
+take-home assignment (`test/runtimecheck/takehome`) and runs its own setup,
+`go run ./cmd/setup`, under microVM and gVisor, both strict. The setup is a
+benign simulation of fake-recruiter take-home malware against canaries only. It
+checks that the host SSH key and a `GITHUB_TOKEN` stay out of the guest, that
+exfil to a `.invalid` host through the proxy and a direct dial to a reachable
+host address both fail, that the proxy denial is recorded for the drop host,
+that shell and git-hook persistence land only in the private copy (review flags
+the hook `persist`; the host files are untouched before any apply), and that no
+canary string reaches a log or the review JSON. The session is then discarded.
+
+Unit tests exercise hostile exports and unsupported profiles; regular CI
+continues native end-to-end, race, lint and Darwin cross-build checks.
 
 ## Earlier real-provider run (stale)
 
