@@ -10,12 +10,12 @@
     in
     {
       packages = forAll (pkgs: rec {
-        # The go.mod minimum (1.27.1) is newer than nixpkgs' default go.
+        # The go.mod minimum (1.27.2) is newer than nixpkgs' default go.
         airbag = pkgs.buildGo127Module rec {
           pname = "airbag";
           version = "0.1.0-dev";
           src = pkgs.lib.cleanSource ./.;
-          vendorHash = "sha256-Ek0AUKLb/49k6YaO2osZ6pSL5M05tdKLSeCHSWzWVoI=";
+          vendorHash = "sha256-mDSxXSK2dkpwJhchmR/pSt3kQ/58sD1ZF6NV3n76U84=";
           subPackages = [ "cmd/airbag" ];
           env.CGO_ENABLED = 0;
           # airbag version prints this, as for a release: v0.1.0-dev.

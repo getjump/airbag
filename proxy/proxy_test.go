@@ -416,6 +416,7 @@ rules:
 		{"api.example", http.StatusBadRequest, "no port"},
 		{":443", http.StatusBadRequest, "no host"},
 		{"[::1..]:443", http.StatusBadRequest, "not an IP address"},
+		{"[::1%.example.com]:443", http.StatusBadRequest, "zone"},
 		{"ap\u0130.example:443", http.StatusBadRequest, "ASCII"},
 		{"\u212Aite.example:443", http.StatusBadRequest, "ASCII"},
 	} {
@@ -458,7 +459,6 @@ func TestPlainHTTPHostSpelledOneWay(t *testing.T) {
 func TestCanonHost(t *testing.T) {
 	for _, c := range []struct{ in, out string }{
 		{"API.Example.", "api.example"},
-		{"FE80::1%ETH0", "fe80::1%ETH0"}, // the zone is an interface name: its case stays
 		{"0:0::1", "::1"},
 		{"127.0.0.1.", "127.0.0.1"},
 		{"", ""},
@@ -467,7 +467,10 @@ func TestCanonHost(t *testing.T) {
 			t.Errorf("canonHost(%q) = %q, %q; want %q", c.in, got, why, c.out)
 		}
 	}
-	for _, bad := range []string{"a..b", ".a", "a..", "::1.", "[::1]", "ap\u0130.example", "a.example.com]", "a.example.com[", "[a.example.com]"} {
+	// A zoned address is refused: the zone is arbitrary text that could
+	// end in a bound domain, and it names a link-local scope the address
+	// guard forbids anyway.
+	for _, bad := range []string{"a..b", ".a", "a..", "::1.", "[::1]", "ap\u0130.example", "a.example.com]", "a.example.com[", "[a.example.com]", "FE80::1%ETH0", "::1%.example.com"} {
 		if _, why := canonHost(bad); why == "" {
 			t.Errorf("canonHost(%q) accepted", bad)
 		}

@@ -201,6 +201,7 @@ func (s Set) For(hostport string) *Live {
 	if !IsName(host) {
 		return nil
 	}
+	hostIsIP := IsIP(host)
 	for _, l := range s {
 		for _, h := range l.Hosts {
 			bh, bp := SplitHost(h)
@@ -208,7 +209,10 @@ func (s Set) For(hostport string) *Live {
 			if bp != port {
 				continue
 			}
-			if bh == host || (strings.HasPrefix(bh, "*.") && strings.HasSuffix(host, bh[1:])) {
+			// Exact, for a name or an address alike. The wildcard suffix
+			// is for names only: an address matches only an exact address
+			// binding, never a *.domain by its tail.
+			if bh == host || (!hostIsIP && strings.HasPrefix(bh, "*.") && strings.HasSuffix(host, bh[1:])) {
 				return l
 			}
 		}
@@ -241,8 +245,48 @@ func CanonHost(h string) string {
 }
 
 // IsName reports whether a host CanonHost gave can name a host at all:
-// a bracket left in it is none an IP literal holds, so it names none.
-func IsName(h string) bool { return h != "" && !strings.ContainsAny(h, "[]") }
+// a bare IP literal, or a DNS name of non-empty labels of letters,
+// digits and '-' (CanonHost has lower-cased it). Anything else -- an
+// empty label, a stray bracket or colon, an IPv6-like prefix that is no
+// address ("::.example.com"), a wildcard or other punctuation -- is no
+// host. The suffix and equality checks in For and Allowlist.Allows run
+// only past this gate, so a malformed name fails closed instead of
+// matching a binding or allowlist entry by its tail.
+//
+// An IP literal with a zone ("::1%eth0") is refused: netip.ParseAddr
+// accepts the zone as arbitrary text, so a zone could end in the bound
+// domain ("::1%.example.com") and a wildcard suffix would then match an
+// address. A zone names a link-local scope the address guard forbids
+// anyway, so no host a credential or the allowlist names carries one.
+func IsName(h string) bool {
+	if h == "" {
+		return false
+	}
+	if a, err := netip.ParseAddr(h); err == nil {
+		return a.Zone() == ""
+	}
+	for _, label := range strings.Split(h, ".") {
+		if label == "" {
+			return false // an empty label: a leading, trailing or doubled dot
+		}
+		for i := 0; i < len(label); i++ {
+			if c := label[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// IsIP reports whether a host CanonHost gave is an IP literal (a bare
+// address, as IsName requires). An address matches a credential or
+// allowlist entry only as that exact address; it is never compared by
+// name suffix against a wildcard, so a host and a binding can match
+// only when they are the same kind.
+func IsIP(h string) bool {
+	a, err := netip.ParseAddr(h)
+	return err == nil && a.Zone() == ""
+}
 
 // CanonPort writes a port number without leading zeros ("0443" is
 // "443"); anything else, such as "*", stays as it is.

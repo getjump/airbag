@@ -252,7 +252,7 @@ the release's `checksums.txt`, and when cosign or a logged-in `gh` is installed,
 that the release workflow built it. `| AIRBAG_VERSION=v0.1.0 sh` picks a release,
 and `| AIRBAG_VERIFY=require sh` refuses to install without the second check.
 [docs/verify.md](docs/verify.md) shows how to verify a release by hand or rebuild
-it. Or from source, with Go 1.27.1 or newer:
+it. Or from source, with Go 1.27.2 or newer:
 `go install github.com/getjump/airbag/cmd/airbag@latest`.
 
 With Nix: `nix run github:getjump/airbag -- doctor`, or add the flake's

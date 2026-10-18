@@ -171,6 +171,77 @@ func TestForBrackets(t *testing.T) {
 	}
 }
 
+// A malformed name must match no binding, however its tail reads. The
+// suffix check that covers a.example.com with *.example.com would
+// otherwise hand the credential to a host that is no name at all: an
+// empty label, a stray bracket or colon, an IPv6-like prefix that is no
+// address, or a wildcard. The matcher fails closed on each.
+func TestForMalformedHosts(t *testing.T) {
+	s := Set{&Live{Name: "g", Hosts: []string{"*.example.com", "api.github.com"}, Value: "realvalue-1234567890", Placeholder: "fakevalue-0987654321"}}
+	for _, h := range []string{
+		"::.example.com",     // the weekly fuzz find: looks like an IPv6 prefix, is no address
+		"::.example.com:443", // and with a port
+		".example.com",       // empty leading label
+		"a..example.com",     // empty inner label
+		"example.com.:443",   // the bare domain, not a subdomain
+		"[a.example.com]",    // a name in brackets is no IP literal
+		"a.example.com[",     // a stray bracket
+		"]example.com",       // a stray bracket
+		"*.example.com",      // the pattern is no host
+		"a_b.example.com",    // an underscore is no host-name char
+		"a.example.com:notaport",
+		"x.api.github.com",        // exact entry: a subdomain is not the host
+		"api.github.com.evil.com", // the bound host as a label, not the whole name
+		// A zoned IPv6 address: netip.ParseAddr accepts the '%zone' as
+		// arbitrary text, so the zone can end in the bound domain, but an
+		// address is no name and a wildcard must not cover it by suffix.
+		"::1%.example.com",
+		"[::1%.example.com]:443",
+		"2606:4700::1%x.example.com",
+		"::1%.EXAMPLE.COM",  // the zone keeps its case; refused all the same
+		"::1%.example.com.", // and with a trailing dot
+	} {
+		if l := s.For(h); l != nil {
+			t.Errorf("For(%q) = %q, want no credential", h, l.Name)
+		}
+	}
+	// The well-formed names the same bindings do cover, so the gate is
+	// not simply refusing everything.
+	for _, h := range []string{"a.example.com", "a.example.com:443", "A.Example.Com.", "x.y.example.com", "api.github.com:443"} {
+		if s.For(h) == nil {
+			t.Errorf("For(%q) = nil, want the credential", h)
+		}
+	}
+}
+
+// An address is bound and matched only as that exact address: a wildcard
+// never covers one by suffix, and a bound address is never handed to a
+// different host. This is the kind rule behind the zoned-address refusal
+// above.
+func TestForAddressKind(t *testing.T) {
+	s := Set{
+		&Live{Name: "ip", Hosts: []string{"203.0.113.5", "[2001:db8::1]:443"}, Value: "v1", Placeholder: "p1"},
+		&Live{Name: "wild", Hosts: []string{"*.example.com"}, Value: "v2", Placeholder: "p2"},
+	}
+	for h, want := range map[string]string{
+		"203.0.113.5:443":                "ip",   // exact IPv4
+		"[2001:db8::1]:443":              "ip",   // exact IPv6
+		"[2001:0db8::1]:443":             "ip",   // same address, another spelling
+		"203.0.113.5:8443":               "",     // right address, wrong port
+		"[2001:db8::2]:443":              "",     // a different address matches nothing
+		"a.example.com:443":              "wild", // a name still matches its wildcard
+		"[2001:db8::1%.example.com]:443": "",     // a zone ending in the domain does not reach the wildcard
+	} {
+		got := ""
+		if l := s.For(h); l != nil {
+			got = l.Name
+		}
+		if got != want {
+			t.Errorf("For(%q) = %q, want %q", h, got, want)
+		}
+	}
+}
+
 // Brackets go only as the pair around an IP literal: stray ones stay
 // part of the name, so no wildcard entry covers it.
 func TestCanonHostBrackets(t *testing.T) {

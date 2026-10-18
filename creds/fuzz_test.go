@@ -157,7 +157,7 @@ func TestMaskBodyEmptyValue(t *testing.T) {
 // .example.com, written without brackets: a bracket holds an IP
 // literal, which no such name is.
 func FuzzForHost(f *testing.F) {
-	for _, h := range []string{"a.example.com", "a.example.com:443", "A.Example.com.:0443", "a.example.com[", "[a.example.com]", "[a.example.com]:443", "a.example.com]", "example.com", "[::1]:443", "].eXAmple.Com"} {
+	for _, h := range []string{"a.example.com", "a.example.com:443", "A.Example.com.:0443", "a.example.com[", "[a.example.com]", "[a.example.com]:443", "a.example.com]", "example.com", "[::1]:443", "].eXAmple.Com", "::.EXAmple.Com", "::1%.example.com", "[::1%.example.com]:443"} {
 		f.Add(h)
 	}
 	s := Set{&Live{Name: "g", Hosts: []string{"*.example.com"}, Value: "realvalue-1234567890", Placeholder: "fakevalue-0987654321"}}
