@@ -31,6 +31,9 @@ import (
 // Ignored files are left out by the real repository's ignore rules; a
 // .gitignore the agent changed is not consulted.
 func ApplyBranch(s *session.Session, cs []review.Change, name string, o Options) error {
+	if err := s.CheckExecutorStopped(); err != nil {
+		return err
+	}
 	ws := s.Workspace
 	if s.Status == session.StatusRunning {
 		return fmt.Errorf("session %s is still running", s.ID)
