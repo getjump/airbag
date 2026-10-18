@@ -148,8 +148,10 @@ exfil to a `.invalid` host through the proxy and a direct dial to a reachable
 host address both fail, that the proxy denial is recorded for the drop host,
 that shell and git-hook persistence land only in the private copy (review flags
 the hook `persist`; the host files are untouched before any apply), and that no
-canary string reaches a log or the review JSON. The session is then discarded. Unit tests exercise hostile exports and unsupported profiles;
-regular CI continues native end-to-end, race, lint and Darwin cross-build checks.
+canary string reaches a log or the review JSON. The session is then discarded.
+
+Unit tests exercise hostile exports and unsupported profiles; regular CI
+continues native end-to-end, race, lint and Darwin cross-build checks.
 
 ## Earlier real-provider run (stale)
 
