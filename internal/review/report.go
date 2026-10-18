@@ -19,6 +19,7 @@ import (
 	"github.com/getjump/airbag/internal/steps"
 	"github.com/getjump/airbag/operation"
 	"github.com/getjump/airbag/outbox"
+	"github.com/getjump/airbag/proxy/simulate"
 )
 
 // Schema names the JSON layout of Report. Fields are only added within
@@ -75,6 +76,17 @@ type ReportNetwork struct {
 	Cut     map[string]int `json:"cut"`     // host:port: tunnels closed on a secret read
 	// Requests: "METHOD host/path" to hosts a credential is bound to.
 	Requests map[string]int `json:"requests"`
+	// Simulated: the requests airbag's proxy answered from a stub
+	// (simulate:), none of which reached its host, by target and stub.
+	// One on a simulated host that no stub matched is in Blocked.
+	Simulated []ReportSimulated `json:"simulated"`
+}
+
+// ReportSimulated counts the requests one stub answered for a target.
+type ReportSimulated struct {
+	Target string `json:"target"` // "METHOD host/path"
+	Stub   string `json:"stub"`
+	Count  int    `json:"count"`
 }
 
 type ReportSecret struct {
@@ -115,7 +127,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			ExitCode: s.ExitCode, Created: s.Created, Ended: s.Ended, Runs: max(s.Runs, 1), Branch: s.Branch},
 		Changes:   []ReportChange{},
 		Attention: []ReportItem{},
-		Network:   ReportNetwork{Allowed: map[string]int{}, Denied: map[string]int{}, Cut: map[string]int{}, Requests: map[string]int{}},
+		Network:   ReportNetwork{Allowed: map[string]int{}, Denied: map[string]int{}, Cut: map[string]int{}, Requests: map[string]int{}, Simulated: []ReportSimulated{}},
 		Secrets:   []ReportSecret{},
 		Untrusted: []string{},
 		Packages:  []string{},
@@ -195,6 +207,7 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 			r.Attention = append(r.Attention, ReportItem{What: "blocked", Target: e.Target, Why: e.Verdict + " by " + orUnnamed(e.Reason)})
 		}
 	}
+	r.Network.Simulated = simulated(effs)
 	for _, kind := range sortedKeys(dropped) {
 		r.Attention = append(r.Attention, ReportItem{What: "log", Target: kind,
 			Why: fmt.Sprintf("%d refusals not logged: more than %d a second", dropped[kind], effects.RefuseRate)})
@@ -220,6 +233,33 @@ func BuildReport(s *session.Session, cs []Change, effs []effects.Effect, intents
 	}
 	sort.SliceStable(r.Attention, func(i, j int) bool { return attentionRank(r.Attention[i].What) < attentionRank(r.Attention[j].What) })
 	return r
+}
+
+// simulated counts the requests stubs answered (simulate.Kind,
+// allowed), most first, then by target and stub.
+func simulated(effs []effects.Effect) []ReportSimulated {
+	type key struct{ target, stub string }
+	n := map[key]int{}
+	for _, e := range effs {
+		if e.Kind == simulate.Kind && e.Verdict == "allow" {
+			n[key{e.Target, e.Reason}]++
+		}
+	}
+	out := []ReportSimulated{}
+	for k, c := range n {
+		out = append(out, ReportSimulated{Target: k.target, Stub: k.stub, Count: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Count != b.Count {
+			return a.Count > b.Count
+		}
+		if a.Target != b.Target {
+			return a.Target < b.Target
+		}
+		return a.Stub < b.Stub
+	})
+	return out
 }
 
 // linksOut counts the links this session put in the real files, or

@@ -180,6 +180,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		fmt.Fprintf(w, "           %d cut when a secret was read%s\n", total(cut), hostList(cut))
 	}
 	renderRequests(w, effs)
+	renderSimulated(w, effs)
 
 	if len(sts) > 0 {
 		renderSteps(w, sts)
@@ -712,6 +713,27 @@ func renderRequests(w io.Writer, effs []effects.Effect) {
 			note = "  with " + c
 		}
 		fmt.Fprintf(w, "  %s ×%d%s\n", k, reqs[k], note)
+	}
+}
+
+// renderSimulated lists the requests stubs answered: what the code
+// tried to call, none of which reached its host.
+func renderSimulated(w io.Writer, effs []effects.Effect) {
+	sim := simulated(effs)
+	if len(sim) == 0 {
+		return
+	}
+	n := 0
+	for _, s := range sim {
+		n += s.Count
+	}
+	fmt.Fprintf(w, "Simulated  %d answered from stubs, none sent to the host\n", n)
+	for i, s := range sim {
+		if i == maxListed {
+			fmt.Fprintf(w, "  … and %d more\n", len(sim)-maxListed)
+			break
+		}
+		fmt.Fprintf(w, "  %s ×%d  by %s\n", s.Target, s.Count, s.Stub)
 	}
 }
 
