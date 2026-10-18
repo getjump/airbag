@@ -10,6 +10,8 @@ import (
 
 func TestSplitProfilesKeepControlAndWorkspaceSeparate(t *testing.T) {
 	t.Setenv("AIRBAG_HOME", t.TempDir())
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
 	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir(), Clone: true, Launcher: "codex-yolo-split"})
 	if err != nil {
 		t.Fatal(err)
@@ -22,6 +24,9 @@ func TestSplitProfilesKeepControlAndWorkspaceSeparate(t *testing.T) {
 	worker, coordinator := splitProfiles(s, base, in)
 	if !slices.Contains(worker.NoRead, follow(in.Control)) || !slices.Contains(worker.NoWrite, follow(in.Control)) {
 		t.Fatal("worker can access control state")
+	}
+	if !slices.Contains(worker.NoRead, follow(filepath.Join(s.Home, ".codex", "auth.json"))) || !slices.Contains(worker.NoRead, follow(filepath.Join(codexHome, "auth.json"))) {
+		t.Fatalf("worker can read the host login: %v", worker.NoRead)
 	}
 	for _, path := range []string{s.Workspace, s.CloneDir(), s.AgentStateDir()} {
 		if !slices.Contains(coordinator.NoRead, follow(path)) || !slices.Contains(coordinator.NoWrite, follow(path)) {
