@@ -135,7 +135,10 @@ allow it, as sandbox-runtime does, is open.
 prototype: CI runs its unit tests and `test/e2e.sh` on hosted macOS 15, 26
 and 26 Intel runners (the agent's workspace edits, the read-only `~`, unreadable
 secret files, the denied `memory/`, the outbox, review, apply and rollback),
-but it has not yet been used on real work or with Claude Code or Codex.
+but it has not yet been used on real work. `test/claude-mac-e2e.sh` runs the
+real Claude Code 2.1.291 TUI against a mock API: a `!` command, the Bash
+tool, workspace review and the push outbox. It uses a fake HOME and API key,
+so it does not validate a real account login.
 
 ```console
 $ go build ./cmd/airbag        # on the Mac, or GOOS=darwin GOARCH=arm64 elsewhere
@@ -144,6 +147,18 @@ $ cd ~/src/project
 $ ./airbag run -- claude --dangerously-skip-permissions
 $ ./airbag review              # then apply, apply --branch NAME, or discard
 ```
+
+Claude Code's macOS login is stored in Keychain, which this profile hides.
+Provide `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the host environment
+before starting airbag. `claude setup-token` outside airbag can create an OAuth
+token. A "Login expired" message inside the sandbox can mean the login is
+inaccessible, even when `claude auth status` outside it reports logged in.
+
+airbag sets both `TMPDIR` and `CLAUDE_CODE_TMPDIR` to the session's temp
+directory. Claude Code uses `/tmp` for its own files on macOS unless the
+[second variable](https://code.claude.com/docs/en/env-vars) is set; `TMPDIR`
+alone does not redirect those files. An inherited `CLAUDE_CODE_TMPDIR` is
+replaced, so a `!` command and the Bash tool do not need writes to host temp.
 
 | | Linux | macOS prototype |
 |---|---|---|

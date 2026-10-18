@@ -291,7 +291,8 @@ func agentEnvFor(s *session.Session, proxyAddr, binDir, runtimeDir string, extra
 		"AIRBAG_SESSION":   s.ID,
 		"AIRBAG_WORKSPACE": s.Workspace,
 		// Claude Code runs its Bash tool through this shell.
-		"CLAUDE_CODE_SHELL": binDir + "/bash",
+		"CLAUDE_CODE_SHELL":  binDir + "/bash",
+		"CLAUDE_CODE_TMPDIR": runtimeDir,
 	}
 	for k, v := range extra {
 		set[k] = v
