@@ -117,8 +117,8 @@ So the clone stays the branch: an NFS overlay needs a server that keeps file
 handles valid for a tree that size and that git can write to, which the probe's
 does not. The prototype's profile leaves `trustd` out, so a Go program in the
 sandbox that uses the platform verifier (any with a go line before 1.27, or
-with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset) cannot verify TLS; whether to
-allow it, as sandbox-runtime does, is open.
+with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset) cannot verify TLS; runs keep it blocked unless `--allow-trustd` is requested. The
+named Codex launcher does too, with the exception recorded below.
 
 ### Order
 
@@ -135,10 +135,11 @@ allow it, as sandbox-runtime does, is open.
 prototype: CI runs its unit tests and `test/e2e.sh` on hosted macOS 15, 26
 and 26 Intel runners (the agent's workspace edits, the read-only `~`, unreadable
 secret files, the denied `memory/`, the outbox, review, apply and rollback),
-but it has not yet been used on real work. `test/claude-mac-e2e.sh` runs the
-real Claude Code 2.1.291 TUI against a mock API: a `!` command, the Bash
-tool, workspace review and the push outbox. It uses a fake HOME and API key,
-so it does not validate a real account login.
+and a real Codex 0.160.1 TUI against a local mock model, with a running host
+daemon. `test/claude-mac-e2e.sh` runs the real Claude Code 2.1.291 TUI against
+a mock API: a `!` command, the Bash tool, workspace review and the push
+outbox. It uses a fake HOME and API key, so it does not validate a real
+account login. Neither has yet been used on real work.
 
 ```console
 $ go build ./cmd/airbag        # on the Mac, or GOOS=darwin GOARCH=arm64 elsewhere
@@ -174,6 +175,108 @@ replaced, so a `!` command and the Bash tool do not need writes to host temp.
 | Agent hooks (steps per tool call) | managed settings in a private `/etc` | not installed: managed settings need root on macOS |
 | Terminal | a pseudo-terminal of its own, TIOCSTI filtered | the agent shares your terminal |
 | An airbag killed under the agent | the agent's pid namespace goes with it | the agent keeps running, and holds the session's agent lock, which airbag passes to it: a rollback and `--session` wait until the agent exits, and until a process it left running that keeps the descriptor does (`lsof` on the session's `agent.lock` finds it; one that closes or unlocks it is not waited for) |
+
+### Codex launcher
+
+```console
+$ airbag codex yolo
+$ airbag codex yolo --allow api.example.com -- -m MODEL
+$ airbag codex yolo --session last -- resume --last
+$ airbag codex yolo --allow-trustd
+```
+
+The named launcher currently requires macOS. It starts Codex with
+`--no-daemon --dangerously-bypass-approvals-and-sandbox`, keeping the CLI,
+app-server and their child processes under the session's Seatbelt profile.
+It never permits the shared host daemon socket. Codex 0.160.1 is the tested
+version; older versions must support `--no-daemon`.
+
+`CODEX_HOME` points to `agent-state` in the airbag session. Only `auth.json`
+is copied from the host's `CODEX_HOME`, or `~/.codex` when it is unset.
+Symlinked login files are refused. Home config, plugins, MCP settings,
+instructions and transcripts are not copied. Project config still loads
+inside the sandbox. Pass model and provider settings after `--`. A
+keyring-only login needs a file-based login or an API key supplied to Codex.
+The real HOME has no writable agent state in this mode. Private state
+survives `--session` runs and is deleted by discard; it is never applied to
+HOME. Use both `--session last` and Codex `resume --last` to resume the same
+workspace branch and conversation.
+
+The launcher keeps the system trust service blocked, as `airbag run` does.
+A TLS client that verifies certificates with the platform verifier may then
+fail; `--allow-trustd` grants the service. The trust service can make
+certificate-related requests outside airbag's allowlist proxy, which opens a
+potential exfiltration path, so it is opt-in. A session with it records
+`allowlist-proxy+trustd` egress (plus any TCP forwards), and a resume keeps
+the recorded choice unless `--allow-trustd` is given again. The option only
+grants the trust service, not a Codex daemon socket or unrestricted TCP
+access.
+
+### Experimental split execution
+
+```console
+$ airbag codex yolo --execution=split
+$ airbag codex yolo --execution=split -- -m MODEL "Fix the failing test"
+```
+
+This opt-in mode requires exactly Codex 0.160.1. It supports new interactive
+conversations; Codex `exec`, `resume`, `fork` and airbag `--session` reuse are
+refused. Model, provider and reasoning settings may be passed after `--`;
+other config overrides and launch modes are refused. There is no fallback
+to local execution or to the shared host daemon.
+
+airbag starts a private `exec-server` under the workspace's Seatbelt profile.
+A private app-server and TUI use a second Seatbelt profile: they cannot read
+or write the clone, original workspace or executor's private state. They
+have their own login copy and state below the session's `control` directory,
+which the executor cannot access. The executor's own state gets no login:
+the commands it runs for the model cannot read one. Neither profile grants the shared host
+daemon socket. Both keep the session's network policy and trustd setting.
+
+The coordinator's environment registry excludes local execution. A private
+Unix WebSocket bridge binds each new thread and turn to the prestarted
+executor and canonical clone path. Unknown RPCs, local command APIs and
+conversation restore APIs are refused. Hooks, plugins, apps and home MCP
+settings are disabled; project config is not loaded by the coordinator.
+This mode is intended for the remote executor's file and command tools,
+not arbitrary host integrations.
+
+Shutdown is part of the boundary. Codex puts commands in separate process
+groups and closes the inherited airbag lock descriptor in them. Killing
+the executor can therefore leave a command writing to the clone after
+`agent.lock` becomes free. Before starting it, airbag writes
+`executor.active` outside both profiles' writable paths. Only a confirmed
+successful executor exit after normal stdin EOF removes it. A crash,
+forced termination or unconfirmed shutdown leaves the session quarantined:
+apply (including `--branch`), rollback, discard (including `--force`) and
+resume refuse. Review remains available. There is no automatic recovery or
+unlock command; the marker must stay until an operator has established
+that no executor command survives. This conservative failure mode is a
+limit of the experiment.
+
+A clean exit does not prove cleanup either. Codex stops the process groups
+it started, but a command that leaves its group (`setsid`, a tool that
+daemonizes itself) is not tracked after the executor's normal exit, and no
+test yet shows that it is stopped. Such a process could keep writing to the
+clone after apply. Before applying a split session whose commands start
+background services, check that none survives (`ps`, or `lsof +D` on the
+clone).
+
+`test/codex-split-e2e.sh` drives the real pinned TUI with a mock model and
+an already running, separate fixture daemon. It checks clone-only writes,
+normal EOF with an active command, executor SIGKILL with a surviving writer
+and free lock, and airbag SIGKILL. The crash cases check that all mutating
+operations refuse and that the fixture daemon stays alive. No real login
+or user daemon is used by these tests.
+
+On macOS 26.6.2 arm64, the full unit and race suites, static checks,
+supported session e2e tests, daemon and split regressions, and a live Codex
+API smoke test passed. `test/ctrlc.py` also checks the macOS shared terminal,
+resize and Ctrl-C exit status. The host socket test now runs on macOS CI;
+Seatbelt blocks that socket even before an explicit `hide` rule.
+The macprobe NFS checks N2/N3 still fail and T1 requires trustd; they do
+not gate the APFS clone backend. The prototype's remaining limits above
+still apply.
 
 Because the prototype has no branch of `$HOME`, the narrowing that keeps agent
 state out of the real files on Linux cannot be expressed in full by the Seatbelt

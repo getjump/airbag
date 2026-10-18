@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/proxy"
@@ -53,6 +54,21 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	}
 	if _, err := os.Stat("/usr/bin/sandbox-exec"); err != nil {
 		return 1, errors.New("sandbox-exec not found: airbag needs macOS's Seatbelt")
+	}
+	if s.Launcher != "" {
+		source := agents.LaunchSource(s.Launcher, s.Home)
+		if agents.IsSplitLaunch(s.Launcher) {
+			// The executor runs the model's commands and its CODEX_HOME
+			// is this state: it gets no login. Only the coordinator holds
+			// one, in control/state, which the executor cannot read.
+			source = ""
+			if err := os.Remove(filepath.Join(s.AgentStateDir(), "auth.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return 1, fmt.Errorf("remove the executor's login copy: %w", err)
+			}
+		}
+		if err := agents.PrepareLaunch(agents.PrepareLaunchIn{ID: s.Launcher, Source: source, State: s.AgentStateDir()}); err != nil {
+			return 1, err
+		}
 	}
 	if err := cloneWorkspace(s); err != nil {
 		return 1, err
@@ -118,11 +134,18 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		}
 		path = p
 	}
+	if agents.IsSplitLaunch(s.Launcher) {
+		return runSplit(runSplitIn{Session: s, Path: path, Self: self, Cwd: filepath.Join(s.CloneDir(), rel), Env: env, Profile: prof})
+	}
 	cmd := exec.CommandContext(context.Background(), "/usr/bin/sandbox-exec", append([]string{"-p", prof.String(), path}, s.Argv[1:]...)...) //nolint:gosec // the command the user asked to run, inside the profile
 	cmd.Dir = filepath.Join(s.CloneDir(), rel)
 	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	fmt.Fprintf(os.Stderr, "airbag: macOS prototype: the agent works in a clone at %s; ~ is read-only apart from agent state; secret files are hidden, not tracked\n", cmd.Dir)
+	homeState := "~ is read-only apart from agent state"
+	if s.Launcher != "" {
+		homeState = "~ is read-only; agent state stays in this session"
+	}
+	fmt.Fprintf(os.Stderr, "airbag: macOS prototype: the agent works in a clone at %s; %s; secret files are hidden, not tracked\n", cmd.Dir, homeState)
 
 	// Ctrl-C belongs to the agent, which shares the terminal here.
 	swallow(os.Interrupt, syscall.SIGQUIT)

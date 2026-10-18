@@ -48,6 +48,10 @@ func (s *Session) LockRun() (unlock func(), err error) {
 		_ = f.Close()
 		return nil, err
 	}
+	if err := s.CheckExecutorStopped(); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	held.Store(f, struct{}{})
 	return func() {
 		held.Delete(f)

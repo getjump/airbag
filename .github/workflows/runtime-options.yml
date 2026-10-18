@@ -21,7 +21,7 @@ jobs:
     # in fork PRs and no repository secrets passed to workloads.
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -72,6 +72,14 @@ jobs:
             --probe "$LAB_DIR/tools/probe" --airbag "$LAB_DIR/tools/airbag" \
             --runsc "$LAB_DIR/tools/runsc" --firecracker "$LAB_DIR/tools/firecracker" \
             --kernel "$LAB_DIR/tools/vmlinux" --output "$LAB_DIR/results"
+      - name: an untrusted take-home repository under the VM backends
+        run: |
+          python3 test/runtime-takehome.py \
+            --go-root "$(go env GOROOT)" \
+            --airbag "$LAB_DIR/tools/airbag" \
+            --runsc "$LAB_DIR/tools/runsc" --firecracker "$LAB_DIR/tools/firecracker" \
+            --kernel "$LAB_DIR/tools/vmlinux" \
+            --takehome test/runtimecheck/takehome --output "$LAB_DIR/takehome"
       - name: preserve results and failures
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -83,4 +91,8 @@ jobs:
             /var/lib/airbag-runtime-options/results/negative-controls.json
             /var/lib/airbag-runtime-options/results/*/*.log
             /var/lib/airbag-runtime-options/results/*/review.json
+            /var/lib/airbag-runtime-options/takehome/results-takehome.json
+            /var/lib/airbag-runtime-options/takehome/negative-controls-takehome.json
+            /var/lib/airbag-runtime-options/takehome/*/*.log
+            /var/lib/airbag-runtime-options/takehome/*/review.json
           if-no-files-found: error

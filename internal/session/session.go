@@ -74,9 +74,11 @@ type Meta struct {
 	// Credential-like environment variables passed to the agent anyway.
 	PassEnv []string `json:"pass_env,omitempty"`
 	// Strict keeps the agent from creating user namespaces.
-	Strict     bool `json:"strict,omitempty"`
-	FilePolicy bool `json:"file_policy,omitempty"`
-	ExecPolicy bool `json:"exec_policy,omitempty"`
+	Strict     bool   `json:"strict,omitempty"`
+	Launcher   string `json:"launcher,omitempty"`
+	Trustd     bool   `json:"trustd,omitempty"`
+	FilePolicy bool   `json:"file_policy,omitempty"`
+	ExecPolicy bool   `json:"exec_policy,omitempty"`
 	// RuntimeAudit is "durable" (also the legacy empty value) or "buffered".
 	RuntimeAudit   string `json:"runtime_audit,omitempty"`
 	FileCache      string `json:"file_cache,omitempty"`
@@ -337,6 +339,7 @@ func (s *Session) EtcUpper() string            { return filepath.Join(s.Dir, "et
 func (s *Session) EtcWork() string             { return filepath.Join(s.Dir, "etc", "work") }
 func (s *Session) MountDir(name string) string { return filepath.Join(s.Dir, "mnt", name) }
 func (s *Session) RunDir() string              { return filepath.Join(s.Dir, "run") }
+func (s *Session) AgentStateDir() string       { return filepath.Join(s.Dir, "agent-state") }
 func (s *Session) CloneDir() string            { return filepath.Join(s.Dir, "ws", "clone") }
 
 // RuntimeBranchError says why an optional runtime's session has no branch
@@ -506,6 +509,9 @@ func ResumeChecked(id, workspace string, validate func(*Session) error) (*Sessio
 			return nil, err
 		}
 	}
+	if err := s.CheckExecutorStopped(); err != nil {
+		return nil, err
+	}
 	switch {
 	case s.Workspace != workspace:
 		return nil, fmt.Errorf("session %s is a branch of %s, not of %s", s.ID, s.Workspace, workspace)
@@ -569,6 +575,9 @@ func ResumeChecked(id, workspace string, validate func(*Session) error) (*Sessio
 // RemoveAll deletes a session. Overlay leaves a mode-000 work dir
 // behind, so permissions are fixed up before removal.
 func (s *Session) RemoveAll() error {
+	if err := s.CheckExecutorStopped(); err != nil {
+		return err
+	}
 	_ = filepath.WalkDir(s.Dir, func(p string, d os.DirEntry, err error) error {
 		if err == nil && d.IsDir() {
 			_ = os.Chmod(p, 0o700) //nolint:gosec // a directory: the owner needs x to remove what is inside
