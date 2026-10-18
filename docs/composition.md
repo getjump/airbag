@@ -40,6 +40,9 @@ daemons to install and no new runtime/plugin protocol.
   objects. The owner serves it with `p.Serve(l)`, or
   `p.HTTPServer().Serve(p.LimitListener(l))`, closes the listener, and calls
   `Proxy.Close` to cancel tracked requests and hijacked tunnels.
+  `Proxy.Simulation`, compiled by `proxy/simulate` from stubs the operator
+  wrote, answers the hosts they name in place of those hosts; its HTTPS needs a
+  `CA` made for those names ([simulated hosts](simulation.md)).
 
 Public packages do not depend on Airbag session/runtime state or the internal
 policy loader and audit database. Proxy shares the small, stateless internal

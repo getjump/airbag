@@ -24,6 +24,15 @@ Nothing is released yet; this is what the first release holds.
   forward local services.
 - An outbox: `git push` and the commands `defer:` names wait until review and
   run after `apply`.
+- Simulated hosts: `airbag run --simulate FILE`, or `simulate:` in
+  `~/.config/airbag/airbag.yaml`, answers the HTTP and HTTPS requests to the
+  hosts its stubs name (method, host, path glob, query, headers; status,
+  headers, body or body file, delay) and never contacts them; a request no
+  stub matches is refused. HTTPS ends at the proxy with the session CA, which
+  vouches only for those names and the credential hosts. Each request is a
+  `net.simulated` row in the effect log, and review lists them
+  (`network.simulated` in `airbag.review/v1`). A repository's `airbag.yaml`
+  cannot set stubs ([docs/simulation.md](docs/simulation.md)).
 - Secrets: credential stores and credential-like environment variables are
   hidden; `.env` and other secret files are served through FUSE, and a read
   labels the session and narrows egress; known values are masked in shell

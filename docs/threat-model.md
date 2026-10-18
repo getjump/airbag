@@ -35,6 +35,11 @@ the channel. It is off by default, for `airbag run` and the named launchers
 alike; a session with it records `allowlist-proxy+trustd` egress
 ([macOS](macos.md#codex-launcher)).
 
+A host you simulate ([simulated hosts](simulation.md)) is answered by the proxy
+from your stubs and never contacted; its TLS ends at the proxy with the session
+CA, which then vouches for those names as well as the credential hosts, and for
+no other. Stubs come only from your own files, never from the repository.
+
 The proxy, the forwards and the control socket run in airbag's process on the
 host and parse what the agent sends. airbag closes the connections there that
 stop carrying data (a request header must arrive within 30 seconds at the

@@ -37,6 +37,12 @@ version is in the [README](../README.md#what-you-get).
   without a byte (database pools keep theirs idle long), or as at the proxy
   once one side has finished; each forward relays at most 256 at once. The
   Docker socket itself stays hidden.
+- **Simulated hosts, on request.** `airbag run --simulate FILE` (or `simulate:`
+  in your own `~/.config/airbag/airbag.yaml`) answers the requests to the hosts
+  its stubs name from the stubs, in the proxy, and never contacts those hosts: a
+  request no stub matches is refused. Their HTTPS ends at the proxy with the
+  session's certificate authority, and each request is logged as
+  `net.simulated` and listed in review ([simulated hosts](simulation.md)).
 - **A package mirror.** Go, npm, pip, uv and yarn go through
   `http://airbag.mirror`, a read-only caching mirror of proxy.golang.org, npm and
   PyPI. Review lists every package and version the agent pulled; artifacts are

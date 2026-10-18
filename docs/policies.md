@@ -177,6 +177,15 @@ ignore `SSL_CERT_FILE` whichever Go builds them), and Node's built-in `fetch`, w
 upgrade (a websocket) to a bound host is refused: airbag could not keep the
 value out of the upgraded stream.
 
+## Simulated hosts
+
+`simulate:` in your own `~/.config/airbag/airbag.yaml`, or a file given with
+`airbag run --simulate FILE`, lists stubs: requests to the hosts they name are
+answered from them and never sent. A repository's `airbag.yaml` cannot set them,
+as it cannot set credentials. Policy rules are not asked about a simulated
+request, since nothing leaves the machine. See [simulated hosts](simulation.md)
+for the format and the safety model.
+
 ## Tools and effects
 
 Which tools an agent may call is the agent's own setting (Claude Code's
