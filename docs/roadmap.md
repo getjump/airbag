@@ -12,8 +12,10 @@ storage are summed up in [experiments.md](experiments.md).
 
 1. **Use the macOS prototype on real work** (docs/macos.md) with Claude Code
    and Codex. CI runs its unit tests, `test/e2e.sh` and `cmd/airbag-macprobe` on
-   hosted macOS; the probe's N2 and N3 failed there, so the clone stays the
-   branch.
+   hosted macOS, and Claude Code's `!` command and Bash tool against a mock
+   API. A real Claude account login remains unvalidated; Keychain is hidden,
+   so the current profile needs an API key or OAuth token in the environment.
+   The probe's N2 and N3 failed there, so the clone stays the branch.
 2. **The evaluation** in [evaluation.md](evaluation.md): the comparison runs,
    then a narrow release to about ten developers.
 3. **A first tagged release** once CI is green: `git tag v0.1.0` builds the
