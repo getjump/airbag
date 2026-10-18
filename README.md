@@ -208,7 +208,11 @@ Aider, OpenCode and others run in the sandbox without that attribution.
 Linux first. On macOS there is a native prototype (Seatbelt around the agent, an
 APFS clone as the branch) and a Linux VM setup that works today; see
 [docs/macos.md](docs/macos.md). There is no Windows build; under WSL2 the Linux build
-runs, and an informational CI job runs the end-to-end tests there.
+runs on WSL's kernel, and an informational CI job runs the end-to-end tests
+there. Under WSL2 the sandbox keeps the agent off the Windows side: it cannot
+use WSL interop to launch `cmd.exe` or `powershell.exe`, `/mnt/c` is read-only,
+and the Windows host network is out of reach. Keep the workspace on the Linux
+filesystem, not `/mnt/c` ([docs/threat-model.md](docs/threat-model.md#wsl2)).
 </details>
 
 <details><summary>What does it cost in speed and disk?</summary>

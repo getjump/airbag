@@ -43,3 +43,38 @@ proxy and to the control socket a session holds at once. Each refusal (a deny,
 or an ask) is a row in the effect log on the host's disk: past a burst of 1000,
 refusals of one kind are logged at most 50 a second, and review counts the rest. A connection that keeps moving bytes stays open as long as it does, and
 bandwidth and the rate of new connections are not limited.
+
+## WSL2
+
+airbag has no Windows backend; under WSL2 the Linux build runs the Linux
+sandbox on WSL's kernel. The new boundary WSL adds is interop with the Windows
+host, and a Windows process a sandboxed agent could start would run as the user
+outside every Linux boundary airbag sets up. That channel is closed:
+
+- **Interop is unreachable.** WSL registers a binfmt_misc handler (`WSLInterop`)
+  that matches the PE `MZ` magic and hands the file to `/init`, which asks the
+  Windows side to launch it over the Unix socket named in `WSL_INTEROP` (under
+  `/run/WSL`). The sandbox makes `/run` a private tmpfs, so that socket is not
+  there; and airbag drops `WSL_INTEROP` and `WSLENV` from the agent's
+  environment and strips the `/mnt/<drive>` Windows-PATH entries, so neither the
+  socket, the env bridge, nor a path to `cmd.exe`/`powershell.exe` reaches the
+  agent. A PE run by any route (absolute path, a copy into the workspace that
+  the binfmt match would catch, `/init` directly) finds no live interop socket
+  and does not reach Windows. `test/wsl-interop-e2e.sh` exercises each route and
+  asserts no Windows-side effect, with a positive control outside the sandbox.
+- **`/mnt/c` is read, not write.** The Windows drives are drvfs mounts; the
+  recursive read-only remount of the host covers them, so a write to `/mnt/c`
+  fails as anywhere else on the host. Reads are not blocked: as on Linux,
+  whatever the agent reads can reach its model, so Windows files under `/mnt/c`
+  are as exposed as the rest of a readable host. Keep the workspace and
+  secrets on the Linux filesystem (`~`), not under `/mnt/c`.
+- **The Windows host network is unreachable.** The sandbox has only loopback
+  and the proxy, so the WSL gateway and the resolv.conf nameserver (the Windows
+  side) are not reachable from inside; traffic still leaves only through the
+  proxy and its allowlist.
+- **Supported workspace locations.** The Linux filesystem. A workspace under
+  `/mnt/c` is a Windows path: it is read-only in the sandbox and outside
+  airbag's branch-and-apply model, so airbag does not support it.
+
+WSL2 is tier 3 ([support.md](support.md)): built from source, checked by an
+informational CI job, with no release promise.

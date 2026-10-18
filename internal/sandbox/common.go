@@ -282,6 +282,13 @@ func agentEnvFor(s *session.Session, proxyAddr, binDir, runtimeDir string, extra
 		"DBUS_SESSION_BUS_ADDRESS": true, "DISPLAY": true, "WAYLAND_DISPLAY": true,
 		"XAUTHORITY": true, "DOCKER_HOST": true, "KRB5CCNAME": true,
 		"ALL_PROXY": true, "all_proxy": true,
+		// WSL interop: WSL_INTEROP names the Unix socket that /init uses to
+		// launch Windows processes, which would run as the user outside
+		// every Linux boundary airbag sets up; WSLENV bridges environment
+		// variables across that boundary. The sandbox has no reason to reach
+		// Windows, so neither reaches the agent (the /mnt/<drive> PATH entries
+		// that lead to cmd.exe are stripped below).
+		"WSL_INTEROP": true, "WSLENV": true,
 	}
 	set := map[string]string{
 		"HTTPS_PROXY": "http://" + proxyAddr, "https_proxy": "http://" + proxyAddr,
@@ -307,7 +314,7 @@ func agentEnvFor(s *session.Session, proxyAddr, binDir, runtimeDir string, extra
 			continue
 		}
 		if k == "PATH" {
-			v = binDir + ":" + v
+			v = binDir + ":" + stripWinDrivePATH(v)
 		}
 		env = append(env, k+"="+proxyVar(k, v, proxyAddr))
 	}
@@ -322,6 +329,37 @@ func agentEnvFor(s *session.Session, proxyAddr, binDir, runtimeDir string, extra
 		}
 	}
 	return env
+}
+
+// stripWinDrivePATH removes Windows-drive entries from a PATH value. On
+// WSL, PATH interop appends the translated Windows PATH (/mnt/c/Windows/
+// System32 and the rest), which is how a bare `cmd.exe` or
+// `powershell.exe` resolves. Those binaries run on Windows outside every
+// Linux boundary, so the sandbox must not offer a path to them.
+func stripWinDrivePATH(path string) string {
+	parts := filepath.SplitList(path)
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if isWinDrivePath(p) {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return strings.Join(kept, string(filepath.ListSeparator))
+}
+
+// isWinDrivePath reports whether p is under a WSL drvfs drive mount,
+// /mnt/<letter> or /mnt/<letter>/..., e.g. /mnt/c/Windows/System32.
+func isWinDrivePath(p string) bool {
+	rest, ok := strings.CutPrefix(p, "/mnt/")
+	if !ok || rest == "" || !isDriveLetter(rest[0]) {
+		return false
+	}
+	return len(rest) == 1 || rest[1] == '/'
+}
+
+func isDriveLetter(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
 // agentAuth: credentials the agents themselves need to reach their API.
