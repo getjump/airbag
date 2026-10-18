@@ -171,6 +171,41 @@ func TestForBrackets(t *testing.T) {
 	}
 }
 
+// A malformed name must match no binding, however its tail reads. The
+// suffix check that covers a.example.com with *.example.com would
+// otherwise hand the credential to a host that is no name at all: an
+// empty label, a stray bracket or colon, an IPv6-like prefix that is no
+// address, or a wildcard. The matcher fails closed on each.
+func TestForMalformedHosts(t *testing.T) {
+	s := Set{&Live{Name: "g", Hosts: []string{"*.example.com", "api.github.com"}, Value: "realvalue-1234567890", Placeholder: "fakevalue-0987654321"}}
+	for _, h := range []string{
+		"::.example.com",     // the weekly fuzz find: looks like an IPv6 prefix, is no address
+		"::.example.com:443", // and with a port
+		".example.com",       // empty leading label
+		"a..example.com",     // empty inner label
+		"example.com.:443",   // the bare domain, not a subdomain
+		"[a.example.com]",    // a name in brackets is no IP literal
+		"a.example.com[",     // a stray bracket
+		"]example.com",       // a stray bracket
+		"*.example.com",      // the pattern is no host
+		"a_b.example.com",    // an underscore is no host-name char
+		"a.example.com:notaport",
+		"x.api.github.com",        // exact entry: a subdomain is not the host
+		"api.github.com.evil.com", // the bound host as a label, not the whole name
+	} {
+		if l := s.For(h); l != nil {
+			t.Errorf("For(%q) = %q, want no credential", h, l.Name)
+		}
+	}
+	// The well-formed names the same bindings do cover, so the gate is
+	// not simply refusing everything.
+	for _, h := range []string{"a.example.com", "a.example.com:443", "A.Example.Com.", "x.y.example.com", "api.github.com:443"} {
+		if s.For(h) == nil {
+			t.Errorf("For(%q) = nil, want the credential", h)
+		}
+	}
+}
+
 // Brackets go only as the pair around an IP literal: stray ones stay
 // part of the name, so no wildcard entry covers it.
 func TestCanonHostBrackets(t *testing.T) {

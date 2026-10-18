@@ -241,8 +241,34 @@ func CanonHost(h string) string {
 }
 
 // IsName reports whether a host CanonHost gave can name a host at all:
-// a bracket left in it is none an IP literal holds, so it names none.
-func IsName(h string) bool { return h != "" && !strings.ContainsAny(h, "[]") }
+// an IP literal as netip writes it, or a DNS name of non-empty labels
+// of letters, digits and '-' (CanonHost has lower-cased it). Anything
+// else -- an empty label, a stray bracket or colon, an IPv6-like prefix
+// that is no address ("::.example.com"), a wildcard or other
+// punctuation -- is no host. The suffix and equality checks in For and
+// Allowlist.Allows run only past this gate, so a malformed name fails
+// closed instead of matching a binding or allowlist entry by its tail.
+func IsName(h string) bool {
+	if h == "" {
+		return false
+	}
+	// An IP literal (which may hold ':' or a '%zone') is a host; the
+	// label test below would reject it, so it comes first.
+	if _, err := netip.ParseAddr(h); err == nil {
+		return true
+	}
+	for _, label := range strings.Split(h, ".") {
+		if label == "" {
+			return false // an empty label: a leading, trailing or doubled dot
+		}
+		for i := 0; i < len(label); i++ {
+			if c := label[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // CanonPort writes a port number without leading zeros ("0443" is
 // "443"); anything else, such as "*", stays as it is.

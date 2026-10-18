@@ -13,8 +13,11 @@ import (
 // A wildcard entry must match only on a dot boundary: *.example.com
 // covers a.example.com, never example.com or notexample.com. An exact
 // entry matches only that host. Case and a trailing dot do not matter.
+// A malformed name -- an empty label, a stray bracket or colon, an
+// IPv6-like prefix that is no address ("::.example.com") -- is no host
+// and must match neither, however its tail reads.
 func FuzzAllowlist(f *testing.F) {
-	for _, h := range []string{"example.com", "a.example.com", "notexample.com", "A.Example.com.", "x.a.example.com", ".example.com", "api.github.com", ".EXAmple.Com[", "[a.example.com]", "[api.github.com]", "].eXAmple.Com"} {
+	for _, h := range []string{"example.com", "a.example.com", "notexample.com", "A.Example.com.", "x.a.example.com", ".example.com", "api.github.com", ".EXAmple.Com[", "[a.example.com]", "[api.github.com]", "].eXAmple.Com", "::.EXAmple.Com", "a..example.com", "a.example.com:443"} {
 		f.Add(h)
 	}
 	f.Fuzz(func(t *testing.T, host string) {
@@ -22,15 +25,28 @@ func FuzzAllowlist(f *testing.F) {
 		if strings.ContainsAny(host, " \t\r\n") {
 			return // a host is one token; Fields-level garbage is not a host
 		}
+		// A host that names something is a dotted run of non-empty
+		// labels of letters, digits and '-'. A bracket, colon or other
+		// punctuation (so every IP literal here, which no name entry
+		// matches anyway) is none, and names no host.
+		name := norm != ""
+		for _, label := range strings.Split(norm, ".") {
+			if label == "" {
+				name = false
+			}
+			for i := 0; i < len(label); i++ {
+				if c := label[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+					name = false
+				}
+			}
+		}
 		gotW := Allowlist{"*.example.com"}.Allows(host)
-		// A bracket goes only around an IP literal: in a name it names
-		// no host.
-		wantW := strings.HasSuffix(norm, ".example.com") && !strings.ContainsAny(host, "[]")
+		wantW := name && strings.HasSuffix(norm, ".example.com")
 		if gotW != wantW {
 			t.Fatalf("wildcard Allows(%q) = %v, want %v", host, gotW, wantW)
 		}
 		gotE := Allowlist{"api.github.com"}.Allows(host)
-		if wantE := norm == "api.github.com"; gotE != wantE {
+		if wantE := name && norm == "api.github.com"; gotE != wantE {
 			t.Fatalf("exact Allows(%q) = %v, want %v", host, gotE, wantE)
 		}
 	})
