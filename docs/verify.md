@@ -107,10 +107,10 @@ release binary:
 ```console
 $ tar -xzf $file airbag
 $ go version -m airbag | head -n 1
-airbag: go1.27.1
+airbag: go1.27.2
 $ git clone --branch $tag https://github.com/getjump/airbag airbag-src
 $ cd airbag-src
-$ GOTOOLCHAIN=go1.27.1 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+$ GOTOOLCHAIN=go1.27.2 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags "-s -w -X main.version=$tag" -o ../airbag.rebuilt ./cmd/airbag
 $ cd .. && sha256sum airbag airbag.rebuilt
 ```

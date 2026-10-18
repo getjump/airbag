@@ -10,7 +10,7 @@ proxy, the outbox, secret handling or policy.
 
 ## Build and test
 
-Linux 5.12+ with unprivileged user namespaces, Go 1.27.1 or newer (the go.mod
+Linux 5.12+ with unprivileged user namespaces, Go 1.27.2 or newer (the go.mod
 minimum), and a writable `/dev/fuse` for the secret tests.
 
 ```console

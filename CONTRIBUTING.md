@@ -7,7 +7,7 @@ This page says how to build and test it, and where help changes the most.
 ## Build and test
 
 You need Linux 5.12+ with unprivileged user namespaces (on Ubuntu 23.10+,
-`airbag doctor` prints the AppArmor profile to install), Go 1.27.1 or newer
+`airbag doctor` prints the AppArmor profile to install), Go 1.27.2 or newer
 (the go.mod minimum: releases are built with a toolchain that has the current
 standard-library security fixes) and, for the secret tests, a writable
 `/dev/fuse`.

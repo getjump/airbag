@@ -12,7 +12,7 @@ release keeps from one version to the next.
 | 3 | Everything else Go builds airbag for, and NixOS through the flake | Built from source on a best-effort basis, with no tests promised; fixes are welcome |
 
 The release binaries are static (`CGO_ENABLED=0`) and built with the Go
-version that `go.mod` names (1.27.1 now). A source build needs that version or
+version that `go.mod` names (1.27.2 now). A source build needs that version or
 newer. `airbag doctor` checks what the machine is missing.
 
 airbag runs any agent, and gives Claude Code and Codex hooks so the review

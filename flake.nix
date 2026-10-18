@@ -10,7 +10,7 @@
     in
     {
       packages = forAll (pkgs: rec {
-        # The go.mod minimum (1.27.1) is newer than nixpkgs' default go.
+        # The go.mod minimum (1.27.2) is newer than nixpkgs' default go.
         airbag = pkgs.buildGo127Module rec {
           pname = "airbag";
           version = "0.1.0-dev";
