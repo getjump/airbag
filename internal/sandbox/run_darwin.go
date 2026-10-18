@@ -56,7 +56,17 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		return 1, errors.New("sandbox-exec not found: airbag needs macOS's Seatbelt")
 	}
 	if s.Launcher != "" {
-		if err := agents.PrepareLaunch(agents.PrepareLaunchIn{ID: s.Launcher, Source: agents.LaunchSource(s.Launcher, s.Home), State: s.AgentStateDir()}); err != nil {
+		source := agents.LaunchSource(s.Launcher, s.Home)
+		if agents.IsSplitLaunch(s.Launcher) {
+			// The executor runs the model's commands and its CODEX_HOME
+			// is this state: it gets no login. Only the coordinator holds
+			// one, in control/state, which the executor cannot read.
+			source = ""
+			if err := os.Remove(filepath.Join(s.AgentStateDir(), "auth.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return 1, fmt.Errorf("remove the executor's login copy: %w", err)
+			}
+		}
+		if err := agents.PrepareLaunch(agents.PrepareLaunchIn{ID: s.Launcher, Source: source, State: s.AgentStateDir()}); err != nil {
 			return 1, err
 		}
 	}
@@ -123,6 +133,9 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 			return 127, fmt.Errorf("%s: not found", path)
 		}
 		path = p
+	}
+	if agents.IsSplitLaunch(s.Launcher) {
+		return runSplit(runSplitIn{Session: s, Path: path, Self: self, Cwd: filepath.Join(s.CloneDir(), rel), Env: env, Profile: prof})
 	}
 	cmd := exec.CommandContext(context.Background(), "/usr/bin/sandbox-exec", append([]string{"-p", prof.String(), path}, s.Argv[1:]...)...) //nolint:gosec // the command the user asked to run, inside the profile
 	cmd.Dir = filepath.Join(s.CloneDir(), rel)
