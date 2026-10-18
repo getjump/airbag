@@ -97,6 +97,10 @@ type Meta struct {
 	// the variables it sees them in, and the placeholders, kept so a
 	// resumed run uses the same ones. Values are never stored.
 	Credentials []Credential `json:"credentials,omitempty"`
+	// Simulated: the hosts this run's stubs (simulate:) answer for, which
+	// the session CA vouches for too. Set by each run; only names, the
+	// stubs themselves are not stored.
+	Simulated []string `json:"simulated,omitempty"`
 	// Deferred: programs with a shim in the sandbox, because a
 	// `defer:` entry in airbag.yaml holds some of their calls.
 	Deferred []string `json:"deferred,omitempty"`

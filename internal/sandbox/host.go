@@ -3,10 +3,12 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/getjump/airbag/internal/control"
@@ -59,8 +61,12 @@ func startHostServices(s *session.Session, allow proxy.Allowlist, pol *policy.Po
 	}
 	h.Proxy = proxy.New(allow, h.Log)
 	h.Proxy.Gate = h.Gate
-	if h.Proxy.Creds, h.Proxy.CA, err = setupCredentials(s, pol.Credentials); err != nil {
+	h.Proxy.Simulation = pol.Simulation
+	if h.Proxy.Creds, h.Proxy.CA, err = setupCredentials(s, pol.Credentials, pol.Simulation.Hosts()); err != nil {
 		return nil, err
+	}
+	if n := pol.Simulation.Len(); n > 0 {
+		fmt.Fprintf(os.Stderr, "airbag: simulating %s (%d stubs): answered by airbag, never contacted\n", strings.Join(pol.Simulation.Hosts(), ", "), n)
 	}
 	mr := mirror.New(filepath.Join(session.Root(), "mirror"), h.Log)
 	mr.Tainted = h.Gate.Tainted
