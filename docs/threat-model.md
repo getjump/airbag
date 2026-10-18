@@ -53,15 +53,17 @@ outside every Linux boundary airbag sets up. That channel is closed:
 
 - **Interop is unreachable.** WSL registers a binfmt_misc handler (`WSLInterop`)
   that matches the PE `MZ` magic and hands the file to `/init`, which asks the
-  Windows side to launch it over the Unix socket named in `WSL_INTEROP` (under
-  `/run/WSL`). The sandbox makes `/run` a private tmpfs, so that socket is not
-  there; and airbag drops `WSL_INTEROP` and `WSLENV` from the agent's
-  environment and strips the `/mnt/<drive>` Windows-PATH entries, so neither the
-  socket, the env bridge, nor a path to `cmd.exe`/`powershell.exe` reaches the
-  agent. A PE run by any route (absolute path, a copy into the workspace that
-  the binfmt match would catch, `/init` directly) finds no live interop socket
-  and does not reach Windows. `test/wsl-interop-e2e.sh` exercises each route and
-  asserts no Windows-side effect, with a positive control outside the sandbox.
+  Windows side to launch it over a Unix socket under `/run/WSL`, named in
+  `WSL_INTEROP`. The binfmt handler is the kernel's and still matches in the
+  sandbox, but the sandbox makes `/run` a private tmpfs, so no interop socket is
+  there: a PE run by any route (an absolute path, `PATH`, a copy in the
+  workspace, `/init` directly, or with `WSL_INTEROP` set by the agent itself)
+  fails and does not reach Windows. As a second layer airbag drops
+  `WSL_INTEROP` and `WSLENV` from the agent's environment and strips the
+  `/mnt/<drive>` Windows-PATH entries, so the agent is not handed a socket name,
+  an environment bridge or a bare `cmd.exe`. `test/wsl-interop-e2e.sh` runs each
+  route and checks from outside that nothing happened on Windows, against
+  controls outside the sandbox where the same commands do reach it.
 - **`/mnt/c` is read, not write.** The Windows drives are drvfs mounts; the
   recursive read-only remount of the host covers them, so a write to `/mnt/c`
   fails as anywhere else on the host. Reads are not blocked: as on Linux,

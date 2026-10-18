@@ -285,9 +285,10 @@ func agentEnvFor(s *session.Session, proxyAddr, binDir, runtimeDir string, extra
 		// WSL interop: WSL_INTEROP names the Unix socket that /init uses to
 		// launch Windows processes, which would run as the user outside
 		// every Linux boundary airbag sets up; WSLENV bridges environment
-		// variables across that boundary. The sandbox has no reason to reach
-		// Windows, so neither reaches the agent (the /mnt/<drive> PATH entries
-		// that lead to cmd.exe are stripped below).
+		// variables across that boundary. The socket itself is out of reach
+		// (it lives under /run, which the sandbox makes private); this is
+		// the second layer, so the agent is not handed its name either (the
+		// /mnt/<drive> PATH entries that lead to cmd.exe are stripped below).
 		"WSL_INTEROP": true, "WSLENV": true,
 	}
 	set := map[string]string{

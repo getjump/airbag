@@ -61,8 +61,9 @@ jobs:
           # toolchain: kernel-e2e and creds-e2e build helpers with it, and
           # kernel-e2e and mirror-e2e run go inside the sandbox. make drives
           # runtime-policy-e2e.sh (its absence has failed that check since
-          # 2026-10-06); gcc lets `go test -race` and cgo builds link.
-          additional-packages: ca-certificates curl fuse3 gcc git golang-go gpg make python3
+          # 2026-10-06); gcc with libc6-dev (its headers are only a
+          # recommendation of gcc) lets sdk-client-e2e run `go test -race`.
+          additional-packages: ca-certificates curl fuse3 gcc git golang-go gpg libc6-dev make python3
           # wsl-bash runs as this regular user; the setup uses -u root.
           wsl-shell-user: tester
 
