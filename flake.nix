@@ -15,7 +15,7 @@
           pname = "airbag";
           version = "0.1.0-dev";
           src = pkgs.lib.cleanSource ./.;
-          vendorHash = "sha256-EqTGfRRDeJg2EXnjaNb6FnLuZcf5pcc5aclGv4R0TLA=";
+          vendorHash = "sha256-mDSxXSK2dkpwJhchmR/pSt3kQ/58sD1ZF6NV3n76U84=";
           subPackages = [ "cmd/airbag" ];
           env.CGO_ENABLED = 0;
           # airbag version prints this, as for a release: v0.1.0-dev.
