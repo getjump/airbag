@@ -14,7 +14,7 @@ const CodexRequirementsPath = "/etc/codex/requirements.toml"
 // through, so the sandbox stays the boundary.
 func CodexRequirements() []byte {
 	var b strings.Builder
-	b.WriteString("# Written by airbag for this sandbox.\n[features]\nhooks = true\n")
+	b.WriteString("# Written by airbag for this sandbox.\nallow_login_shell = false\n[features]\nhooks = true\n")
 	for _, ev := range []string{"PreToolUse", "PostToolUse"} {
 		fmt.Fprintf(&b, "\n[[hooks.%s]]\nmatcher = \"*\"\n[[hooks.%s.hooks]]\ntype = \"command\"\ncommand = %q\ntimeout = 30\n",
 			ev, ev, HookCommand+" codex "+ev)

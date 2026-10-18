@@ -43,7 +43,7 @@ jobs:
           # A download cut off by the registry or the module proxy is
           # retried; a wrong checksum is not, go install fails the same way.
           retry() { for i in 1 2 3; do "$@" && return; echo "attempt $i failed: $*"; sleep $((i * 5)); done; return 1; }
-          retry npm install -g @anthropic-ai/claude-code@2.1.289 @openai/codex@0.160.0
+          retry npm install -g @anthropic-ai/claude-code@2.1.289 @openai/codex@0.160.1
           export GOBIN="$RUNNER_TEMP/bin"
           retry go install github.com/charmbracelet/freeze@v0.2.2
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
