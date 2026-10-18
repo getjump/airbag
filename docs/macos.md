@@ -117,8 +117,8 @@ So the clone stays the branch: an NFS overlay needs a server that keeps file
 handles valid for a tree that size and that git can write to, which the probe's
 does not. The prototype's profile leaves `trustd` out, so a Go program in the
 sandbox that uses the platform verifier (any with a go line before 1.27, or
-with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset) cannot verify TLS; generic runs keep it blocked unless `--allow-trustd` is requested. The
-named Codex launcher enables it, with the exception recorded below.
+with `SSL_CERT_FILE` and `SSL_CERT_DIR` unset) cannot verify TLS; runs keep it blocked unless `--allow-trustd` is requested. The
+named Codex launcher does too, with the exception recorded below.
 
 ### Order
 
@@ -136,7 +136,10 @@ prototype: CI runs its unit tests and `test/e2e.sh` on hosted macOS 15, 26
 and 26 Intel runners (the agent's workspace edits, the read-only `~`, unreadable
 secret files, the denied `memory/`, the outbox, review, apply and rollback),
 and a real Codex 0.160.1 TUI against a local mock model, with a running host
-daemon. It has not yet been used on real work or with Claude Code.
+daemon. `test/claude-mac-e2e.sh` runs the real Claude Code 2.1.291 TUI against
+a mock API: a `!` command, the Bash tool, workspace review and the push
+outbox. It uses a fake HOME and API key, so it does not validate a real
+account login. Neither has yet been used on real work.
 
 ```console
 $ go build ./cmd/airbag        # on the Mac, or GOOS=darwin GOARCH=arm64 elsewhere
@@ -145,6 +148,18 @@ $ cd ~/src/project
 $ ./airbag run -- claude --dangerously-skip-permissions
 $ ./airbag review              # then apply, apply --branch NAME, or discard
 ```
+
+Claude Code's macOS login is stored in Keychain, which this profile hides.
+Provide `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the host environment
+before starting airbag. `claude setup-token` outside airbag can create an OAuth
+token. A "Login expired" message inside the sandbox can mean the login is
+inaccessible, even when `claude auth status` outside it reports logged in.
+
+airbag sets both `TMPDIR` and `CLAUDE_CODE_TMPDIR` to the session's temp
+directory. Claude Code uses `/tmp` for its own files on macOS unless the
+[second variable](https://code.claude.com/docs/en/env-vars) is set; `TMPDIR`
+alone does not redirect those files. An inherited `CLAUDE_CODE_TMPDIR` is
+replaced, so a `!` command and the Bash tool do not need writes to host temp.
 
 | | Linux | macOS prototype |
 |---|---|---|
@@ -167,7 +182,7 @@ $ ./airbag review              # then apply, apply --branch NAME, or discard
 $ airbag codex yolo
 $ airbag codex yolo --allow api.example.com -- -m MODEL
 $ airbag codex yolo --session last -- resume --last
-$ airbag codex yolo --allow-trustd=false
+$ airbag codex yolo --allow-trustd
 ```
 
 The named launcher currently requires macOS. It starts Codex with
@@ -200,14 +215,15 @@ survives `--session` runs and is deleted by discard; it is never applied to
 HOME. Use both `--session last` and Codex `resume --last` to resume the same
 workspace branch and conversation.
 
-This launcher enables `--allow-trustd` for native TLS verification. The
-session records `allowlist-proxy+trustd` egress (plus any TCP forwards).
-The system trust service can make certificate-related requests outside
-airbag's allowlist proxy, which opens a potential exfiltration path.
-`--allow-trustd=false` disables that access; TLS clients using the platform
-verifier may then fail. Generic `airbag run` keeps trustd blocked unless
-explicitly enabled. The option only grants the trust service, not a Codex
-daemon socket or unrestricted TCP access.
+The launcher keeps the system trust service blocked, as `airbag run` does.
+A TLS client that verifies certificates with the platform verifier may then
+fail; `--allow-trustd` grants the service. The trust service can make
+certificate-related requests outside airbag's allowlist proxy, which opens a
+potential exfiltration path, so it is opt-in. A session with it records
+`allowlist-proxy+trustd` egress (plus any TCP forwards), and a resume keeps
+the recorded choice unless `--allow-trustd` is given again. The option only
+grants the trust service, not a Codex daemon socket or unrestricted TCP
+access.
 
 ### Experimental split execution
 
@@ -226,7 +242,8 @@ airbag starts a private `exec-server` under the workspace's Seatbelt profile.
 A private app-server and TUI use a second Seatbelt profile: they cannot read
 or write the clone, original workspace or executor's private state. They
 have their own login copy and state below the session's `control` directory,
-which the executor cannot access. Neither profile grants the shared host
+which the executor cannot access. The executor's own state gets no login:
+the commands it runs for the model cannot read one. Neither profile grants the shared host
 daemon socket. Both keep the session's network policy and trustd setting.
 
 The coordinator's environment registry excludes local execution. A private
@@ -249,6 +266,14 @@ resume refuse. Review remains available. There is no automatic recovery or
 unlock command; the marker must stay until an operator has established
 that no executor command survives. This conservative failure mode is a
 limit of the experiment.
+
+A clean exit does not prove cleanup either. Codex stops the process groups
+it started, but a command that leaves its group (`setsid`, a tool that
+daemonizes itself) is not tracked after the executor's normal exit, and no
+test yet shows that it is stopped. Such a process could keep writing to the
+clone after apply. Before applying a split session whose commands start
+background services, check that none survives (`ps`, or `lsof +D` on the
+clone).
 
 `test/codex-split-e2e.sh` drives the real pinned TUI with a mock model and
 an already running, separate fixture daemon. It checks clone-only writes,

@@ -79,6 +79,8 @@ func LaunchSource(id, home string) string {
 	return ""
 }
 
+// PrepareLaunchIn: Source is the host directory the file-based login is
+// copied from; an empty Source copies no login.
 type PrepareLaunchIn struct {
 	ID, Source, State string
 }
@@ -95,9 +97,13 @@ func PrepareLaunch(in PrepareLaunchIn) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("check private agent state: %w", err)
 	}
-	f, err := os.OpenFile(filepath.Join(in.Source, "auth.json"), os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read file-based login (auth.json must be a regular file): %w", err)
+	var f *os.File
+	if in.Source != "" {
+		var err error
+		f, err = os.OpenFile(filepath.Join(in.Source, "auth.json"), os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read file-based login (auth.json must be a regular file): %w", err)
+		}
 	}
 	var auth []byte
 	if f != nil {
@@ -117,30 +123,96 @@ func PrepareLaunch(in PrepareLaunchIn) error {
 			return errors.New("auth.json exceeds 1 MiB")
 		}
 	}
-	if err := os.Mkdir(in.State, 0o700); err != nil {
+	// The state is built beside its final path and renamed into place: an
+	// existing directory is never seeded again, so a seed cut short there
+	// would leave every later run of the session logged out.
+	tmp, err := os.MkdirTemp(filepath.Dir(in.State), ".agent-state-")
+	if err != nil {
 		return fmt.Errorf("create private agent state: %w", err)
 	}
+	defer func() { _ = os.RemoveAll(tmp) }()
 	if f != nil {
-		if err := os.WriteFile(filepath.Join(in.State, "auth.json"), auth, 0o600); err != nil {
+		if err := writeLogin(filepath.Join(tmp, "auth.json"), auth, 0o600); err != nil {
 			return fmt.Errorf("seed private agent login: %w", err)
 		}
+	}
+	if err := os.Rename(tmp, in.State); err != nil {
+		return fmt.Errorf("create private agent state: %w", err)
 	}
 	return prepareLaunchConfig(in.State)
 }
 
+// loginShellOff is the key the launcher needs in the private config:
+// login profiles can rebuild PATH and put a real git ahead of the shims.
+const loginShellOff = "allow_login_shell = false"
+
+// prepareLaunchConfig makes sure the private config turns login shells
+// off. Codex and the agent can both rewrite this file, so it is checked
+// on every run: a missing key is added, any other setting of it refuses.
 func prepareLaunchConfig(state string) error {
 	path := filepath.Join(state, "config.toml")
-	if _, err := os.Lstat(path); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("check private agent defaults: %w", err)
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return publishLaunchConfig(state, path, []byte(loginShellOff+"\n"))
 	}
+	if err != nil {
+		return fmt.Errorf("read private agent defaults (config.toml must be a regular file): %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > 1<<20 {
+		return errors.New("private config.toml must be a regular file smaller than 1 MiB")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	if err != nil {
+		return fmt.Errorf("read private agent defaults: %w", err)
+	}
+	set, err := loginShellSetting(data)
+	if err != nil {
+		return err
+	}
+	if set {
+		return nil
+	}
+	// A top-level key must come before the first table, so it goes first.
+	return publishLaunchConfig(state, path, append([]byte(loginShellOff+"\n"), data...))
+}
+
+// loginShellSetting reports whether data sets allow_login_shell = false at
+// the top level. Any other mention of the key is refused rather than
+// interpreted: a value of true, a key inside a table, or one this line
+// check cannot read.
+func loginShellSetting(data []byte) (bool, error) {
+	found, inTable := false, false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			inTable = true
+			continue
+		}
+		if !strings.Contains(trimmed, "allow_login_shell") || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, "=")
+		value, _, _ = strings.Cut(value, "#")
+		if !ok || inTable || strings.Trim(strings.TrimSpace(key), `"'`) != "allow_login_shell" || strings.TrimSpace(value) != "false" {
+			return false, errors.New("private Codex config.toml sets allow_login_shell other than top-level false; airbag needs login shells off to keep the shim PATH (remove the line)")
+		}
+		found = true
+	}
+	return found, nil
+}
+
+func publishLaunchConfig(state, path string, data []byte) error {
 	f, err := os.CreateTemp(state, ".config-")
 	if err != nil {
 		return fmt.Errorf("create private agent defaults: %w", err)
 	}
 	defer func() { _ = os.Remove(f.Name()) }()
-	if _, err := f.WriteString("allow_login_shell = false\n"); err != nil {
+	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("write private agent defaults: %w", err)
 	}
@@ -151,8 +223,11 @@ func prepareLaunchConfig(state string) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close private agent defaults: %w", err)
 	}
-	if err := os.Link(f.Name(), path); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := os.Rename(f.Name(), path); err != nil {
 		return fmt.Errorf("publish private agent defaults: %w", err)
 	}
 	return nil
 }
+
+// writeLogin is replaced in tests to cut a seed short.
+var writeLogin = os.WriteFile

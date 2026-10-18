@@ -43,16 +43,19 @@ On macOS, `airbag codex yolo` starts Codex with a private server and state
 directory. It copies only the file-based login from `CODEX_HOME` (or
 `~/.codex`); home settings, required MCP servers and host transcripts are
 not imported. Pass Codex arguments after `--`, for example
-`airbag codex yolo -- -m MODEL`. This launcher enables the macOS TLS trust
-service outside the network proxy; `--allow-trustd=false` keeps it blocked.
+`airbag codex yolo -- -m MODEL`. The macOS TLS trust service stays blocked,
+as in `airbag run`; `--allow-trustd` opens it, outside the network proxy, for
+a TLS client that fails without it.
 See [the macOS launcher](docs/macos.md#codex-launcher).
 
-The launcher defaults model shell tools to nonlogin shells to keep login
-profiles from resetting the shim PATH. Linux managed Codex settings enforce
-the same setting when airbag installs them. See [the outbox](docs/agent.md#outbox).
+The launcher defaults model shell tools to nonlogin shells, so login
+profiles do not reset the shim PATH; other startup files, such as
+`~/.zshenv` or `BASH_ENV`, still apply. On Linux the managed Codex settings
+airbag installs set the same, unless the host already has
+`/etc/codex/requirements.toml`. See [the outbox](docs/agent.md#outbox).
 
-`airbag codex yolo --execution=split` opts into a private coordinator and a
-sandboxed remote executor. It requires Codex 0.160.1 and supports new TUI
+`airbag codex yolo --execution=split` opts into an experimental private
+coordinator and a sandboxed remote executor. It requires Codex 0.160.1 and supports new TUI
 conversations only. See [split execution](docs/macos.md#experimental-split-execution)
 for the limits and crash quarantine.
 

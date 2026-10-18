@@ -217,6 +217,10 @@ jobs:
           sh test/codex-daemon-e2e.sh
           sh test/codex-exec-e2e.sh
           sh test/codex-split-e2e.sh
+      - name: Claude macOS regression
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.291
+          sh test/claude-mac-e2e.sh
 
   lint:
     if: github.event_name != 'schedule'

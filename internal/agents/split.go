@@ -41,7 +41,7 @@ func BindSplitRPC(in SplitBinding, raw []byte) ([]byte, error) {
 		return nil, errors.New("split RPC requires a method")
 	}
 	if method == "initialized" {
-		return raw, nil
+		return splitInitialized(msg)
 	}
 	if id, ok := msg["id"]; !ok || bytes.Equal(id, []byte("null")) {
 		return nil, errors.New("split RPC requires an id")
@@ -114,6 +114,33 @@ func BindSplitRPC(in SplitBinding, raw []byte) ([]byte, error) {
 	}
 	msg["params"] = encoded
 	return json.Marshal(msg)
+}
+
+// splitInitialized rebuilds the notification instead of forwarding the
+// frame: the app-server reads one request per line, and whitespace between
+// JSON tokens may hold newlines, so a raw frame could carry a second,
+// unfiltered request on its own line.
+func splitInitialized(msg map[string]json.RawMessage) ([]byte, error) {
+	out := map[string]string{"method": "initialized"}
+	for key, value := range msg {
+		switch key {
+		case "method":
+		case "params":
+			var params map[string]json.RawMessage
+			if !bytes.Equal(value, []byte("null")) && (json.Unmarshal(value, &params) != nil || len(params) != 0) {
+				return nil, errors.New("split execution refuses initialized parameters")
+			}
+		case "jsonrpc":
+			var version string
+			if json.Unmarshal(value, &version) != nil || version != "2.0" {
+				return nil, errors.New("split execution refuses initialized jsonrpc version")
+			}
+			out["jsonrpc"] = version
+		default:
+			return nil, fmt.Errorf("split execution refuses %q in initialized", key)
+		}
+	}
+	return json.Marshal(out)
 }
 
 type SplitCommandsIn struct {

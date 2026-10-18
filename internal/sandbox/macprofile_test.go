@@ -122,6 +122,27 @@ func TestPrivateLauncherProfile(t *testing.T) {
 	}
 }
 
+// A launcher session without the opt-in must not reach trustd: it is a
+// channel outside the proxy, the effect log and the secret label.
+func TestPrivateLauncherProfileWithoutTrustd(t *testing.T) {
+	t.Setenv("AIRBAG_HOME", t.TempDir())
+	s, err := session.Create(session.Meta{Workspace: t.TempDir(), Home: t.TempDir(), Clone: true,
+		Launcher: "codex-yolo", Passthrough: DefaultPassthrough})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(s.AgentStateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p, err := macProfile(s, 51234, filepath.Join(s.Dir, "tmp"), filepath.Join(s.Dir, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Trustd || strings.Contains(p.String(), seatbelt.TrustdService) {
+		t.Fatal("trustd reachable without --allow-trustd")
+	}
+}
+
 func TestFollowCanonicalizesMissingTargetAncestors(t *testing.T) {
 	root := t.TempDir()
 	real := filepath.Join(root, "real")

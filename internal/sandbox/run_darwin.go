@@ -56,7 +56,17 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 		return 1, errors.New("sandbox-exec not found: airbag needs macOS's Seatbelt")
 	}
 	if s.Launcher != "" {
-		if err := agents.PrepareLaunch(agents.PrepareLaunchIn{ID: s.Launcher, Source: agents.LaunchSource(s.Launcher, s.Home), State: s.AgentStateDir()}); err != nil {
+		source := agents.LaunchSource(s.Launcher, s.Home)
+		if agents.IsSplitLaunch(s.Launcher) {
+			// The executor runs the model's commands and its CODEX_HOME
+			// is this state: it gets no login. Only the coordinator holds
+			// one, in control/state, which the executor cannot read.
+			source = ""
+			if err := os.Remove(filepath.Join(s.AgentStateDir(), "auth.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return 1, fmt.Errorf("remove the executor's login copy: %w", err)
+			}
+		}
+		if err := agents.PrepareLaunch(agents.PrepareLaunchIn{ID: s.Launcher, Source: source, State: s.AgentStateDir()}); err != nil {
 			return 1, err
 		}
 	}
