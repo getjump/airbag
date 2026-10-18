@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/getjump/airbag/internal/agents"
 	"github.com/getjump/airbag/internal/policy"
 	"github.com/getjump/airbag/internal/session"
 	"github.com/getjump/airbag/proxy"
@@ -53,6 +54,11 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	}
 	if _, err := os.Stat("/usr/bin/sandbox-exec"); err != nil {
 		return 1, errors.New("sandbox-exec not found: airbag needs macOS's Seatbelt")
+	}
+	if s.Launcher != "" {
+		if err := agents.PrepareLaunch(agents.PrepareLaunchIn{ID: s.Launcher, Source: agents.LaunchSource(s.Launcher, s.Home), State: s.AgentStateDir()}); err != nil {
+			return 1, err
+		}
 	}
 	if err := cloneWorkspace(s); err != nil {
 		return 1, err
@@ -122,7 +128,11 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	cmd.Dir = filepath.Join(s.CloneDir(), rel)
 	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	fmt.Fprintf(os.Stderr, "airbag: macOS prototype: the agent works in a clone at %s; ~ is read-only apart from agent state; secret files are hidden, not tracked\n", cmd.Dir)
+	homeState := "~ is read-only apart from agent state"
+	if s.Launcher != "" {
+		homeState = "~ is read-only; agent state stays in this session"
+	}
+	fmt.Fprintf(os.Stderr, "airbag: macOS prototype: the agent works in a clone at %s; %s; secret files are hidden, not tracked\n", cmd.Dir, homeState)
 
 	// Ctrl-C belongs to the agent, which shares the terminal here.
 	swallow(os.Interrupt, syscall.SIGQUIT)
