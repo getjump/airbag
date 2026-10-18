@@ -159,7 +159,8 @@ except OSError:
     print("unreachable")'
 outside=$(python3 -c "$reach" "$host" 2>&1)
 [ "$outside" = reachable ] || need "control: $host:53 is not reachable outside the sandbox ($outside)"
-inside=$(run python3 -c "$reach" "$host" 2>&1)
+# stdout only: airbag's own session lines go to stderr.
+inside=$(run python3 -c "$reach" "$host" 2>/dev/null)
 discard
 [ "$inside" = unreachable ] || fail "ESCAPE: the Windows host network ($host:53) is reachable inside: $inside"
 echo "blocked: Windows host network $host:53 (reachable outside, not inside)"
