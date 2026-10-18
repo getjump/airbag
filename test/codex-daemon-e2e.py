@@ -107,7 +107,10 @@ def main(mode="sandbox"):
                 # Only the coordinator holds the login: the executor, which
                 # runs this command, must have no copy in its CODEX_HOME.
                 (source / 'auth.json').write_text('{"OPENAI_API_KEY":"sk-e2e-host-login"}')
-                task = 'if cat "$CODEX_HOME/../control/state/environments.toml" >/dev/null 2>&1; then exit 91; fi; if (echo corrupt > "$HOME/canary.txt") 2>/dev/null; then exit 92; fi; if [ -e "$CODEX_HOME/auth.json" ]; then exit 93; fi; ' + f'if cat "{source}/auth.json" >/dev/null 2>&1; then exit 94; fi; ' + task
+                # The TUI folds a long command: 'from-codex', which the test
+                # waits for on screen, comes first. A failed check exits before
+                # rm, and review then lacks the README.md deletion.
+                task = 'echo from-codex > codex.txt; if cat "$CODEX_HOME/../control/state/environments.toml" >/dev/null 2>&1; then exit 91; fi; if (echo corrupt > "$HOME/canary.txt") 2>/dev/null; then exit 92; fi; if [ -e "$CODEX_HOME/auth.json" ]; then exit 93; fi; if cat "$HOME/.codex/auth.json" >/dev/null 2>&1; then exit 94; fi; rm README.md'
             background = mode.startswith('split-crash') or mode == 'split-eof'
             if background:
                 task = 'echo $$ > writer.pid; while :; do echo tick >> heartbeat; sleep 0.05; done'
