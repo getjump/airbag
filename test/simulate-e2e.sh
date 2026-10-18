@@ -128,7 +128,7 @@ echo "curl-own-roots|\$(one curl -sS --max-time 20 --cacert "$T/own-roots.pem" h
 echo "python|\$(one py https://api.pay.test/v1/charges/ch_2)"
 if command -v node >/dev/null; then
 	echo "node-version|\$(node -p process.versions.node 2>&1)"
-	echo "node|\$(one env NODE_USE_ENV_PROXY=1 node -e "fetch('https://api.pay.test/v1/charges/ch_3').then(async r => console.log(r.status, (await r.text()).trim())).catch(e => console.log('ERR', (e.cause && (e.cause.code || e.cause.message)) || e.message))")"
+	echo "node|\$(one env NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 node -e "fetch('https://api.pay.test/v1/charges/ch_3').then(async r => console.log(r.status, (await r.text()).trim())).catch(e => console.log('ERR', (e.cause && (e.cause.code || e.cause.message)) || e.message))")"
 fi
 echo "go|\$(one "$T/simclient" https://api.pay.test/v1/charges/ch_4)"
 echo "go-post|\$(one "$T/simclient" -data amount=100 https://api.pay.test/v1/charges)"

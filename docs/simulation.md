@@ -152,7 +152,9 @@ Blocked    1 by policy
 changed), and the refused ones in `blocked` with kind `net.simulated`. In the
 effect log (`airbag log`), each request is a `net.simulated` row: `allow` with
 the stub's name, or `deny` with the reason. A row holds the method, the host and
-the path; never the query, the headers or the body.
+the path as sent (percent-encoded, so a `%0a` in it stays `%0a`); never the
+query, the headers or the body. Review quotes any field that holds a character
+that is not printable.
 
 ## The safety model
 

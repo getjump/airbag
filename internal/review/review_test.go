@@ -641,3 +641,29 @@ func TestReportSimulated(t *testing.T) {
 		}
 	}
 }
+
+// A target is what the agent sent: an escape sequence, a carriage
+// return or a line break in it must not reach the terminal raw, where
+// it could erase a review line or write a fake one.
+func TestReportSimulatedTargetIsShownSafely(t *testing.T) {
+	s := fakeSession(t)
+	evil := "GET api.pay.test/v1/\x1b[2K\rSimulated  0 answered\nBlocked    0 by policy"
+	effs := []effects.Effect{
+		{Kind: "net.simulated", Target: evil, Verdict: "allow", Reason: "charge\x1b]0;title\a"},
+		{Kind: "net.simulated", Target: evil, Verdict: "deny", Reason: "no stub matches\r\x1b[1A"},
+	}
+	var b strings.Builder
+	Render(&b, s, nil, effs, nil, nil)
+	out := b.String()
+	if strings.ContainsAny(out, "\x1b\r\a") {
+		t.Fatalf("a control character reached the review:\n%q", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Blocked    0") || strings.HasPrefix(line, "Simulated  0") {
+			t.Fatalf("the target started a line of its own: %q", line)
+		}
+	}
+	if !strings.Contains(out, `"GET api.pay.test/v1/\x1b[2K\rSimulated  0 answered\nBlocked    0 by policy" ×1`) {
+		t.Fatalf("the target is not shown quoted:\n%s", out)
+	}
+}

@@ -427,3 +427,29 @@ func TestSimulatedOtherHostHeader(t *testing.T) {
 	tr.never(t, "control.test")
 	tr.never(t, "pay.test")
 }
+
+// The log holds a request's path as sent, percent-encoded: decoded, a
+// %0a or %1b would put a line break or an escape sequence the agent
+// chose in the log, and on the terminal of whoever reads it.
+func TestSimulatedLogsThePathAsSent(t *testing.T) {
+	stubs := []simulate.Stub{{Name: "any", Match: simulate.Match{Host: "api.pay.test", Path: "/v1/**"}, Respond: simulate.Respond{Body: "ok"}}}
+	_, c, path, _, _ := simProxy(t, stubs, nil)
+	if code, body, _ := do(t, c, http.MethodGet, "https://api.pay.test/v1/a%1b%5B2K%0d%0aSimulated", ""); code != 200 || body != "ok" {
+		t.Fatalf("%d %q", code, body)
+	}
+	if code, _, _ := do(t, c, http.MethodGet, "https://api.pay.test/v2/%1b%0a", ""); code != 403 {
+		t.Fatalf("%d", code)
+	}
+	effs, _ := effects.Read(path)
+	if len(effs) != 2 {
+		t.Fatalf("%+v", effs)
+	}
+	for _, e := range effs {
+		if strings.ContainsFunc(e.Target+e.Reason, func(r rune) bool { return r < ' ' || r == 0x7f }) {
+			t.Fatalf("a control character in the log: %q", e.Target+" "+e.Reason)
+		}
+	}
+	if effs[0].Target != "GET api.pay.test/v1/a%1b%5B2K%0d%0aSimulated" || effs[1].Target != "GET api.pay.test/v2/%1b%0a" {
+		t.Fatalf("targets %q, %q", effs[0].Target, effs[1].Target)
+	}
+}

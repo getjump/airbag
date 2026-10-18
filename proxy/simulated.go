@@ -51,7 +51,7 @@ func (p *Proxy) serveSimulated(w http.ResponseWriter, r *http.Request, host, por
 		// The connection is to the CONNECT's host, and its stubs answer;
 		// a request naming another host there is not one of them.
 		if req.Host != "" && !sameHost(req.Host, target) {
-			p.Log.Add(audit.Event{Kind: simulate.Kind, Target: clipTarget(req.Method + " " + host + req.URL.Path), Verdict: "deny", Reason: "Host " + clipTarget(req.Host) + " is not the connection's host"})
+			p.Log.Add(audit.Event{Kind: simulate.Kind, Target: clipTarget(req.Method + " " + host + req.URL.EscapedPath()), Verdict: "deny", Reason: "Host " + clipTarget(strconv.Quote(req.Host)) + " is not the connection's host"})
 			http.Error(w, "airbag: Host "+req.Host+" is not "+host+", the simulated host this connection is to", http.StatusForbidden)
 			return
 		}
@@ -65,9 +65,12 @@ func (p *Proxy) serveSimulated(w http.ResponseWriter, r *http.Request, host, por
 // intercepted ones of credentials do) or as a plain proxy request.
 func (p *Proxy) stub(w http.ResponseWriter, req *http.Request, host, port string, tls bool, f *flow) {
 	rc := http.NewResponseController(w)
-	what := host + req.URL.Path
+	// The path as sent, percent-encoded: decoded, %0a and %1b would put a
+	// line break or an escape sequence the agent chose in the log and on
+	// the user's terminal in review.
+	what := host + req.URL.EscapedPath()
 	if (tls && port != "443") || (!tls && port != "80") {
-		what = net.JoinHostPort(host, port) + req.URL.Path
+		what = net.JoinHostPort(host, port) + req.URL.EscapedPath()
 	}
 	target := clipTarget(req.Method + " " + what)
 	refuse := func(msg string, code int) {
