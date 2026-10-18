@@ -1,0 +1,51 @@
+name: nix
+# The README advertises `nix run github:getjump/airbag`, but no job
+# builds the flake, so a stale vendorHash or a nixpkgs bump can break it
+# unnoticed. This builds the flake (`nix flake check` runs the unit
+# tests in checks.unit) and runs the binary it produces.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/nix.yml'
+  pull_request:
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/nix.yml'
+  schedule:
+    # A channel or dependency bump can rot the vendorHash with no code
+    # change, so build it weekly as well.
+    - cron: "7 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  flake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: nix flake check
+        run: nix flake check -L
+      - name: nix run . -- version
+        run: nix run . -- version

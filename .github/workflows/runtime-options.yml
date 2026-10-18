@@ -8,6 +8,11 @@ on:
       - 'test/runtime*'
       - 'test/runtimecheck/**'
       - '.github/workflows/runtime-options.yml'
+  # The path filter above means a backend change reached through another
+  # path (a shared helper, a dependency) never runs this suite on its PR.
+  # A weekly run on main catches such a regression even so.
+  schedule:
+    - cron: "41 5 * * 1"
   workflow_dispatch:
 
 permissions: {}
@@ -18,8 +23,10 @@ concurrency:
 jobs:
   compare:
     # Only this repository's own experimental branches; no privileged setup
-    # in fork PRs and no repository secrets passed to workloads.
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    # in fork PRs and no repository secrets passed to workloads. A
+    # scheduled or dispatched run is the repository's own; a pull_request
+    # one runs only when it is not from a fork.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
