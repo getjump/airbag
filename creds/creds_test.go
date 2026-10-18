@@ -192,6 +192,14 @@ func TestForMalformedHosts(t *testing.T) {
 		"a.example.com:notaport",
 		"x.api.github.com",        // exact entry: a subdomain is not the host
 		"api.github.com.evil.com", // the bound host as a label, not the whole name
+		// A zoned IPv6 address: netip.ParseAddr accepts the '%zone' as
+		// arbitrary text, so the zone can end in the bound domain, but an
+		// address is no name and a wildcard must not cover it by suffix.
+		"::1%.example.com",
+		"[::1%.example.com]:443",
+		"2606:4700::1%x.example.com",
+		"::1%.EXAMPLE.COM",  // the zone keeps its case; refused all the same
+		"::1%.example.com.", // and with a trailing dot
 	} {
 		if l := s.For(h); l != nil {
 			t.Errorf("For(%q) = %q, want no credential", h, l.Name)
@@ -202,6 +210,34 @@ func TestForMalformedHosts(t *testing.T) {
 	for _, h := range []string{"a.example.com", "a.example.com:443", "A.Example.Com.", "x.y.example.com", "api.github.com:443"} {
 		if s.For(h) == nil {
 			t.Errorf("For(%q) = nil, want the credential", h)
+		}
+	}
+}
+
+// An address is bound and matched only as that exact address: a wildcard
+// never covers one by suffix, and a bound address is never handed to a
+// different host. This is the kind rule behind the zoned-address refusal
+// above.
+func TestForAddressKind(t *testing.T) {
+	s := Set{
+		&Live{Name: "ip", Hosts: []string{"203.0.113.5", "[2001:db8::1]:443"}, Value: "v1", Placeholder: "p1"},
+		&Live{Name: "wild", Hosts: []string{"*.example.com"}, Value: "v2", Placeholder: "p2"},
+	}
+	for h, want := range map[string]string{
+		"203.0.113.5:443":                "ip",   // exact IPv4
+		"[2001:db8::1]:443":              "ip",   // exact IPv6
+		"[2001:0db8::1]:443":             "ip",   // same address, another spelling
+		"203.0.113.5:8443":               "",     // right address, wrong port
+		"[2001:db8::2]:443":              "",     // a different address matches nothing
+		"a.example.com:443":              "wild", // a name still matches its wildcard
+		"[2001:db8::1%.example.com]:443": "",     // a zone ending in the domain does not reach the wildcard
+	} {
+		got := ""
+		if l := s.For(h); l != nil {
+			got = l.Name
+		}
+		if got != want {
+			t.Errorf("For(%q) = %q, want %q", h, got, want)
 		}
 	}
 }

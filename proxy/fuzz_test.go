@@ -17,7 +17,7 @@ import (
 // IPv6-like prefix that is no address ("::.example.com") -- is no host
 // and must match neither, however its tail reads.
 func FuzzAllowlist(f *testing.F) {
-	for _, h := range []string{"example.com", "a.example.com", "notexample.com", "A.Example.com.", "x.a.example.com", ".example.com", "api.github.com", ".EXAmple.Com[", "[a.example.com]", "[api.github.com]", "].eXAmple.Com", "::.EXAmple.Com", "a..example.com", "a.example.com:443"} {
+	for _, h := range []string{"example.com", "a.example.com", "notexample.com", "A.Example.com.", "x.a.example.com", ".example.com", "api.github.com", ".EXAmple.Com[", "[a.example.com]", "[api.github.com]", "].eXAmple.Com", "::.EXAmple.Com", "a..example.com", "a.example.com:443", "::1%.example.com", "2606:4700::1%x.example.com"} {
 		f.Add(h)
 	}
 	f.Fuzz(func(t *testing.T, host string) {

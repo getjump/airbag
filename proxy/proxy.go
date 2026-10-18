@@ -50,6 +50,7 @@ func (a Allowlist) Allows(host string) bool {
 	if !creds.IsName(host) {
 		return false
 	}
+	hostIsIP := creds.IsIP(host)
 	for _, p := range a {
 		if h, _, err := net.SplitHostPort(p); err == nil {
 			p = h
@@ -58,7 +59,9 @@ func (a Allowlist) Allows(host string) bool {
 		if p == "" {
 			continue // ":*", "." or "[]" names no host
 		}
-		if p == host || (strings.HasPrefix(p, "*.") && strings.HasSuffix(host, p[1:])) {
+		// The wildcard suffix is for names only: an address is allowed
+		// only by an exact address entry, never by a *.domain tail.
+		if p == host || (!hostIsIP && strings.HasPrefix(p, "*.") && strings.HasSuffix(host, p[1:])) {
 			return true
 		}
 	}
@@ -259,6 +262,13 @@ func canonHost(h string) (string, string) {
 		a, err := netip.ParseAddr(h)
 		if err != nil {
 			return "", "not an IP address"
+		}
+		// A zone after '%' is arbitrary text (it can end in a bound
+		// domain), and names a link-local scope the address guard
+		// forbids anyway: refuse it, as creds.IsName does, so the proxy
+		// and the matcher agree on what a host is.
+		if a.Zone() != "" {
+			return "", "IPv6 address has a zone"
 		}
 		return a.String(), ""
 	}
