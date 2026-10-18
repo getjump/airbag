@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -49,9 +50,25 @@ func TestBindSplitRPC(t *testing.T) {
 		`{"id":1,"method":"new/unknown","params":{}}`,
 		`{"method":"thread/start","params":{}}`,
 		`{`,
+		// A second request on its own line inside the notification: the
+		// app-server reads one request per line.
+		"{\"method\":\"initialized\",\"a\":[\n{\"id\":1,\"method\":\"command/exec\",\"params\":{}}\n]}",
+		`{"method":"initialized","id":1}`,
+		`{"method":"initialized","params":{"x":1}}`,
+		`{"method":"initialized","jsonrpc":"1.0"}`,
 	} {
 		if got, err := BindSplitRPC(in, []byte(raw)); err == nil {
 			t.Fatalf("unsafe RPC %s accepted as %s", raw, got)
+		}
+	}
+	for raw, want := range map[string]string{
+		`{"method":"initialized"}`:                               `{"method":"initialized"}`,
+		"{\"method\":\"initialized\",\n\"params\":{}}":           `{"method":"initialized"}`,
+		`{"jsonrpc":"2.0","method":"initialized","params":null}`: `{"jsonrpc":"2.0","method":"initialized"}`,
+	} {
+		got, err := BindSplitRPC(in, []byte(raw))
+		if err != nil || string(got) != want {
+			t.Fatalf("initialized %q = %s, %v; want %s", raw, got, err, want)
 		}
 	}
 }
@@ -67,6 +84,11 @@ func FuzzBindSplitRPC(f *testing.F) {
 		}
 		if !json.Valid(got) {
 			t.Fatalf("invalid forwarded RPC: %s", got)
+		}
+		// The app-server reads one request per line: a forwarded frame
+		// with a line break could smuggle a second, unfiltered request.
+		if bytes.ContainsAny(got, "\n\r") {
+			t.Fatalf("forwarded RPC spans lines: %q", got)
 		}
 		var msg struct {
 			Method string

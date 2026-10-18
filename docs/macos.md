@@ -229,7 +229,8 @@ airbag starts a private `exec-server` under the workspace's Seatbelt profile.
 A private app-server and TUI use a second Seatbelt profile: they cannot read
 or write the clone, original workspace or executor's private state. They
 have their own login copy and state below the session's `control` directory,
-which the executor cannot access. Neither profile grants the shared host
+which the executor cannot access. The executor's own state gets no login:
+the commands it runs for the model cannot read one. Neither profile grants the shared host
 daemon socket. Both keep the session's network policy and trustd setting.
 
 The coordinator's environment registry excludes local execution. A private
@@ -252,6 +253,14 @@ resume refuse. Review remains available. There is no automatic recovery or
 unlock command; the marker must stay until an operator has established
 that no executor command survives. This conservative failure mode is a
 limit of the experiment.
+
+A clean exit does not prove cleanup either. Codex stops the process groups
+it started, but a command that leaves its group (`setsid`, a tool that
+daemonizes itself) is not tracked after the executor's normal exit, and no
+test yet shows that it is stopped. Such a process could keep writing to the
+clone after apply. Before applying a split session whose commands start
+background services, check that none survives (`ps`, or `lsof +D` on the
+clone).
 
 `test/codex-split-e2e.sh` drives the real pinned TUI with a mock model and
 an already running, separate fixture daemon. It checks clone-only writes,

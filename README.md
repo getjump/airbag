@@ -48,8 +48,8 @@ as in `airbag run`; `--allow-trustd` opens it, outside the network proxy, for
 a TLS client that fails without it.
 See [the macOS launcher](docs/macos.md#codex-launcher).
 
-`airbag codex yolo --execution=split` opts into a private coordinator and a
-sandboxed remote executor. It requires Codex 0.160.1 and supports new TUI
+`airbag codex yolo --execution=split` opts into an experimental private
+coordinator and a sandboxed remote executor. It requires Codex 0.160.1 and supports new TUI
 conversations only. See [split execution](docs/macos.md#experimental-split-execution)
 for the limits and crash quarantine.
 

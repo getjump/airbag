@@ -105,6 +105,23 @@ func TestPrepareLaunchFailedSeedLeavesNoState(t *testing.T) {
 	}
 }
 
+// The split executor's state is prepared with no source: it must get no
+// login, whatever directory airbag runs from.
+func TestPrepareLaunchWithoutSourceCopiesNoLogin(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "auth.json"), []byte("login"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+	state := filepath.Join(t.TempDir(), "agent-state")
+	if err := PrepareLaunch(PrepareLaunchIn{ID: "codex-yolo-split", State: state}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "auth.json")); !os.IsNotExist(err) {
+		t.Fatalf("login copied without a source: %v", err)
+	}
+}
+
 func TestPrepareLaunchRejectsStateSymlink(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state")
 	target := t.TempDir()

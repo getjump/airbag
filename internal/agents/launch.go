@@ -76,6 +76,8 @@ func LaunchSource(id, home string) string {
 	return ""
 }
 
+// PrepareLaunchIn: Source is the host directory the file-based login is
+// copied from; an empty Source copies no login.
 type PrepareLaunchIn struct {
 	ID, Source, State string
 }
@@ -92,9 +94,13 @@ func PrepareLaunch(in PrepareLaunchIn) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("check private agent state: %w", err)
 	}
-	f, err := os.OpenFile(filepath.Join(in.Source, "auth.json"), os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read file-based login (auth.json must be a regular file): %w", err)
+	var f *os.File
+	if in.Source != "" {
+		var err error
+		f, err = os.OpenFile(filepath.Join(in.Source, "auth.json"), os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read file-based login (auth.json must be a regular file): %w", err)
+		}
 	}
 	var auth []byte
 	if f != nil {

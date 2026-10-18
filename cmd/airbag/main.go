@@ -56,6 +56,7 @@ const usage = `airbag — approve outcomes, not commands
 
   airbag codex yolo [--execution=split] [airbag flags] -- [codex arguments]
       macOS: private agent state and server; no shared host daemon
+      (--execution=split is experimental)
   airbag run [--allow HOST]... [--no-home] [--session ID|last] -- AGENT [ARGS...]
       run the agent in a branch of the workspace and $HOME (--session: on the
       branch of a stopped session, with its outbox and labels)

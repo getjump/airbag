@@ -96,7 +96,10 @@ def main(mode="sandbox"):
             script = root / 'calls.json'
             task = 'rm README.md; echo from-codex > codex.txt'
             if mode == 'split':
-                task = 'if cat "$CODEX_HOME/../control/state/environments.toml" >/dev/null 2>&1; then exit 91; fi; if (echo corrupt > "$HOME/canary.txt") 2>/dev/null; then exit 92; fi; ' + task
+                # Only the coordinator holds the login: the executor, which
+                # runs this command, must have no copy in its CODEX_HOME.
+                (source / 'auth.json').write_text('{"OPENAI_API_KEY":"sk-e2e-host-login"}')
+                task = 'if cat "$CODEX_HOME/../control/state/environments.toml" >/dev/null 2>&1; then exit 91; fi; if (echo corrupt > "$HOME/canary.txt") 2>/dev/null; then exit 92; fi; if [ -e "$CODEX_HOME/auth.json" ]; then exit 93; fi; ' + task
             background = mode.startswith('split-crash') or mode == 'split-eof'
             if background:
                 task = 'echo $$ > writer.pid; while :; do echo tick >> heartbeat; sleep 0.05; done'
