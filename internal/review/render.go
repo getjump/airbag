@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/getjump/airbag/internal/effects"
 	"github.com/getjump/airbag/internal/session"
@@ -180,6 +181,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 		fmt.Fprintf(w, "           %d cut when a secret was read%s\n", total(cut), hostList(cut))
 	}
 	renderRequests(w, effs)
+	renderSimulated(w, effs)
 
 	if len(sts) > 0 {
 		renderSteps(w, sts)
@@ -203,7 +205,7 @@ func Render(w io.Writer, s *session.Session, cs []Change, effs []effects.Effect,
 	if len(blocked) > 0 {
 		fmt.Fprintf(w, "\nBlocked    %d by policy\n", len(blocked))
 		for _, e := range blocked {
-			fmt.Fprintf(w, "  %-4s %-40s %s\n", e.Verdict, clip(e.Target, 40), e.Reason)
+			fmt.Fprintf(w, "  %-4s %-40s %s\n", e.Verdict, clip(shown(e.Target), 40), shown(e.Reason))
 		}
 	}
 	dropped := map[string]int{}
@@ -713,6 +715,42 @@ func renderRequests(w io.Writer, effs []effects.Effect) {
 		}
 		fmt.Fprintf(w, "  %s ×%d%s\n", k, reqs[k], note)
 	}
+}
+
+// renderSimulated lists the requests stubs answered: what the code
+// tried to call, none of which reached its host.
+func renderSimulated(w io.Writer, effs []effects.Effect) {
+	sim := simulated(effs)
+	if len(sim) == 0 {
+		return
+	}
+	n := 0
+	for _, s := range sim {
+		n += s.Count
+	}
+	fmt.Fprintf(w, "Simulated  %d answered from stubs, none sent to the host\n", n)
+	for i, s := range sim {
+		if i == maxListed {
+			fmt.Fprintf(w, "  … and %d more\n", len(sim)-maxListed)
+			break
+		}
+		fmt.Fprintf(w, "  %s ×%d  by %s\n", shown(s.Target), s.Count, shown(s.Stub))
+	}
+}
+
+// shown is s on one line, as a Go string literal when it holds a
+// character that is not printable: a control character, an escape
+// sequence, a bidirectional control or bytes that are not UTF-8. What
+// the agent sent (a request's target, say) then cannot move the cursor,
+// erase a line or start a line of its own in the review. term.Safe on
+// the way out escapes controls too, but keeps line breaks.
+func shown(s string) string {
+	for _, r := range s {
+		if r == utf8.RuneError || !strconv.IsPrint(r) {
+			return strconv.Quote(s)
+		}
+	}
+	return s
 }
 
 // specialName names a type of file that is neither a regular file, a

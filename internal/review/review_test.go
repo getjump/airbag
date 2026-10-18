@@ -2,6 +2,7 @@ package review
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -596,5 +597,73 @@ func TestScanDoesNotWaitOnAFIFO(t *testing.T) {
 			}
 			t.Fatalf("%s: the scan or its diff waited on a FIFO", name)
 		}
+	}
+}
+
+// Requests a stub answered are counted by target and stub, in the JSON
+// and the text; one no stub matched, or a failed TLS, is blocked and
+// needs a decision. A simulated host is never among those reached.
+func TestReportSimulated(t *testing.T) {
+	s := fakeSession(t)
+	effs := []effects.Effect{
+		{Kind: "net.simulated", Target: "POST api.pay.test/v1/charges", Verdict: "allow", Reason: "charge"},
+		{Kind: "net.simulated", Target: "POST api.pay.test/v1/charges", Verdict: "allow", Reason: "charge"},
+		{Kind: "net.simulated", Target: "GET status.pay.test/", Verdict: "allow", Reason: "down"},
+		{Kind: "net.simulated", Target: "GET api.pay.test/v1/refunds", Verdict: "deny", Reason: "no stub matches"},
+	}
+	r := BuildReport(s, nil, effs, nil, nil)
+	want := []ReportSimulated{{Target: "POST api.pay.test/v1/charges", Stub: "charge", Count: 2}, {Target: "GET status.pay.test/", Stub: "down", Count: 1}}
+	if fmt.Sprint(r.Network.Simulated) != fmt.Sprint(want) {
+		t.Fatalf("simulated %+v", r.Network.Simulated)
+	}
+	if len(r.Network.Allowed) != 0 || len(r.Blocked) != 1 || r.Blocked[0].Target != "GET api.pay.test/v1/refunds" || r.Blocked[0].Reason != "no stub matches" {
+		t.Fatalf("network %+v blocked %+v", r.Network, r.Blocked)
+	}
+	if a := r.Attention; len(a) != 1 || a[0].What != "blocked" {
+		t.Fatalf("attention %+v", a)
+	}
+	var b strings.Builder
+	if err := WriteJSON(&b, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), `"simulated": [`) || !strings.Contains(b.String(), `"stub": "charge"`) {
+		t.Fatalf("JSON:\n%s", b.String())
+	}
+	b.Reset()
+	if err := WriteJSON(&b, BuildReport(s, nil, nil, nil, nil)); err != nil || !strings.Contains(b.String(), `"simulated": []`) {
+		t.Fatalf("an empty review has no simulated list: %v\n%s", err, b.String())
+	}
+	b.Reset()
+	Render(&b, s, nil, effs, nil, nil)
+	for _, line := range []string{"Simulated  3 answered from stubs, none sent to the host", "  POST api.pay.test/v1/charges ×2  by charge", "  GET status.pay.test/ ×1  by down", "deny GET api.pay.test/v1/refunds"} {
+		if !strings.Contains(b.String(), line) {
+			t.Errorf("review lacks %q:\n%s", line, b.String())
+		}
+	}
+}
+
+// A target is what the agent sent: an escape sequence, a carriage
+// return or a line break in it must not reach the terminal raw, where
+// it could erase a review line or write a fake one.
+func TestReportSimulatedTargetIsShownSafely(t *testing.T) {
+	s := fakeSession(t)
+	evil := "GET api.pay.test/v1/\x1b[2K\rSimulated  0 answered\nBlocked    0 by policy"
+	effs := []effects.Effect{
+		{Kind: "net.simulated", Target: evil, Verdict: "allow", Reason: "charge\x1b]0;title\a"},
+		{Kind: "net.simulated", Target: evil, Verdict: "deny", Reason: "no stub matches\r\x1b[1A"},
+	}
+	var b strings.Builder
+	Render(&b, s, nil, effs, nil, nil)
+	out := b.String()
+	if strings.ContainsAny(out, "\x1b\r\a") {
+		t.Fatalf("a control character reached the review:\n%q", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Blocked    0") || strings.HasPrefix(line, "Simulated  0") {
+			t.Fatalf("the target started a line of its own: %q", line)
+		}
+	}
+	if !strings.Contains(out, `"GET api.pay.test/v1/\x1b[2K\rSimulated  0 answered\nBlocked    0 by policy" ×1`) {
+		t.Fatalf("the target is not shown quoted:\n%s", out)
 	}
 }

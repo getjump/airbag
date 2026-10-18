@@ -18,7 +18,9 @@ for review and early refusals; scripts and programs they do not cover are
 Tests: `go test ./...`, then as a regular user every `test/*e2e.sh` and
 `python3 test/ctrlc.py` (CI runs them on each push); `test/claude-e2e.sh` and
 `test/codex-e2e.sh` drive the real Claude Code and Codex binaries against
-`test/mockapi`, a scripted mock of the Messages and Responses APIs. With a real login, follow [manual-test.md](manual-test.md).
+`test/mockapi`, a scripted mock of the Messages and Responses APIs;
+`test/simulate-e2e.sh` runs curl, Python, Node, a Go program and Claude Code
+against stubbed hosts. With a real login, follow [manual-test.md](manual-test.md).
 
 Each session keeps one SQLite database, `effects.db`: the effect log and the
 outbox, with the history of every intent's status. Triggers make all of it

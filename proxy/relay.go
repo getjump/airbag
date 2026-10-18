@@ -86,6 +86,7 @@ func (p *Proxy) limits() Limits {
 // goroutine waits for it. The quiet counts from begin.
 type flow struct {
 	host, target string // for Cut and its log
+	local        bool   // answered by the proxy itself (a simulated host): nothing to cut
 	idle, drain  time.Duration
 	now          func() time.Time // the clock quiet is measured by
 	start        time.Time

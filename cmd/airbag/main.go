@@ -62,6 +62,7 @@ const usage = `airbag — approve outcomes, not commands
       --fs-policy: Linux FUSE audit/policy; --exec-policy: Linux exec notification audit/policy
       --runtime-audit=durable|buffered: commit-before-allow or bounded background audit
       --runtime-profile: diagnostic timings; --fs-cache=sealed: cache immutable backing files
+      --simulate FILE: answer the hosts its stubs name from them, never contacting them
   airbag review [ID] [--json | --attention]
                               what the agent changed, sent and queued; --json for
                               tools, --attention for only what needs a decision
@@ -214,6 +215,7 @@ func cmdRunLauncher(args []string, launcher string) (int, error) {
 	runtimeProfile := fs.Bool("runtime-profile", false, "Linux: save runtime gate, audit and FUSE diagnostic timings in the session")
 	resume := fs.String("session", "", "run on the branch of a stopped session (its ID, or last) instead of a new one")
 	nixDaemon := fs.Bool("nix-daemon", false, "let the agent use the Nix daemon; its builds and substitutes reach the network outside airbag's proxy")
+	simulateFile := fs.String("simulate", "", "answer requests to the hosts this file's stubs name from the stubs; those hosts are never contacted (docs/simulation.md)")
 	_ = fs.Parse(args)
 	if runtime.GOOS != "darwin" && (launcher != "" || *trustd) {
 		return 2, errors.New("named launchers and --allow-trustd currently require macOS")
@@ -272,6 +274,11 @@ func cmdRunLauncher(args []string, launcher string) (int, error) {
 	pol, err := policy.Load(ws, home)
 	if err != nil {
 		return 1, fmt.Errorf("policy: %w", err)
+	}
+	if *simulateFile != "" {
+		if err := pol.AddSimulation(*simulateFile, home); err != nil {
+			return 1, fmt.Errorf("simulate: %w", err)
+		}
 	}
 	allow = append(allow, pol.Allow...)
 	for _, c := range pol.Credentials {

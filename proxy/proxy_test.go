@@ -153,7 +153,7 @@ func TestConnectTunnel(t *testing.T) {
 		t.Fatalf("Close left the hijacked CONNECT tunnel open: %v", err)
 	}
 	rec := httptest.NewRecorder()
-	if flow, done := p.admit(rec, "late.example", "late.example:443"); flow != nil || done != nil || rec.Code != http.StatusServiceUnavailable {
+	if flow, done := p.admit(rec, "late.example", "late.example:443", false); flow != nil || done != nil || rec.Code != http.StatusServiceUnavailable {
 		t.Fatal("a late flow survived proxy shutdown")
 	}
 }

@@ -15,8 +15,10 @@ import (
 // keeps or makes its placeholder, and makes the session CA, whose
 // certificate and a bundle of this machine's roots with it go to the
 // session's run directory. A credential whose value cannot be read is
-// left out with a warning: the agent then runs without it.
-func setupCredentials(s *session.Session, bindings []creds.Binding) (creds.Set, *proxy.CA, error) {
+// left out with a warning: the agent then runs without it. The CA
+// vouches for the bound hosts and for the simulated ones (simulated),
+// and is made when there is either.
+func setupCredentials(s *session.Session, bindings []creds.Binding, simulated []string) (creds.Set, *proxy.CA, error) {
 	var set creds.Set
 	var metas []session.Credential
 	var hosts []string
@@ -40,15 +42,16 @@ func setupCredentials(s *session.Session, bindings []creds.Binding) (creds.Set, 
 		hosts = append(hosts, b.Hosts...)
 	}
 	s.Credentials = metas
+	s.Simulated = simulated
 	if err := s.Save(); err != nil {
 		return nil, nil, err
 	}
 	_ = os.Remove(s.CACert())
 	_ = os.Remove(s.CABundle())
-	if len(set) == 0 {
+	if len(set) == 0 && len(simulated) == 0 {
 		return nil, nil, nil
 	}
-	ca, err := proxy.NewCA(hosts)
+	ca, err := proxy.NewCA(append(hosts, simulated...))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -109,10 +112,11 @@ func machineRoots() []byte {
 }
 
 // credEnv: the placeholders under the names the bindings give, and the
-// CA for tools to trust. cert and bundle are the paths the agent sees.
+// CA for tools to trust, when a credential or a simulated host needs it.
+// cert and bundle are the paths the agent sees.
 func credEnv(s *session.Session, cert, bundle string) map[string]string {
 	env := map[string]string{}
-	if len(s.Credentials) == 0 {
+	if len(s.Credentials) == 0 && len(s.Simulated) == 0 {
 		return env
 	}
 	var names []string
@@ -122,7 +126,9 @@ func credEnv(s *session.Session, cert, bundle string) map[string]string {
 			names = append(names, name)
 		}
 	}
-	env["AIRBAG_PLACEHOLDERS"] = strings.Join(names, ",")
+	if len(s.Credentials) > 0 {
+		env["AIRBAG_PLACEHOLDERS"] = strings.Join(names, ",")
+	}
 	env["NODE_EXTRA_CA_CERTS"] = cert
 	if bundle != "" {
 		for _, k := range caVars {

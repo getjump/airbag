@@ -12,7 +12,9 @@
 //
 // Sources, merged in order: built-in rules, ~/.config/airbag/airbag.yaml,
 // airbag.yaml in the workspace (read from the real workspace, so the
-// agent cannot loosen its own rules). A deny anywhere wins.
+// agent cannot loosen its own rules). A deny anywhere wins. Stubs
+// (simulate:) come only from the user's own file and from a file given
+// with --simulate (simulate.go).
 package policy
 
 import (
@@ -26,6 +28,7 @@ import (
 	"github.com/getjump/airbag/creds"
 	"github.com/getjump/airbag/internal/models"
 	pure "github.com/getjump/airbag/policy"
+	"github.com/getjump/airbag/proxy/simulate"
 )
 
 const (
@@ -50,6 +53,7 @@ type File struct {
 	// user's own file may name them, never a repository's.
 	Credentials []creds.Binding `yaml:"credentials"`
 	Rules       []Rule          `yaml:"rules"`
+	// simulate: is decoded apart, strictly (decodeStubs).
 }
 
 type Policy struct {
@@ -60,6 +64,10 @@ type Policy struct {
 	Credentials []creds.Binding
 	Rules       []Rule
 	Sources     []string
+	// Stubs: the simulate: entries, their body files read, in the order
+	// they are tried; Simulation is them compiled, nil for none.
+	Stubs      []simulate.Stub
+	Simulation *simulate.Set
 }
 
 // Builtin: effects that cannot be undone and cannot wait in the outbox.
@@ -102,6 +110,19 @@ func Load(workspace, home string) (*Policy, error) {
 		p.Sources = append(p.Sources, path)
 		if len(f.Credentials) > 0 && path != userFile {
 			return nil, fmt.Errorf("%s: credentials can only be set in %s: a repository must not decide which hosts get your tokens", path, userFile)
+		}
+		stubs, err := decodeStubs(b)
+		if err != nil {
+			return nil, fmt.Errorf("%s: simulate: %w", path, err)
+		}
+		// A repository's stubs would decide what the agent and its programs
+		// are told (a scripted answer from the model API, say), and which
+		// files on this machine are served to them.
+		if len(stubs) > 0 && path != userFile {
+			return nil, fmt.Errorf("%s: simulate can only be set in %s or in a file given with --simulate: a repository must not decide what your programs are told", path, userFile)
+		}
+		if err := p.addStubs(path, stubs, home, false); err != nil {
+			return nil, err
 		}
 		for _, b := range f.Credentials {
 			if err := b.Validate(); err != nil {

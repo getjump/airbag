@@ -27,6 +27,10 @@ link stands for. `airbag review --json` prints
 the whole review as data for editors and CI, with a versioned schema
 (`airbag.review/v1`; fields are only added within a version).
 
+Requests answered from [stubs](simulation.md) are listed under `Simulated`, by
+target and stub (`network.simulated` in the JSON); a request on a simulated host
+that no stub matched is under `Blocked`. None of them reached the host.
+
 It flags persistence (git hooks, shell rc files, CI config, agent settings), new
 executables, changes outside the workspace and values from your `.env` files that
 ended up in the diff. `apply` refuses to overwrite files you changed on the host
