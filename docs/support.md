@@ -9,6 +9,7 @@ release keeps from one version to the next.
 |---|---|---|
 | 1 | Linux on amd64 and arm64, kernel 5.12 or later with unprivileged user namespaces (on Ubuntu 23.10 and later, the AppArmor profile `airbag doctor` prints) | Release binaries. The unit and end-to-end tests pass before each release, and a bug here blocks one |
 | 2 | macOS 13 or later on Apple silicon and Intel: the native prototype | Release binaries and unit tests. It has not run end to end on a real Mac yet; its limits are in [macos.md](macos.md) |
+| 3 | WSL2: the Linux build on a Windows host (Ubuntu under WSL2) | Built from source. An informational CI job runs the end-to-end tests under WSL2, including `test/wsl-interop-e2e.sh`. The supported workspace is the Linux filesystem (`~`), not `/mnt/c`; WSL interop to Windows is contained, see [threat-model.md](threat-model.md#wsl2) |
 | 3 | Everything else Go builds airbag for, and NixOS through the flake | Built from source on a best-effort basis, with no tests promised; fixes are welcome |
 
 The release binaries are static (`CGO_ENABLED=0`) and built with the Go

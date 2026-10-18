@@ -68,3 +68,40 @@ executor exit have been confirmed. Forced or unconfirmed shutdown leaves
 the lease in place, including when airbag itself is killed. The lease is
 not proof that a crashed process tree has been cleaned up, and there is no
 automatic unlock. See [split execution](macos.md#experimental-split-execution).
+
+## WSL2
+
+airbag has no Windows backend; under WSL2 the Linux build runs the Linux
+sandbox on WSL's kernel. The new boundary WSL adds is interop with the Windows
+host, and a Windows process a sandboxed agent could start would run as the user
+outside every Linux boundary airbag sets up. That channel is closed:
+
+- **Interop is unreachable.** WSL registers a binfmt_misc handler (`WSLInterop`)
+  that matches the PE `MZ` magic and hands the file to `/init`, which asks the
+  Windows side to launch it over a Unix socket under `/run/WSL`, named in
+  `WSL_INTEROP`. The binfmt handler is the kernel's and still matches in the
+  sandbox, but the sandbox makes `/run` a private tmpfs, so no interop socket is
+  there: a PE run by any route (an absolute path, `PATH`, a copy in the
+  workspace, `/init` directly, or with `WSL_INTEROP` set by the agent itself)
+  fails and does not reach Windows. As a second layer airbag drops
+  `WSL_INTEROP` and `WSLENV` from the agent's environment and strips the
+  `/mnt/<drive>` Windows-PATH entries, so the agent is not handed a socket name,
+  an environment bridge or a bare `cmd.exe`. `test/wsl-interop-e2e.sh` runs each
+  route and checks from outside that nothing happened on Windows, against
+  controls outside the sandbox where the same commands do reach it.
+- **`/mnt/c` is read, not write.** The Windows drives are drvfs mounts; the
+  recursive read-only remount of the host covers them, so a write to `/mnt/c`
+  fails as anywhere else on the host. Reads are not blocked: as on Linux,
+  whatever the agent reads can reach its model, so Windows files under `/mnt/c`
+  are as exposed as the rest of a readable host. Keep the workspace and
+  secrets on the Linux filesystem (`~`), not under `/mnt/c`.
+- **The Windows host network is unreachable.** The sandbox has only loopback
+  and the proxy, so the WSL gateway and the resolv.conf nameserver (the Windows
+  side) are not reachable from inside; traffic still leaves only through the
+  proxy and its allowlist.
+- **Supported workspace locations.** The Linux filesystem. A workspace under
+  `/mnt/c` is a Windows path: it is read-only in the sandbox and outside
+  airbag's branch-and-apply model, so airbag does not support it.
+
+WSL2 is tier 3 ([support.md](support.md)): built from source, checked by an
+informational CI job, with no release promise.

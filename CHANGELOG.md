@@ -51,6 +51,14 @@ Nothing is released yet; this is what the first release holds.
   ([docs/runtime-policy.md](docs/runtime-policy.md)).
 - A macOS prototype: Seatbelt around the agent and an APFS clone as the
   branch, not yet run on a real Mac ([docs/macos.md](docs/macos.md)).
+- WSL2 is a tier-3 platform: the Linux build runs under WSL2 and an
+  informational CI job runs the end-to-end tests there. An agent cannot use
+  WSL interop to start Windows programs (`cmd.exe`, `powershell.exe`): the
+  interop socket lives under `/run`, which the sandbox makes private. The
+  agent's environment also no longer carries `WSL_INTEROP`, `WSLENV` or the
+  `/mnt/<drive>` Windows-PATH entries. `/mnt/c` is read-only and the Windows
+  host network is unreachable, as on any host. `test/wsl-interop-e2e.sh`
+  checks each route ([docs/threat-model.md](docs/threat-model.md#wsl2)).
 - `install.sh`, `go install` and a Nix flake; `airbag version` reports the
   module version for `go install ...@vX`.
 - Releases built by GoReleaser and published immutable: archives with
