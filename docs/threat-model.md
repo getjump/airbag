@@ -27,6 +27,14 @@ allowlist does not name. Allow narrow names, and where that matters put an `ask`
 rule on `net.connect` for the broad ones: every connection passes it, while
 `net.egress` is predicted from known command lines only.
 
+On macOS, `--allow-trustd` lets the agent reach the system TLS trust service
+(`com.apple.trustd.agent`). The service runs outside the Seatbelt profile and
+can make certificate-related requests that do not pass the allowlist proxy, so
+they are not in the effect log and a session that read a secret file keeps
+the channel. It is off by default, for `airbag run` and the named launchers
+alike; a session with it records `allowlist-proxy+trustd` egress
+([macOS](macos.md#codex-launcher)).
+
 The proxy, the forwards and the control socket run in airbag's process on the
 host and parse what the agent sends. airbag closes the connections there that
 stop carrying data (a request header must arrive within 30 seconds at the

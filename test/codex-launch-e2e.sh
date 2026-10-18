@@ -47,8 +47,9 @@ code=0
 [ "$code" = 2 ] || { cat "$T/out"; fail "malformed launcher exited $code, want 2"; }
 [ ! -e "$AIRBAG_HOME/last" ] || fail "malformed launcher created a session"
 code=0
-"$AIRBAG" codex yolo --allow-trustd=false -- first > "$T/out" 2>&1 || code=$?
+"$AIRBAG" codex yolo -- first > "$T/out" 2>&1 || code=$?
 [ "$code" = 37 ] || { cat "$T/out"; fail "exit $code, want 37"; }
+! grep -q "egress .*trustd" "$T/out" || fail "launcher opened trustd without --allow-trustd"
 grep -q private-state-ok "$T/out" || fail "private state check did not run"
 [ "$(cat README.md)" = original ] || fail "host workspace changed"
 [ "$(cat "$T/source/auth.json")" = host-login ] || fail "host login changed"
