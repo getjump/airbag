@@ -166,37 +166,13 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 // has moved no byte for Limits.Idle (a host that stalls). A protocol
 // upgrade is refused, so no connection outlives its HTTP exchanges.
 func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, g Gate, host string, live *creds.Live, f *flow) {
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		answer(w, "airbag: cannot intercept", http.StatusInternalServerError)
-		return
-	}
-	conn, _, err := hj.Hijack()
-	if err != nil {
-		return
-	}
 	target := r.Host
-	tconn := tls.Server(conn, &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		NextProtos: []string{"http/1.1"},
-		GetCertificate: func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			// The certificate is for the host the CONNECT named, whatever
-			// the client says in SNI: the policy checks were for that one.
-			return p.CA.leaf(host)
-		},
-	})
-	if !f.hold(conn) { // not tconn: see hold
-		return // cut
-	}
-	f.begin()
-	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	_ = tconn.SetDeadline(time.Now().Add(15 * time.Second))
-	if err := tconn.HandshakeContext(context.Background()); err != nil {
-		conn.Close()
+	tconn := p.terminate(w, host, f, func(err error) {
 		p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "TLS to airbag's proxy failed (does the tool trust airbag's CA?): " + err.Error()})
+	})
+	if tconn == nil {
 		return
 	}
-	_ = tconn.SetDeadline(time.Time{})
 
 	check := !p.Allow.explicitIP(host)
 	// The upstream sees the bound host spelled one way, in SNI and Host,
@@ -227,8 +203,6 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, g Gate, host s
 		IdleConnTimeout:       time.Minute,
 	}
 	defer tr.CloseIdleConnections()
-	closed := make(chan struct{})
-	var once sync.Once
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme, pr.Out.URL.Host = "https", target
@@ -310,9 +284,54 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, g Gate, host s
 		p.Log.Add(audit.Event{Kind: "http.request", Target: clipTarget(req.Method + " " + what), Verdict: "allow", Reason: reason})
 		rp.ServeHTTP(w, req)
 	})
+	// The upstream request's scheme is set in Rewrite: see serveTLS.
+	p.serveTLS(tconn, f, handler)
+}
 
+// terminate answers a CONNECT to host and ends the agent's TLS here,
+// with a certificate from p.CA for host. It returns nil when the flow
+// was cut or the handshake failed, which failed is told of.
+func (p *Proxy) terminate(w http.ResponseWriter, host string, f *flow, failed func(error)) *tls.Conn {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		answer(w, "airbag: cannot intercept", http.StatusInternalServerError)
+		return nil
+	}
+	conn, _, err := hj.Hijack()
+	if err != nil {
+		return nil
+	}
+	tconn := tls.Server(conn, &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"http/1.1"},
+		GetCertificate: func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			// The certificate is for the host the CONNECT named, whatever
+			// the client says in SNI: the policy checks were for that one.
+			return p.CA.leaf(host)
+		},
+	})
+	if !f.hold(conn) { // not tconn: see hold
+		return nil // cut
+	}
+	f.begin()
+	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	_ = tconn.SetDeadline(time.Now().Add(15 * time.Second))
+	if err := tconn.HandshakeContext(context.Background()); err != nil {
+		conn.Close()
+		failed(err)
+		return nil
+	}
+	_ = tconn.SetDeadline(time.Time{})
+	return tconn
+}
+
+// serveTLS serves the requests on an intercepted connection with h,
+// until the connection closes.
+func (p *Proxy) serveTLS(tconn *tls.Conn, f *flow, h http.Handler) {
+	closed := make(chan struct{})
+	var once sync.Once
 	srv := &http.Server{
-		Handler:           handler,
+		Handler:           h,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       p.limits().KeepAlive,
 		ConnState: func(_ net.Conn, s http.ConnState) {
@@ -323,8 +342,7 @@ func (p *Proxy) intercept(w http.ResponseWriter, r *http.Request, g Gate, host s
 	}
 	// The server gets the TLS connection inside a watchedConn, not as a
 	// *tls.Conn, so it does not know the connection is TLS: req.TLS is
-	// nil in the handler. Nothing here reads it; the upstream request's
-	// scheme is set in Rewrite.
+	// nil in the handler, and nothing here reads it.
 	go func() { _ = srv.Serve(&oneConn{c: &watchedConn{Conn: tconn, f: f}}) }()
 	<-closed
 	_ = srv.Close()

@@ -6,6 +6,7 @@ package proxy
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/x509"
 	"encoding/base64"
@@ -26,6 +27,7 @@ import (
 	"github.com/getjump/airbag/creds"
 	"github.com/getjump/airbag/internal/netcap"
 	"github.com/getjump/airbag/policy"
+	"github.com/getjump/airbag/proxy/simulate"
 )
 
 // DefaultAllow covers model APIs.
@@ -102,6 +104,10 @@ type Proxy struct {
 	// Limits bound what the agent holds open here (relay.go); a field
 	// left zero is New's.
 	Limits Limits
+	// Simulation answers the requests to the hosts its stubs name in
+	// place of those hosts, which are never contacted (simulated.go); its
+	// HTTPS needs CA, which must vouch for those names. nil is none.
+	Simulation *simulate.Set
 
 	closed bool
 	mu     sync.Mutex
@@ -120,7 +126,7 @@ type Proxy struct {
 // admit registers a connection the agent opens through the proxy,
 // until done is called. Past Limits.MaxFlows it is refused: it answers
 // 503, logs the refusal and returns a nil flow.
-func (p *Proxy) admit(w http.ResponseWriter, host, target string) (f *flow, done func()) {
+func (p *Proxy) admit(w http.ResponseWriter, host, target string, local bool) (f *flow, done func()) {
 	if p.admitting != nil {
 		p.admitting()
 	}
@@ -141,7 +147,7 @@ func (p *Proxy) admit(w http.ResponseWriter, host, target string) (f *flow, done
 		return nil, nil
 	}
 	f = newFlow(lim.Idle, lim.Drain, p.now)
-	f.host, f.target = host, target
+	f.host, f.target, f.local = host, target, local
 	p.flows[f] = true
 	p.mu.Unlock()
 	return f, func() {
@@ -182,12 +188,13 @@ func (p *Proxy) recordAll(events []audit.Event) {
 // before the session read a secret would otherwise carry it out:
 // policy is checked when a connection opens, not on every byte. The
 // read waits for Cut, so every connection is closed first and the log,
-// which other writers may hold up, is written after.
+// which other writers may hold up, is written after. A simulated host's
+// connections stay: they end at the proxy and carry nothing out.
 func (p *Proxy) Cut(keep Allowlist, reason string) {
 	p.mu.Lock()
 	var cut []*flow
 	for f := range p.flows {
-		if !keep.Allows(f.host) {
+		if !keep.Allows(f.host) && !f.local {
 			cut = append(cut, f)
 			delete(p.flows, f)
 		}
@@ -338,13 +345,13 @@ func (w paced) WriteHeader(code int) {
 func (w paced) Write(b []byte) (int, error) {
 	if len(b) == 0 { // still sends the header
 		w.renew()
-		return w.ResponseWriter.Write(b)
+		return w.ResponseWriter.Write(b) //nolint:gosec // G705: an answer airbag serves (a mirrored file, a stub the user wrote), not markup made from the request
 	}
 	n := 0
 	for len(b) > 0 {
 		c := min(len(b), pacedChunk)
 		w.renew()
-		m, err := w.ResponseWriter.Write(b[:c])
+		m, err := w.ResponseWriter.Write(b[:c]) //nolint:gosec // G705: as above
 		n += m
 		if err != nil {
 			return n, err
@@ -449,6 +456,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.serveMirror(w, r)
 		return
 	}
+	// Before every check that leads to a dial: a simulated host is
+	// answered here and never reached, allowed or not.
+	if sport := cmp.Or(port, "80"); p.Simulation.Covers(host, sport) {
+		p.serveSimulated(w, r, host, sport, target)
+		return
+	}
 	if !p.Allow.Allows(host) && (g == nil || !g.AllowsHost(host)) {
 		if Registries.Allows(host) {
 			p.Log.Add(audit.Event{Kind: "net.egress", Target: target, Verdict: "deny", Reason: "registry: use the mirror"})
@@ -477,7 +490,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	f, done := p.admit(w, host, target)
+	f, done := p.admit(w, host, target, false)
 	if f == nil {
 		return
 	}
