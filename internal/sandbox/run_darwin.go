@@ -118,7 +118,18 @@ func Run(s *session.Session, allow proxy.Allowlist, pol *policy.Policy) (int, er
 	if _, err := os.Stat(s.CABundle()); err == nil {
 		bundle = s.CABundle()
 	}
-	env := agentEnvFor(s, fmt.Sprintf("127.0.0.1:%d", port), binDir, tmp, credEnv(s, s.CACert(), bundle))
+	extra := credEnv(s, s.CACert(), bundle)
+	// The profile hides the Keychain, where an agent such as Claude Code
+	// keeps its login on a Mac; without this the agent finds only a stale
+	// file login and fails to authenticate.
+	login, note := hostLoginEnv(s.Argv, os.Getenv, readKeychain, time.Now())
+	for k, v := range login {
+		extra[k] = v
+	}
+	if note != "" {
+		fmt.Fprintln(os.Stderr, note)
+	}
+	env := agentEnvFor(s, fmt.Sprintf("127.0.0.1:%d", port), binDir, tmp, extra)
 	env = append(env,
 		"AIRBAG_CONTROL="+s.ControlSock(), "AIRBAG_SHIM_DIR="+binDir, "TMPDIR="+tmp+"/",
 		"XDG_CACHE_HOME="+cache, "GOCACHE="+filepath.Join(cache, "go-build"),

@@ -13,8 +13,10 @@ storage are summed up in [experiments.md](experiments.md).
 1. **Use the macOS prototype on real work** (docs/macos.md) with Claude Code
    and Codex. CI runs its unit tests, `test/e2e.sh` and `cmd/airbag-macprobe` on
    hosted macOS, and Claude Code's `!` command and Bash tool against a mock
-   API. A real Claude account login remains unvalidated; Keychain is hidden,
-   so the current profile needs an API key or OAuth token in the environment.
+   API. A real Claude account login works: Keychain stays hidden, and airbag
+   hands Claude Code the access token of that login (checked with `claude -p`
+   on macOS 26.6). A session that outlives the token needs the login refreshed
+   outside airbag.
    The probe's N2 and N3 failed there, so the clone stays the branch.
 2. **The evaluation** in [evaluation.md](evaluation.md): the comparison runs,
    then a narrow release to about ten developers.
