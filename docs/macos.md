@@ -150,10 +150,20 @@ $ ./airbag review              # then apply, apply --branch NAME, or discard
 ```
 
 Claude Code's macOS login is stored in Keychain, which this profile hides.
-Provide `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the host environment
-before starting airbag. `claude setup-token` outside airbag can create an OAuth
-token. A "Login expired" message inside the sandbox can mean the login is
-inaccessible, even when `claude auth status` outside it reports logged in.
+airbag reads that login in its own process, outside the profile, and hands
+Claude Code only its access token, as `CLAUDE_CODE_OAUTH_TOKEN`. The refresh
+token stays on the host: the agent cannot extend its own access, and a refresh
+inside the sandbox cannot rotate the host's login. The run prints how long the
+token is valid. An access token lasts hours, not days, so a session that
+outlives it needs the login refreshed by running `claude` once outside airbag,
+then `airbag run --session ID` again.
+
+When `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN`
+is set in the host environment, airbag uses that and does not read the
+Keychain. `claude setup-token` outside airbag creates a long-lived OAuth token
+for that. Without either, Claude Code inside the sandbox finds only a file
+login, which is often stale, and reports "OAuth session expired" even when
+`claude auth status` outside it reports logged in.
 
 airbag sets both `TMPDIR` and `CLAUDE_CODE_TMPDIR` to the session's temp
 directory. Claude Code uses `/tmp` for its own files on macOS unless the
